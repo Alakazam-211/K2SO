@@ -378,23 +378,9 @@ function WorktreeDetailPane({ worktreeId, projectPath }: { worktreeId: string; p
                   )}
                 </div>
 
-                <div className="border-t border-[var(--color-border)] pt-4 space-y-3">
-                  <button
-                    className="w-full px-4 py-2 text-xs font-medium bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent)]/90 transition-colors no-drag cursor-pointer"
-                    onClick={async () => {
-                      try {
-                        await invoke('git_merge_worktree', { projectPath, workspaceId: worktreeId })
-                      } catch (e) {
-                        console.error('[worktree] Merge failed:', e)
-                      }
-                    }}
-                  >
-                    AI Merge Worktree/Branch
-                  </button>
-                  <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
-                    If the work is not right, go to the Chat tab to address the issue with the agent before merging.
-                  </p>
-                </div>
+                <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed border-t border-[var(--color-border)] pt-4">
+                  If the work is not right, go to the Chat tab to address the issue with the agent before merging.
+                </p>
               </div>
             ) : (
               <div className="flex items-center justify-center h-full">

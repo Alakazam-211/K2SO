@@ -12,159 +12,31 @@
 
 use k2so_core::db::schema::Project;
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
 
 use crate::daemon_client::DaemonClient;
 use crate::editors::EditorInfo;
 
 // ── Re-exported types ──────────────────────────────────────────────────
 
-pub use k2so_core::projects_ops::{AddFromPathResult, IconResult};
+pub use k2so_core::projects_ops::IconResult;
 
 fn daemon() -> Result<DaemonClient, String> {
     DaemonClient::try_connect()
 }
 
-// ── Tauri Commands (proxies) ───────────────────────────────────────────
-
-#[tauri::command]
-pub fn projects_list() -> Result<Vec<Project>, String> {
-    daemon()?.cli_get_json("/cli/projects/list", &[])
-}
-
-#[tauri::command]
-pub fn projects_create(
-    app: AppHandle,
-    name: String,
-    path: String,
-    color: Option<String>,
-) -> Result<Project, String> {
-    let r = daemon()?.cli_post_json_decode(
-        "/cli/projects/create",
-        &json!({ "name": name, "path": path, "color": color }),
-    )?;
-    let _ = app.emit("sync:projects", ());
-    Ok(r)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub fn projects_update(
-    app: AppHandle,
-    id: String,
-    name: Option<String>,
-    color: Option<String>,
-    tab_order: Option<i64>,
-    worktree_mode: Option<i64>,
-    pinned: Option<i64>,
-    manually_active: Option<i64>,
-    icon_url: Option<String>,
-    agent_enabled: Option<i64>,
-    heartbeat_enabled: Option<i64>,
-    agent_mode: Option<String>,
-    state_id: Option<String>,
-    heartbeat_mode: Option<String>,
-    heartbeat_schedule: Option<String>,
-) -> Result<Project, String> {
-    let r = daemon()?.cli_post_json_decode(
-        "/cli/projects/update",
-        &json!({
-            "id": id,
-            "name": name,
-            "color": color,
-            "tabOrder": tab_order,
-            "worktreeMode": worktree_mode,
-            "pinned": pinned,
-            "manuallyActive": manually_active,
-            "iconUrl": icon_url,
-            "agentEnabled": agent_enabled,
-            "heartbeatEnabled": heartbeat_enabled,
-            "agentMode": agent_mode,
-            "stateId": state_id,
-            "heartbeatMode": heartbeat_mode,
-            "heartbeatSchedule": heartbeat_schedule,
-        }),
-    )?;
-    let _ = app.emit("sync:projects", ());
-    Ok(r)
-}
-
-#[tauri::command]
-pub fn projects_enable_worktrees(
-    app: AppHandle,
-    project_id: String,
-) -> Result<Project, String> {
-    let r = daemon()?.cli_post_json_decode(
-        "/cli/projects/enable-worktrees",
-        &json!({ "projectId": project_id }),
-    )?;
-    let _ = app.emit("sync:projects", ());
-    Ok(r)
-}
-
-#[tauri::command]
-pub fn projects_delete(app: AppHandle, id: String) -> Result<(), String> {
-    daemon()?
-        .cli_post_json("/cli/projects/delete", &json!({ "id": id }))?;
-    let _ = app.emit("sync:projects", ());
-    Ok(())
-}
-
-#[tauri::command]
-pub fn workspace_set_nav_visible(id: String, visible: bool) -> Result<(), String> {
-    daemon()?
-        .cli_post_json(
-            "/cli/workspaces/set-nav-visible",
-            &json!({ "id": id, "visible": visible }),
-        )
-        .map(|_| ())
-}
-
-#[tauri::command]
-pub fn projects_reorder(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
-    daemon()?
-        .cli_post_json("/cli/projects/reorder", &json!({ "ids": ids }))?;
-    let _ = app.emit("sync:projects", ());
-    Ok(())
-}
-
-#[tauri::command]
-pub fn projects_add_from_path(
-    app: AppHandle,
-    path: String,
-) -> Result<AddFromPathResult, String> {
-    let r: AddFromPathResult = daemon()?
-        .cli_post_json_decode("/cli/projects/add-from-path", &json!({ "path": path }))?;
-    let _ = app.emit("sync:projects", ());
-    Ok(r)
-}
-
-#[tauri::command]
-pub fn projects_add_without_git(
-    app: AppHandle,
-    path: String,
-) -> Result<Project, String> {
-    let r = daemon()?.cli_post_json_decode(
-        "/cli/projects/add-without-git",
-        &json!({ "path": path }),
-    )?;
-    let _ = app.emit("sync:projects", ());
-    Ok(r)
-}
-
-#[tauri::command]
-pub fn projects_init_git_and_open(
-    app: AppHandle,
-    path: String,
-    branch: Option<String>,
-) -> Result<Project, String> {
-    let r = daemon()?.cli_post_json_decode(
-        "/cli/projects/init-git-and-open",
-        &json!({ "path": path, "branch": branch }),
-    )?;
-    let _ = app.emit("sync:projects", ());
-    Ok(r)
-}
+// ── Tauri Commands ─────────────────────────────────────────────────────
+//
+// Plan B cleanup: the DB-backed project CRUD proxies (`projects_list`,
+// `projects_create`, `projects_update`, `projects_delete`,
+// `projects_reorder`, `projects_add_*`, `projects_init_git_and_open`,
+// `projects_enable_worktrees`, `projects_get_icon`, `projects_detect_icon`,
+// `projects_clear_icon`, `projects_touch_interaction*`, and
+// `workspace_set_nav_visible`) were deleted — the renderer reaches that
+// data host-aware via `/cli/*` on the active daemon. Only the HOST-only
+// commands below remain (native pickers, OS-integration "open in" verbs,
+// editor discovery, and the focus-window opener); they still proxy
+// through the LOCAL daemon via `daemon()` where they need DB lookups.
 
 /// HOST: native folder picker dialog.
 #[tauri::command]
@@ -187,27 +59,6 @@ pub fn projects_open_in_finder(path: String) -> Result<(), String> {
     daemon()?
         .cli_post_json("/cli/projects/open-in-finder", &json!({ "path": path }))
         .map(|_| ())
-}
-
-#[tauri::command]
-pub fn projects_get_icon(
-    path: String,
-    project_id: Option<String>,
-) -> Result<IconResult, String> {
-    let pid = project_id.unwrap_or_default();
-    let mut params: Vec<(&str, &str)> = vec![("path", &path)];
-    if !pid.is_empty() {
-        params.push(("project_id", &pid));
-    }
-    daemon()?.cli_get_json("/cli/projects/get-icon", &params)
-}
-
-#[tauri::command]
-pub fn projects_detect_icon(project_id: String) -> Result<IconResult, String> {
-    daemon()?.cli_post_json_decode(
-        "/cli/projects/detect-icon",
-        &json!({ "projectId": project_id }),
-    )
 }
 
 /// HOST: file picker dialog. After the user selects an image we
@@ -251,28 +102,6 @@ pub async fn projects_upload_icon(
             Ok(r)
         }
     }
-}
-
-#[tauri::command]
-pub fn projects_clear_icon(app: AppHandle, project_id: String) -> Result<(), String> {
-    daemon()?
-        .cli_post_json("/cli/projects/clear-icon", &json!({ "projectId": project_id }))?;
-    let _ = app.emit("sync:projects", ());
-    Ok(())
-}
-
-#[tauri::command]
-pub fn projects_touch_interaction(id: String) -> Result<(), String> {
-    daemon()?
-        .cli_post_json("/cli/projects/touch-interaction", &json!({ "id": id }))
-        .map(|_| ())
-}
-
-#[tauri::command]
-pub fn projects_touch_interaction_clear(id: String) -> Result<(), String> {
-    daemon()?
-        .cli_post_json("/cli/projects/touch-interaction-clear", &json!({ "id": id }))
-        .map(|_| ())
 }
 
 #[tauri::command]

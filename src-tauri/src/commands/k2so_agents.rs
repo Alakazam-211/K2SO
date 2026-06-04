@@ -168,51 +168,10 @@ pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), Stri
     k2so_core::workspace::agent::delete(project_path, name)
 }
 
-/// 0.37.4: resolve the workspace's primary agent display name.
-///
-/// Routed through the daemon HTTP API (daemon-first) so the daemon's
-/// mtime-cache is the single source of truth — Tauri reads the same
-/// answer the CLI verb / sub-agents see. Falls back to the
-/// in-process helper only if the daemon is unreachable; reads remain
-/// total (always return a string).
-#[tauri::command]
-pub fn k2so_workspace_agent_display_name(project_path: String) -> Result<String, String> {
-    if let Ok(client) = crate::daemon_client::DaemonClient::try_connect() {
-        if let Ok(body) = client.cli_get(
-            "/cli/workspace/agent-display-name",
-            &[("project", &project_path)],
-        ) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(s) = v.get("display_name").and_then(|d| d.as_str()) {
-                    return Ok(s.to_string());
-                }
-            }
-        }
-    }
-    Ok(k2so_core::workspace::display::agent_display_name(&project_path))
-}
-
-/// 0.37.4: set the workspace's primary agent display name.
-///
-/// Routed through the daemon HTTP API. The daemon writes AGENT.md
-/// (atomic temp-file rename), invalidates its display-name cache, and
-/// emits `SyncProjects`. Tauri's local cache lives in the same shared
-/// `k2so-core` lib, but the daemon-side mtime check picks up the
-/// fresh write on the next read regardless of which process did the
-/// write — so single-source-of-truth holds even if the daemon is
-/// hot-restarted between Tauri invocations.
-#[tauri::command]
-pub fn k2so_workspace_set_agent_display_name(
-    project_path: String,
-    name: String,
-) -> Result<(), String> {
-    let client = crate::daemon_client::DaemonClient::try_connect()?;
-    client.cli_get(
-        "/cli/workspace/set-agent-display-name",
-        &[("project", &project_path), ("name", &name)],
-    )?;
-    Ok(())
-}
+// Plan B cleanup — `k2so_workspace_agent_display_name` +
+// `k2so_workspace_set_agent_display_name` deleted. Both routed daemon
+// data (`/cli/workspace/{agent-display-name,set-agent-display-name}`);
+// the renderer now reaches them host-aware via `daemonCli*`.
 
 // `k2so_agents_delete_inner` shim removed in 0.39.0 — zero callers
 // across src-tauri/ and the JS frontend. The implementation in
@@ -574,55 +533,10 @@ pub fn k2so_agents_build_launch(
     )
 }
 
-/// Build a *bare resume* launch command for the AgentChatPane (the
-/// pinned Chat tab). Unlike `k2so_agents_build_launch`, this does NOT
-/// inject the agent's WAKEUP.md as a positional message and does NOT
-/// prepend `/compact` — the Chat tab is for chatting with an existing
-/// agent session, not for autonomously firing a triage. If we have a
-/// saved session id for the workspace AND its JSONL is on disk, we
-/// add `--resume <id>`; otherwise we pre-allocate a UUID, persist
-/// it to SQL, and use `--session-id <new>`.
-///
-/// **0.37.5 daemon-first refactor.** The actual logic lives in
-/// `k2so_core::workspace::resume_chat::resolve_resume_chat_args` and is
-/// served via the daemon route `/cli/workspace/resume-chat-args`.
-/// This Tauri command is a thin HTTP proxy — every consumer (the
-/// pinned tab here, future mobile companion, MCP server, CLI verb)
-/// goes through the same daemon route, so the SQL lookup + JSONL
-/// existence check + pre-allocate logic isn't duplicated across
-/// thin clients. Falls back to in-process k2so-core call only if
-/// the daemon is unreachable (offline degradation parity with the
-/// other 0.37.4+ display-name commands).
-///
-/// `agent_name` parameter is kept for back-compat with renderer call
-/// sites but is unused — the workspace's primary agent is implicit
-/// post-unification, and resume_chat_args is keyed purely on
-/// project_path.
-#[tauri::command]
-pub fn k2so_agents_resume_chat_args(
-    project_path: String,
-    agent_name: String,
-) -> Result<serde_json::Value, String> {
-    let _ = agent_name;
-    if let Ok(client) = crate::daemon_client::DaemonClient::try_connect() {
-        if let Ok(body) = client.cli_get(
-            "/cli/workspace/resume-chat-args",
-            &[("project", &project_path)],
-        ) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if v.get("error").is_none() {
-                    return Ok(v);
-                }
-            }
-        }
-    }
-    // Daemon unreachable — degrade to in-process resolve via the
-    // shared k2so-core helper. Same logic, same SQL writes, same
-    // result; the daemon-routed path is preferred for cache + lock
-    // alignment but a Tauri-only build still works on its own.
-    k2so_core::workspace::resume_chat::resolve_resume_chat_args(&project_path)
-        .map(|out| out.to_json())
-}
+// Plan B cleanup — `k2so_agents_resume_chat_args` deleted. It routed
+// daemon data (`/cli/workspace/resume-chat-args`); the renderer now
+// reaches it host-aware via `daemonCli*`. The shared resolver lives in
+// `k2so_core::workspace::resume_chat::resolve_resume_chat_args`.
 
 /// Regenerate the workspace-root SKILL.md — the lead agent's complete
 /// operating manual. Written to `<project-root>/SKILL.md` with a

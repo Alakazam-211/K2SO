@@ -1,16 +1,10 @@
 pub mod projects;
-pub mod workspaces;
-pub mod focus_groups;
-pub mod workspace_sections;
-pub mod agents;
-// Phase 2 Unit 3 — `commands::terminal` deleted. PTY lifecycle
-// (create/kill/resize/scroll/etc.) moved to k2so-daemon as
-// `/cli/terminal/*` routes. The TerminalManager singleton lives
-// in k2so-core (still re-exported via `crate::terminal::*` in lib.rs);
-// the daemon's `terminal_event_sink` broadcasts events that
-// daemon_events.rs re-emits, so the renderer event contract is
-// unchanged.
-pub mod git;
+// Plan B cleanup — `workspaces`, `focus_groups`, `workspace_sections`,
+// `agents` (presets), `git`, `states`, `workspace_layouts`, `timer`
+// command files deleted. Every command they held routed daemon data and
+// the renderer now reaches that data host-aware via `daemonCli*` →
+// `/cli/*` on the active daemon. No host-only/lifecycle command remained
+// in any of these modules, so the whole files were removed.
 pub mod settings;
 pub mod workspace_ops;
 // Phase 2 Unit 2 — `assistant` command shims deleted. The renderer
@@ -21,9 +15,7 @@ pub mod workspace_ops;
 // Phase 2 Unit 6 — `chat_history` command shims deleted alongside
 // the rest of Unit 6's batch. The renderer hits `/cli/chat/*` on
 // k2so-daemon directly.
-pub mod timer;
 pub mod updater;
-pub mod workspace_layouts;
 // Phase 2 Unit 5 — `claude_auth` command shims deleted. The renderer
 // hits `/cli/claude-auth/*` on k2so-daemon directly; no Tauri-side
 // command surface for it remains. Scheduler ownership (the launchd
@@ -32,7 +24,6 @@ pub mod workspace_layouts;
 // the Tauri app is closed.
 pub mod k2so_agents;
 pub mod format;
-pub mod states;
 // Phase 2 Unit 1 — `companion` command shims deleted. The renderer
 // hits `/cli/companion/*` on k2so-daemon directly; no Tauri-side
 // command surface for it remains.

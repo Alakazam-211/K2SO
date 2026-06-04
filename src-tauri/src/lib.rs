@@ -949,56 +949,23 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // 0.39.x (Issue #6): webview liveness watchdog heartbeat.
             renderer_heartbeat,
-            // Projects
-            commands::projects::projects_list,
-            commands::projects::projects_create,
-            commands::projects::projects_update,
-            commands::projects::projects_delete,
-            commands::projects::projects_reorder,
-            commands::projects::workspace_set_nav_visible,
-            commands::projects::projects_add_from_path,
-            commands::projects::projects_add_without_git,
-            commands::projects::projects_init_git_and_open,
+            // Projects — host-only verbs (folder picker, icon upload,
+            // OS-integration "open in" actions, editor discovery, focus
+            // window). All DB-backed project CRUD moved off the Tauri
+            // surface; the renderer reaches it host-aware via `/cli/*`.
             commands::projects::projects_pick_folder,
             commands::projects::projects_open_in_finder,
-            commands::projects::projects_get_icon,
-            commands::projects::projects_detect_icon,
             commands::projects::projects_upload_icon,
-            commands::projects::projects_clear_icon,
-            commands::projects::projects_touch_interaction,
-            commands::projects::projects_touch_interaction_clear,
             commands::projects::projects_open_in_editor,
             commands::projects::projects_open_in_terminal,
             commands::projects::projects_get_editors,
             commands::projects::projects_get_all_editors,
             commands::projects::projects_refresh_editors,
             commands::projects::projects_open_focus_window,
-            commands::projects::projects_enable_worktrees,
-            // Workspaces
-            commands::workspaces::workspaces_list,
-            commands::workspaces::workspaces_create,
-            commands::workspaces::workspaces_delete,
-            // Focus Groups
-            commands::focus_groups::focus_groups_list,
-            commands::focus_groups::focus_groups_create,
-            commands::focus_groups::focus_groups_update,
-            commands::focus_groups::focus_groups_delete,
-            commands::focus_groups::focus_groups_assign_project,
-            commands::focus_groups::focus_groups_reconcile_project,
-            // Workspace Sections
-            commands::workspace_sections::sections_list,
-            commands::workspace_sections::sections_create,
-            commands::workspace_sections::sections_update,
-            commands::workspace_sections::sections_delete,
-            commands::workspace_sections::sections_reorder,
-            commands::workspace_sections::sections_assign_workspace,
-            // Agent Presets
-            commands::agents::presets_list,
-            commands::agents::presets_create,
-            commands::agents::presets_update,
-            commands::agents::presets_delete,
-            commands::agents::presets_reorder,
-            commands::agents::presets_reset_built_ins,
+            // Plan B cleanup — `workspaces_*`, `focus_groups_*`,
+            // `sections_*`, and `presets_*` (agents) command surfaces
+            // deleted. All routed daemon data; the renderer reaches it
+            // host-aware via `/cli/*` on the active daemon.
             // Phase 2 Unit 6 — `commands::filesystem::*` shims
             // deleted. Renderer hits `/cli/fs/*` on the daemon.
             // 0.37.9 — macOS permissions surface for Settings UI
@@ -1015,10 +982,10 @@ pub fn run() {
             // Filesystem watcher
             watcher::fs_watch_dir,
             watcher::fs_unwatch_dir,
-            // Settings
-            commands::settings::settings_get,
-            commands::settings::settings_update,
-            commands::settings::settings_reset,
+            // Settings — host-only verbs (CLI symlink install, document-
+            // edited flag, relaunch). `settings_{get,update,reset}` moved
+            // off the Tauri surface; the renderer reaches settings data
+            // host-aware via `/cli/settings/*`.
             commands::settings::cli_install_status,
             commands::settings::cli_install,
             commands::settings::cli_uninstall,
@@ -1039,32 +1006,10 @@ pub fn run() {
             // via AppHandle::emit so the renderer's
             // `listen('terminal:grid:<id>')` subscribers see the
             // same events as before.
-            // Git
-            commands::git::git_info,
-            commands::git::git_branches,
-            commands::git::git_worktrees,
-            commands::git::git_create_worktree,
-            commands::git::git_remove_worktree,
-            commands::git::git_reopen_worktree,
-            commands::git::git_changes,
-            // Git Diff
-            commands::git::git_diff_file,
-            commands::git::git_diff_summary,
-            commands::git::git_diff_between_branches,
-            commands::git::git_file_content_at_ref,
-            // Git Staging
-            commands::git::git_stage_file,
-            commands::git::git_unstage_file,
-            commands::git::git_stage_all,
-            // Git Commit
-            commands::git::git_commit,
-            // Git Merge
-            commands::git::git_merge_branch,
-            commands::git::git_merge_status,
-            commands::git::git_abort_merge,
-            commands::git::git_resolve_conflict,
-            commands::git::git_delete_branch,
-            commands::git::git_prune_worktrees,
+            // Plan B cleanup — the entire `git_*` command surface
+            // (info/branches/worktrees/diff/staging/commit/merge) deleted.
+            // All routed daemon data; the renderer reaches it host-aware
+            // via `/cli/git/*` on the active daemon.
             // Workspace Ops
             commands::workspace_ops::workspace_split_pane,
             commands::workspace_ops::workspace_close_pane,
@@ -1078,28 +1023,23 @@ pub fn run() {
             // daemon directly.
             // Phase 2 Unit 6 — `commands::chat_history::*` shims
             // deleted. Renderer hits `/cli/chat/*` on the daemon.
-            // Timer
-            commands::timer::timer_entries_list,
-            commands::timer::timer_entry_create,
-            commands::timer::timer_entry_delete,
-            commands::timer::timer_entries_export,
+            // Plan B cleanup — `timer_*` command surface deleted. Routed
+            // daemon data; the renderer reaches it host-aware via
+            // `/cli/timer/*` on the active daemon.
             // Updater
             commands::updater::check_for_update,
             commands::updater::get_current_version,
             commands::updater::broadcast_sync,
-            // Workspace Layouts (per-(project, workspace) pane/tab JSON; renamed from workspace_sessions in 0.37.0)
-            commands::workspace_layouts::workspace_layout_save,
-            commands::workspace_layouts::workspace_layout_load,
-            commands::workspace_layouts::workspace_layout_load_all,
-            commands::workspace_layouts::workspace_layout_delete,
+            // Plan B cleanup — `workspace_layout_*` command surface
+            // deleted. Routed daemon data; the renderer reaches it
+            // host-aware via `/cli/workspace-layouts/*` on the active
+            // daemon.
             // Claude Auth: Phase 2 Unit 5 — moved to daemon
             // (`/cli/claude-auth/*`). Renderer hits the daemon
             // directly; no Tauri command surface remains.
             // K2SO Agents
             commands::k2so_agents::k2so_agents_list,
             commands::k2so_agents::k2so_agents_create,
-            commands::k2so_agents::k2so_workspace_agent_display_name,
-            commands::k2so_agents::k2so_workspace_set_agent_display_name,
             commands::k2so_agents::k2so_agents_delete,
             commands::k2so_agents::k2so_agents_get_heartbeat,
             commands::k2so_agents::k2so_agents_set_heartbeat,
@@ -1110,12 +1050,9 @@ pub fn run() {
             commands::k2so_agents::k2so_session_set_surfaced,
             commands::k2so_agents::k2so_chat_refresh_broadcast,
             commands::k2so_agents::k2so_agents_clear_session_id,
-            // Workspace States
-            commands::states::states_list,
-            commands::states::states_get,
-            commands::states::states_create,
-            commands::states::states_update,
-            commands::states::states_delete,
+            // Plan B cleanup — `states_*` command surface deleted. Routed
+            // daemon data; the renderer reaches it host-aware via
+            // `/cli/states/*` on the active daemon.
             // Phase 2.1c Item 2 — workspace inbox primitive (replaces
             // the legacy `k2so_agents_work_*` + `k2so_agents_workspace_inbox_list`
             // calls). Thin wrappers around `k2so_core::inbox::*` that
@@ -1173,7 +1110,6 @@ pub fn run() {
             commands::k2so_agents::k2so_agents_generate_workspace_claude_md,
             commands::k2so_agents::k2so_agents_disable_workspace_claude_md,
             commands::k2so_agents::k2so_agents_build_launch,
-            commands::k2so_agents::k2so_agents_resume_chat_args,
             commands::k2so_agents::k2so_agents_review_queue,
             commands::k2so_agents::k2so_agents_review_approve,
             commands::k2so_agents::k2so_agents_review_reject,
@@ -1251,12 +1187,12 @@ pub fn run() {
             commands::daemon::daemon_log_path,
             commands::daemon::daemon_log_tail,
             commands::daemon::daemon_ws_url,
-            commands::daemon::get_keep_daemon_on_quit,
-            commands::daemon::set_keep_daemon_on_quit,
-            // K2 Connect — point the host-unaware proxy commands
-            // (projects/git/agents/states/layouts/settings/timer …) at a
-            // remote daemon, or clear back to the local bundled daemon.
-            commands::daemon::set_active_daemon,
+            // Plan B cleanup — `get/set_keep_daemon_on_quit` and the
+            // `set_active_daemon` proxy chokepoint deleted. The keep-on-
+            // quit toggle is read/written host-aware via `/cli/settings/*`;
+            // the global daemon override is gone (DaemonClient always
+            // resolves the local daemon, and daemon-data routing is
+            // host-aware in the renderer).
             // K2 Connect — cross-platform keychain for remembered
             // remote-host tokens (macOS/Linux/Windows via `keyring`).
             commands::secrets::k2_secret_set,

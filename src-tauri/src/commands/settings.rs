@@ -16,77 +16,21 @@
 //!
 //! What's left in this file:
 //!
-//! - A `pub use` re-export of `AppSettings` so any external
-//!   importers keep compiling without rename churn.
-//! - `settings_get` / `settings_update` / `settings_reset` Tauri
-//!   commands, thin daemon proxies via `DaemonClient`.
 //! - CLI-install / window-edited / relaunch helpers — genuine HOST
 //!   concerns (sudo-bound symlink writes, native window AppKit
 //!   calls, `.app` relaunch). They stay because the daemon has no
 //!   business writing `/usr/local/bin/k2so` or talking to AppKit.
+//!
+//! Plan B cleanup: the `settings_{get,update,reset}` daemon proxies
+//! (and their `connect()` helper + the now-unused `AppSettings`
+//! re-export) were deleted — the renderer reaches settings data
+//! host-aware via `/cli/settings/*` on the active daemon. Any Rust
+//! caller that still needs the type imports it from
+//! `k2so_core::app_settings::AppSettings` directly.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter, Manager};
-
-use crate::daemon_client::DaemonClient;
-
-// ── Settings types — now re-exported from k2so-core ─────────────────────
-
-pub use k2so_core::app_settings::AppSettings;
-
-// ── Tauri commands — daemon proxies ─────────────────────────────────────
-
-/// Connect to the daemon — wrapped here so the three Tauri shims below
-/// share one error message format. On a fresh install or a daemon
-/// restart the `~/.k2so/daemon.{port,token}` files may briefly be
-/// stale; we surface a clear error and let the renderer's existing
-/// retry path handle it.
-fn connect() -> Result<DaemonClient, String> {
-    DaemonClient::try_connect().map_err(|e| format!("daemon not reachable: {e}"))
-}
-
-#[tauri::command]
-pub fn settings_get() -> Result<AppSettings, String> {
-    let client = connect()?;
-    let body = client.cli_get("/cli/settings/get", &[])?;
-    serde_json::from_str::<AppSettings>(&body)
-        .map_err(|e| format!("decode settings_get body: {e}"))
-}
-
-#[tauri::command]
-pub fn settings_update(
-    app: AppHandle,
-    updates: serde_json::Value,
-) -> Result<AppSettings, String> {
-    let client = connect()?;
-    let body = client.cli_post_json("/cli/settings/update", &updates)?;
-    let merged: AppSettings = serde_json::from_str(&body)
-        .map_err(|e| format!("decode settings_update body: {e}"))?;
-    // The daemon already invalidated companion sessions inside
-    // `app_settings::update()` if creds changed. We still emit
-    // `sync:settings` + `companion:sessions_invalidated` so the
-    // renderer's existing listeners (which trigger a re-fetch +
-    // session-list refresh) fire. Best-effort — emit failures don't
-    // change persisted state.
-    let _ = app.emit("sync:settings", ());
-    let _ = app.emit("companion:sessions_invalidated", ());
-    Ok(merged)
-}
-
-#[tauri::command]
-pub fn settings_reset(app: AppHandle) -> Result<AppSettings, String> {
-    let client = connect()?;
-    // Empty JSON body — `reset` ignores the payload. The
-    // `&serde_json::json!({})` argument keeps `cli_post_json`'s
-    // signature uniform with `update`.
-    let body = client.cli_post_json("/cli/settings/reset", &serde_json::json!({}))?;
-    let defaults: AppSettings = serde_json::from_str(&body)
-        .map_err(|e| format!("decode settings_reset body: {e}"))?;
-    let _ = app.emit("companion:sessions_invalidated", ());
-    let _ = app.emit("sync:settings", ());
-    Ok(defaults)
-}
+use tauri::{AppHandle, Manager};
 
 // ── CLI Install (HOST: writes /usr/local/bin/k2so symlink) ──────────────
 

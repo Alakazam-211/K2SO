@@ -106,10 +106,9 @@ describe('getDaemonWs host-awareness', () => {
       lastConnectedAt: null,
     }
     useConnectHostStore.getState().selectHost(host)
-    // selectHost pushes the active daemon into the Tauri proxy layer via
-    // `invoke('set_active_daemon', …)`; that's expected. The assertion
-    // below is about getDaemonWs NOT invoking to resolve creds — so clear
-    // the mock after the switch to isolate the creds-resolution path.
+    // The assertion below is about getDaemonWs NOT invoking to resolve
+    // creds for a remote host — so clear the mock after the switch to
+    // isolate the creds-resolution path.
     invokeMock.mockClear()
     // Invalidate any cached local creds so we prove the remote path
     // doesn't fall back to invoke.

@@ -70,31 +70,6 @@ pub fn daemon_status() -> DaemonStatusResponse {
     }
 }
 
-/// Point the Tauri→daemon proxy layer (every `DaemonClient`, used by the
-/// `projects_list` / git / agents / states / layouts / settings / timer
-/// command modules) at a REMOTE K2 Connect daemon — or clear back to the
-/// local bundled daemon.
-///
-/// The renderer's connect-host store calls this whenever the active host
-/// changes:
-///   - remote host → `base` = the host's `<scheme>://<authority>` (no
-///     trailing slash, port 443 omitted for secure), `token` = the host's
-///     session token. ALL host-unaware `invoke('projects_list')`-style
-///     commands then route to the remote daemon.
-///   - `'local'` → both `null` → clears the override; commands fall back
-///     to `~/.k2so/daemon.{port,token}`, byte-identical to before.
-///
-/// Installing the override BEFORE the renderer remounts `<App>` (which
-/// re-fires `fetchProjects()`) is what keeps the local/remote data planes
-/// from crossing. Setting `base` without a `token` (or vice-versa) clears
-/// to local rather than installing a tokenless remote — the latter would
-/// surface as the daemon's "Invalid or missing auth token".
-#[tauri::command]
-pub fn set_active_daemon(base: Option<String>, token: Option<String>) -> Result<(), String> {
-    crate::daemon_client::set_active_daemon(base, token);
-    Ok(())
-}
-
 /// Locate the `k2so-daemon` binary bundled next to the current Tauri
 /// executable. Matches the search path used by the first-launch
 /// migration so Install / Reinstall operations agree on which binary
@@ -215,48 +190,6 @@ pub fn daemon_log_path() -> Result<String, String> {
         .ok_or_else(|| "home dir unavailable".to_string())?
         .join(".k2so");
     Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
-}
-
-/// Read the "keep daemon running when K2SO quits" preference. Routed
-/// through `/cli/settings/get` so the daemon's `app_settings` lock is
-/// the sole reader/writer in normal flows. Falls back to the in-process
-/// `k2so_core::app_settings::load()` if the daemon is unreachable —
-/// a Tauri-only debug session shouldn't lose toggle visibility just
-/// because the daemon plist isn't installed yet.
-///
-/// Defaults to `true` — persistent agents are the 0.33.0 flagship
-/// feature, so the default respects that.
-///
-/// JSON field name is camelCase (`keepDaemonOnQuit`) because
-/// `AppSettings` is `#[serde(rename_all = "camelCase")]`.
-#[tauri::command]
-pub fn get_keep_daemon_on_quit() -> bool {
-    if let Ok(client) = DaemonClient::try_connect() {
-        if let Ok(body) = client.cli_get("/cli/settings/get", &[]) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(b) = v.get("keepDaemonOnQuit").and_then(|x| x.as_bool()) {
-                    return b;
-                }
-            }
-        }
-    }
-    k2so_core::app_settings::load().keep_daemon_on_quit
-}
-
-/// Update the "keep daemon running when K2SO quits" preference.
-/// Sends a partial-update body to `/cli/settings/update` so the
-/// daemon's `app_settings::update` performs the deep-merge + atomic
-/// JSON file write in one place. The daemon's process-wide settings
-/// lock prevents racing writers; pre-Unit-7c this command bypassed
-/// that lock by writing the JSON directly.
-#[tauri::command]
-pub fn set_keep_daemon_on_quit(keep: bool) -> Result<(), String> {
-    let client = DaemonClient::try_connect()?;
-    let _ = client.cli_post_json(
-        "/cli/settings/update",
-        &serde_json::json!({ "keepDaemonOnQuit": keep }),
-    )?;
-    Ok(())
 }
 
 /// Return the last N lines of the daemon's stdout log. Defaults to
