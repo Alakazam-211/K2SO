@@ -22,6 +22,7 @@ import { HEARTBEATS_MANIFEST } from './sections/HeartbeatsSection'
 import { WakeSchedulerSection, WAKE_SCHEDULER_MANIFEST } from './sections/WakeSchedulerSection'
 import { PermissionsSection, PERMISSIONS_MANIFEST } from './sections/PermissionsSection'
 import { DictationLabSection, DICTATION_LAB_MANIFEST } from './sections/DictationLabSection'
+import ServerSwitcher from '../TopBar/ServerSwitcher'
 
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
@@ -149,6 +150,14 @@ export default function Settings(): React.JSX.Element {
               <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
           </button>
+        </div>
+        {/* Active-server indicator — Settings renders as a full-page view that
+            hides the top-bar ServerSwitcher, so the connected-host context
+            disappears exactly while editing that host's settings. Reuse the
+            same switcher here so the active server is always visible (and
+            switchable) from Settings. Reads useConnectHostStore reactively. */}
+        <div className="px-2 py-2 border-b border-[var(--color-border)] flex-shrink-0">
+          <ServerSwitcher />
         </div>
         <nav className="flex-1 py-1 overflow-y-auto">
           {SECTIONS.filter((s) => !s.agenticOnly || useSettingsStore.getState().agenticSystemsEnabled).map((s) => (
