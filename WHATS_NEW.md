@@ -3,6 +3,15 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.19 — K2 Connect: driving a remote machine, done right
+
+Connecting to another machine now makes the **whole** app follow it —
+workspaces, files, git, agents, settings — reliably. This reworks the
+0.39.18 approach from the inside: the app talks to the connected daemon
+directly instead of proxying through this machine. That removes the
+freeze-on-connect and fixes the bug where a failed connection could blank
+your local workspace list until a reload.
+
 ## 0.39.18 — K2 Connect: actually drive the remote machine
 
 When you connect to another machine, K2 now shows **that machine's**
