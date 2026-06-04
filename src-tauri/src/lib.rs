@@ -182,6 +182,13 @@ fn check_daemon_version_and_restart() {
                 app_version,
                 attempt
             );
+            // #14: BEFORE kickstart, self-heal a plist whose baked-in
+            // ProgramArguments[0] is stale/transient. Otherwise the
+            // kickstart just respawns the SAME bad path and we never
+            // converge. `heal_daemon_plist_program` is a no-op when the
+            // recorded path is already correct, or when the current exe
+            // is itself transient (can't be trusted to seed the plist).
+            heal_daemon_plist_program();
             match crate::commands::daemon::kickstart_daemon() {
                 Ok(()) => log_debug!("[version-check] launchctl kickstart succeeded"),
                 Err(e) => log_debug!("[version-check] launchctl kickstart failed: {e}"),
@@ -193,6 +200,157 @@ fn check_daemon_version_and_restart() {
         );
     });
 }
+
+/// #14 self-heal: if the on-disk daemon LaunchAgent plist records a
+/// stale/transient `ProgramArguments[0]` (a path under a now-ejected DMG
+/// or a vanished AppTranslocation mount, or a binary that no longer
+/// exists), rewrite it to point at the daemon binary bundled next to the
+/// CURRENT Tauri exe and reload the agent so it converges.
+///
+/// Thin IO shell over the pure decision logic in
+/// `k2so_core::daemon_lifecycle`:
+///   - classify current exe / recorded path (`is_transient_exe_location`)
+///   - decide whether to rewrite (`should_rewrite_plist`)
+///   - parse the recorded program out of the plist XML (`parse_plist_program`)
+///
+/// Conservative by construction:
+///   - If the current exe is itself transient, we log and bail — we
+///     can't trust the path we'd write.
+///   - We only rewrite for transient/missing recorded paths, never just
+///     because a different *stable + existing* path is recorded (the
+///     dev-box `…/target/release/k2so-daemon` case).
+///
+/// Best-effort: every failure is logged and swallowed so this never
+/// blocks startup or the kickstart that follows. Returns `true` when it
+/// rewrote + reloaded the plist (caller can log), `false` otherwise.
+fn heal_daemon_plist_program() -> bool {
+    use k2so_core::daemon_lifecycle as dl;
+
+    let Ok(current_exe) = std::env::current_exe() else {
+        log_debug!("[plist-heal] current_exe() failed; skipping");
+        return false;
+    };
+    let current_is_transient = dl::is_transient_exe_location(&current_exe);
+    if current_is_transient {
+        log_debug!(
+            "[plist-heal] current exe is transient ({}); cannot trust it to seed the plist — skipping",
+            current_exe.display()
+        );
+        return false;
+    }
+
+    let Some(desired) = dl::bundled_daemon_path(&current_exe) else {
+        log_debug!("[plist-heal] current exe has no parent dir; skipping");
+        return false;
+    };
+
+    // Locate the plist on disk.
+    let plist = k2so_core::wake::DaemonPlist::canonical(std::path::PathBuf::from("/unused"));
+    let Some(plist_path) = plist.plist_path() else {
+        log_debug!("[plist-heal] cannot locate ~/Library/LaunchAgents; skipping");
+        return false;
+    };
+    if !plist_path.exists() {
+        // No plist yet — install migration / autostart handles it.
+        return false;
+    }
+
+    // Read the recorded program path out of the existing plist.
+    let xml = match std::fs::read_to_string(&plist_path) {
+        Ok(s) => s,
+        Err(e) => {
+            log_debug!("[plist-heal] read {} failed: {e}", plist_path.display());
+            return false;
+        }
+    };
+    let Some(recorded) = dl::parse_plist_program(&xml) else {
+        log_debug!(
+            "[plist-heal] no ProgramArguments[0] in {}; skipping",
+            plist_path.display()
+        );
+        return false;
+    };
+
+    let recorded_exists = recorded.exists();
+    if !dl::should_rewrite_plist(&recorded, &desired, recorded_exists, current_is_transient) {
+        // Recorded path is fine (matches us, or is a different stable
+        // existing dev path we must not churn).
+        return false;
+    }
+
+    log_debug!(
+        "[plist-heal] rewriting daemon plist program: recorded={} (exists={}) → desired={}",
+        recorded.display(),
+        recorded_exists,
+        desired.display()
+    );
+
+    // Rewrite the plist to point at the desired (stable, bundled) binary.
+    let new_plist = k2so_core::wake::DaemonPlist::canonical(desired.clone());
+    if let Err(e) = new_plist.write() {
+        log_debug!("[plist-heal] write plist failed: {e}");
+        return false;
+    }
+
+    // Validate the binary we just pointed at actually exists before we
+    // bother reloading — if it doesn't, the rewrite at least leaves a
+    // correct path for a future launch, but a reload would just fail.
+    if !desired.exists() {
+        log_debug!(
+            "[plist-heal] desired daemon binary {} does not exist; wrote plist but skipping reload",
+            desired.display()
+        );
+        return false;
+    }
+
+    // Reload the LaunchAgent (bootout + bootstrap) so launchd picks up
+    // the new program path. Best-effort — kickstart follows regardless.
+    reload_daemon_launch_agent(&plist_path);
+    true
+}
+
+/// #14: bootout + bootstrap the daemon LaunchAgent so launchd re-reads a
+/// freshly-rewritten plist. `launchctl load -w` won't re-read the
+/// `ProgramArguments` of an already-bootstrapped service, so we have to
+/// bootout the old definition first. Best-effort: all errors logged +
+/// swallowed (a non-loaded service makes bootout fail harmlessly).
+#[cfg(target_os = "macos")]
+fn reload_daemon_launch_agent(plist_path: &std::path::Path) {
+    use std::process::Command;
+    let uid = unsafe { libc::getuid() };
+    let domain = format!("gui/{uid}");
+
+    let bootout = Command::new("launchctl")
+        .arg("bootout")
+        .arg(&domain)
+        .arg(plist_path)
+        .output();
+    match bootout {
+        Ok(o) if o.status.success() => log_debug!("[plist-heal] bootout ok"),
+        Ok(o) => log_debug!(
+            "[plist-heal] bootout non-zero (often harmless if not loaded): {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log_debug!("[plist-heal] bootout spawn failed: {e}"),
+    }
+
+    let bootstrap = Command::new("launchctl")
+        .arg("bootstrap")
+        .arg(&domain)
+        .arg(plist_path)
+        .output();
+    match bootstrap {
+        Ok(o) if o.status.success() => log_debug!("[plist-heal] bootstrap ok"),
+        Ok(o) => log_debug!(
+            "[plist-heal] bootstrap non-zero: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log_debug!("[plist-heal] bootstrap spawn failed: {e}"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reload_daemon_launch_agent(_plist_path: &std::path::Path) {}
 
 // Phase 2 Unit 2 — `llm_worker_main` moved to k2so-daemon's
 // `llm_host::worker_main`. The daemon now spawns itself with
@@ -563,6 +721,28 @@ pub fn run() {
                         .and_then(|p| p.parent().map(|d| d.join("k2so-daemon")))
                         .filter(|p| p.exists());
                     match maybe_daemon {
+                        Some(daemon_bin)
+                            if k2so_core::daemon_lifecycle::is_transient_exe_location(
+                                &daemon_bin,
+                            ) =>
+                        {
+                            // #14: first run straight from the mounted DMG
+                            // (or a Gatekeeper-translocated copy) resolves a
+                            // TRANSIENT daemon path. Baking that into a
+                            // KeepAlive/RunAtLoad plist makes launchd respawn
+                            // a binary that vanishes the moment the DMG is
+                            // ejected — the "stuck Connecting / version
+                            // mismatch / won't pair" trap. Do NOT register
+                            // the plist; leave the migration unapplied so a
+                            // later /Applications launch installs it for
+                            // real. Never block startup.
+                            log_debug!(
+                                "[k2so] daemon binary is in a transient location ({}); \
+                                 skipping plist install — move K2SO to /Applications and \
+                                 relaunch to enable the background daemon",
+                                daemon_bin.display()
+                            );
+                        }
                         Some(daemon_bin) => {
                             let plist = k2so_core::wake::DaemonPlist::canonical(daemon_bin.clone());
                             match k2so_core::wake::install(&plist) {
@@ -602,6 +782,19 @@ pub fn run() {
                             );
                         }
                     }
+                }
+            });
+
+            // #14 self-heal at startup: if a previous bad DMG / translocated
+            // launch baked a transient ProgramArguments[0] into the plist,
+            // a normal /Applications upgrade may not trip the version-mismatch
+            // path (the stale daemon could be the SAME version). Rewrite the
+            // plist BEFORE the autostart `ensure_loaded` below so launchd
+            // loads the corrected program path. No-op when the recorded path
+            // is already correct, or when the current exe is itself transient.
+            perf_timer!("startup_heal_daemon_plist", {
+                if heal_daemon_plist_program() {
+                    log_debug!("[k2so] daemon plist self-healed at startup (#14)");
                 }
             });
 
