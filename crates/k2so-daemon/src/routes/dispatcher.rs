@@ -1658,8 +1658,15 @@ async fn handle_one_request(
         p if p.starts_with("/cli/") => {
             let _ = stream.read(&mut buf).await;
             let params = super::http::parse_params(&path, &query);
-            let req_token = params.get("token").cloned().unwrap_or_default();
-            if req_token != *state.token {
+            // Accept the owner daemon token OR a valid connect-user session
+            // (token_ok) — matching every other /cli route. Owner-only routes
+            // (users/*, tunnel/*) are gated with require_owner ABOVE this
+            // catchall, so a connect-user session reaching here is the
+            // intended "general daemon access" (read workspaces/files/git/…).
+            // Was `req_token != *state.token` (owner-only), which silently
+            // refused remote connect-users every data read over the tunnel —
+            // so a connected client showed stale local workspaces.
+            if !super::http::token_ok(&query, state.token.as_str()) {
                 let r = crate::cli::CliResponse::forbidden();
                 super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
                 return DispatchOutcome::Done;
