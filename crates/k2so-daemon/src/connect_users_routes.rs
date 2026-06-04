@@ -3,9 +3,10 @@
 //! Two route families, two auth levels (enforced by the *dispatcher*, not
 //! here — these handlers assume the gate already ran):
 //!
-//! - **`/cli/users/*`** (OWNER-ONLY at the gate): the owner provisions and
-//!   manages username+password accounts. Bodies carry credentials so they
-//!   stay out of URL logs.
+//! - **`/cli/users/*`** (management — owner OR an Admin|Owner session at
+//!   the gate; K2SO #629): provision + manage username+password accounts.
+//!   `set-role` is Owner-only; `set-password`/`policy` stay owner-only.
+//!   Bodies carry credentials so they stay out of URL logs.
 //! - **`/cli/auth/login`** (PUBLIC — no token at the gate): how a remote
 //!   connect-user trades username+password for a session token. On failure
 //!   it returns a GENERIC 401 (never reveals whether the user exists) and
@@ -18,8 +19,9 @@
 use crate::cli_response::CliResponse;
 use k2so_core::connect_users;
 
-/// `GET /cli/users` → `{"users":[{username,createdAt,disabled}, ...]}`.
-/// Redacted views only — never the password hash.
+/// `GET /cli/users` → `{"users":[{username,createdAt,disabled,role}, ...]}`.
+/// Redacted views only — never the password hash. `role` is the #629
+/// permission tier ("owner" | "admin" | "member").
 pub fn handle_list() -> CliResponse {
     match connect_users::list_users() {
         Ok(views) => {
@@ -31,6 +33,7 @@ pub fn handle_list() -> CliResponse {
                         "username": v.username,
                         "createdAt": v.created_at.to_rfc3339(),
                         "disabled": v.disabled,
+                        "role": v.role.as_wire(),
                     })
                 })
                 .collect();
@@ -64,11 +67,23 @@ struct RemoveReq {
 }
 
 /// `POST /cli/users/remove` `{username}` → `{"success":true}`.
-pub fn handle_remove(body: &[u8]) -> CliResponse {
+///
+/// `actor_role` is the resolved permission tier of the caller (owner token
+/// → Owner; else the session user's role). The dispatcher already gated
+/// `can_manage_users`; here we additionally enforce `can_act_on` so an
+/// Admin cannot remove an Owner-role user (403). (K2SO #629)
+pub fn handle_remove(actor_role: connect_users::Role, body: &[u8]) -> CliResponse {
     let req: RemoveReq = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
     };
+    // Enforce the role hierarchy against the TARGET's stored role. A
+    // missing target falls through to remove_user's own "not found".
+    if let Some(target_role) = connect_users::role_for_user(&req.username) {
+        if !connect_users::can_act_on(actor_role, target_role) {
+            return CliResponse::forbidden();
+        }
+    }
     match connect_users::remove_user(&req.username) {
         Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
         Err(e) => CliResponse::bad_request(e),
@@ -102,12 +117,59 @@ struct SetDisabledReq {
 
 /// `POST /cli/users/set-disabled` `{username,disabled}` →
 /// `{"success":true}`. Disabling revokes live sessions.
-pub fn handle_set_disabled(body: &[u8]) -> CliResponse {
+///
+/// Like `handle_remove`, `actor_role` enforces `can_act_on` so an Admin
+/// cannot enable/disable an Owner-role user (403). (K2SO #629)
+pub fn handle_set_disabled(actor_role: connect_users::Role, body: &[u8]) -> CliResponse {
     let req: SetDisabledReq = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
     };
+    if let Some(target_role) = connect_users::role_for_user(&req.username) {
+        if !connect_users::can_act_on(actor_role, target_role) {
+            return CliResponse::forbidden();
+        }
+    }
     match connect_users::set_disabled(&req.username, req.disabled) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SetRoleReq {
+    username: String,
+    role: String,
+}
+
+/// `POST /cli/users/set-role` `{username, role}` → `{"success":true}`.
+///
+/// CHANGE-ROLES is OWNER-ONLY (the dispatcher gates this route to an
+/// owner-token OR an Owner-role session via `can_change_roles`). The
+/// `role` is one of `"owner" | "admin" | "member"`.
+///
+/// Last-Owner guard: the route never strips the LAST stored Owner if that
+/// would leave management unreachable. In practice the host owner token
+/// ALWAYS counts as Owner, so management is never truly locked out; this is
+/// a sanity check that demoting the last stored Owner-role connect-user is
+/// only allowed because the daemon-token owner remains. We therefore allow
+/// the demote (the token owner is the floor) — the guard exists to reject a
+/// nonsensical role string and surface a clear error.
+pub fn handle_set_role(body: &[u8]) -> CliResponse {
+    let req: SetRoleReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    let role = match connect_users::Role::from_wire(&req.role) {
+        Some(r) => r,
+        None => {
+            return CliResponse::bad_request(format!(
+                "invalid role '{}' (expected owner|admin|member)",
+                req.role
+            ))
+        }
+    };
+    match connect_users::set_role(&req.username, role) {
         Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
         Err(e) => CliResponse::bad_request(e),
     }
@@ -534,18 +596,24 @@ pub fn handle_change_password(username: Option<String>, body: &[u8]) -> CliRespo
 }
 
 /// `GET /cli/auth/whoami` (authorized — owner OR connect-user) →
-/// `{username, owner}`.
+/// `{username, owner, role}`.
 ///
-/// - Owner token → `{"username":null,"owner":true}`.
-/// - Connect-user session → `{"username":"<name>","owner":false}`.
+/// - Owner token → `{"username":null,"owner":true,"role":"owner"}`.
+/// - Connect-user session → `{"username":"<name>","owner":false,"role":"<role>"}`.
 ///
 /// The dispatcher resolves which by checking the owner token first, then
-/// the session; it passes the result in.
-pub fn handle_whoami(username: Option<String>, owner: bool) -> CliResponse {
+/// the session; it passes the result in. `role` (K2SO #629) lets the client
+/// gate the Users/Access management UI + the role selector.
+pub fn handle_whoami(
+    username: Option<String>,
+    owner: bool,
+    role: connect_users::Role,
+) -> CliResponse {
     CliResponse::ok_json(
         serde_json::json!({
             "username": username,
             "owner": owner,
+            "role": role.as_wire(),
         })
         .to_string(),
     )
@@ -570,18 +638,75 @@ mod tests {
 
     #[test]
     fn whoami_owner_shape() {
-        let r = handle_whoami(None, true);
+        let r = handle_whoami(None, true, connect_users::Role::Owner);
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(v["owner"], serde_json::json!(true));
         assert_eq!(v["username"], serde_json::Value::Null);
+        assert_eq!(v["role"], serde_json::json!("owner"));
     }
 
     #[test]
     fn whoami_connect_user_shape() {
-        let r = handle_whoami(Some("alice".to_string()), false);
+        let r = handle_whoami(
+            Some("alice".to_string()),
+            false,
+            connect_users::Role::Admin,
+        );
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(v["owner"], serde_json::json!(false));
         assert_eq!(v["username"], serde_json::json!("alice"));
+        assert_eq!(v["role"], serde_json::json!("admin"));
+    }
+
+    #[test]
+    fn set_role_rejects_invalid_role_string() {
+        let r = handle_set_role(br#"{"username":"bob","role":"superuser"}"#);
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("invalid role"), "got: {}", r.body);
+    }
+
+    #[test]
+    fn set_role_malformed_body_is_400() {
+        let r = handle_set_role(b"not json");
+        assert_eq!(r.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn admin_cannot_remove_owner_403() {
+        // Route-level: an Admin actor removing an Owner-role target is
+        // rejected with 403 before remove_user runs (K2SO #629). Seed a
+        // store in a throwaway HOME so the role lookup resolves.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp =
+            std::env::temp_dir().join(format!("k2so-i629-route-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", &tmp);
+
+        connect_users::add_user("theowner", "password1").expect("add owner");
+        connect_users::set_role("theowner", connect_users::Role::Owner).expect("promote");
+
+        // Admin actor → can_act_on(Admin, Owner) is false → 403, no delete.
+        let r = handle_remove(connect_users::Role::Admin, br#"{"username":"theowner"}"#);
+        assert_eq!(r.status, "403 Forbidden", "Admin must not remove an Owner");
+        assert!(
+            connect_users::role_for_user("theowner").is_some(),
+            "owner must still exist after the 403"
+        );
+
+        // Owner actor → can_act_on(Owner, Owner) is true → succeeds.
+        let r = handle_remove(connect_users::Role::Owner, br#"{"username":"theowner"}"#);
+        assert_eq!(r.status, "200 OK", "Owner may remove an Owner");
+        assert!(connect_users::role_for_user("theowner").is_none());
+
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -64,6 +64,60 @@ pub(crate) fn token_ok(query: &str, owner_token: &str) -> bool {
     k2so_core::connect_users::validate_session(tok).is_some()
 }
 
+/// Resolve the effective permission [`Role`](k2so_core::connect_users::Role)
+/// for a request's `?token=` (K2SO #629).
+///
+/// - The OWNER token (`owner_token`, == `state.token`) ALWAYS maps to
+///   `Role::Owner` — the host machine's owner is the top authority and that
+///   authority lives in the daemon token, not any stored row.
+/// - A live connect-user session token resolves to that user's stored role.
+/// - Anything else (empty, unknown, expired) → `None` (unauthorized).
+pub(crate) fn actor_role(
+    query: &str,
+    owner_token: &str,
+) -> Option<k2so_core::connect_users::Role> {
+    let tok = extract_token(query)?;
+    if tok.is_empty() {
+        return None;
+    }
+    if tok == owner_token {
+        return Some(k2so_core::connect_users::Role::Owner);
+    }
+    k2so_core::connect_users::role_for_session(tok)
+}
+
+/// OWNER-or-manager authorization guard (K2SO #629). Returns the actor's
+/// resolved [`Role`](k2so_core::connect_users::Role) when the request is
+/// authorized to MANAGE users (owner token OR a session whose user
+/// `can_manage_users` — i.e. Admin or Owner). On rejection it drains the
+/// peeked request and sends `403 Forbidden`, returning `None`; the caller
+/// MUST early-return.
+///
+/// This replaces the bare [`require_owner`] on the management routes so an
+/// Admin connect-user can add/remove/enable/disable users, while a Member
+/// (or an unknown token) is still barred.
+pub(crate) async fn require_manage(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+    query: &str,
+    owner_token: &str,
+) -> Option<k2so_core::connect_users::Role> {
+    match actor_role(query, owner_token) {
+        Some(role) if k2so_core::connect_users::can_manage_users(role) => Some(role),
+        _ => {
+            let _ = stream.read(buf).await;
+            send_response(
+                stream,
+                "403 Forbidden",
+                "application/json",
+                r#"{"error":"invalid or missing token"}"#,
+            )
+            .await;
+            None
+        }
+    }
+}
+
 /// Reassemble a full `path?query` URL and hand off to k2so_core's
 /// URL-decoding query parser. The core helper knows how to unescape
 /// `%20`/`+` and multi-byte UTF-8 — we just combine the pieces.

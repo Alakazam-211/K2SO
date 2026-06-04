@@ -208,6 +208,9 @@ async fn handle_one_request(
             | "/cli/users/remove"
             | "/cli/users/set-password"
             | "/cli/users/set-disabled"
+            // K2SO #629 — change a connect-user's role. Owner-only (gated
+            // per-handler below); method-gated POST.
+            | "/cli/users/set-role"
             // K2SO #620 — owner-only password-policy write. GET (read) goes
             // through the GET arm below; POST is method-gated per-handler.
             | "/cli/users/policy"
@@ -926,17 +929,23 @@ async fn handle_one_request(
             super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
                 .await;
         }
-        // ── K2SO #617 — connect-user management (OWNER-ONLY) ────────────
+        // ── K2SO #617 + #629 — connect-user management ──────────────────
         //
-        // All four `/cli/users/*` routes manage the public-tunnel auth
-        // boundary, so they gate on the STRICT `require_owner` (owner
-        // token only) — NOT the extended `token_ok`. A connect-user's
-        // session token passes `token_ok` for general daemon access but
-        // is barred here: a connect-user must never manage accounts.
-        // POST-gated per feedback_post_only_route_guards.
+        // These `/cli/users/*` routes manage the public-tunnel auth
+        // boundary. Pre-#629 they were strict OWNER-ONLY (require_owner).
+        // K2SO #629 introduces a 3-role model (Owner>Admin>Member): the
+        // management routes now accept the owner token OR a session whose
+        // user `can_manage_users` (Admin|Owner) via `require_manage`, which
+        // returns the actor's resolved Role. For remove/set-disabled we
+        // additionally enforce `can_act_on` INSIDE the handler so an Admin
+        // can't act on an Owner-role target (handler 403s). set-password +
+        // policy stay OWNER-ONLY for now (require_owner). set-role is
+        // Owner-only (can_change_roles). POST-gated per
+        // feedback_post_only_route_guards.
         "/cli/users/add" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
-            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+            // Owner OR a managing (Admin|Owner) session. Member/unknown → 403.
+            if super::http::require_manage(&mut *stream, &mut buf, &query, state.token.as_str()).await.is_none() {
                 return DispatchOutcome::Done;
             }
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
@@ -950,15 +959,33 @@ async fn handle_one_request(
         }
         "/cli/users/remove" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
-            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+            // OWNER-ONLY (#629): removing users is reserved for owners. Admins
+            // can add + enable/disable, but never remove. Same gate as
+            // set-role (`can_change_roles` == actor is Owner / owner token).
+            let actor_role = super::http::actor_role(&query, state.token.as_str());
+            if !actor_role.map(k2so_core::connect_users::can_change_roles).unwrap_or(false) {
+                let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
                 return DispatchOutcome::Done;
             }
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
-            let r = crate::connect_users_routes::handle_remove(&body_bytes);
+            // Gate above guarantees the actor is Owner; pass it through
+            // (handle_remove's can_act_on is a no-op for an Owner actor).
+            let r = crate::connect_users_routes::handle_remove(
+                actor_role.unwrap_or(k2so_core::connect_users::Role::Owner),
+                &body_bytes,
+            );
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         "/cli/users/set-password" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            // OWNER-ONLY for now (#629 keeps password resets at owner level).
             if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
                 return DispatchOutcome::Done;
             }
@@ -973,11 +1000,33 @@ async fn handle_one_request(
         }
         "/cli/users/set-disabled" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
-            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+            let actor_role = match super::http::require_manage(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                Some(r) => r,
+                None => return DispatchOutcome::Done,
+            };
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let r = crate::connect_users_routes::handle_set_disabled(actor_role, &body_bytes);
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/users/set-role — CHANGE-ROLES is OWNER-ONLY (K2SO #629).
+        // Gated to the owner token OR an Owner-role session (can_change_roles).
+        // A managing Admin reaches the other routes but NOT this one.
+        "/cli/users/set-role" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await { return DispatchOutcome::Done; }
+            let actor_role = super::http::actor_role(&query, state.token.as_str());
+            if !actor_role.map(k2so_core::connect_users::can_change_roles).unwrap_or(false) {
+                let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
                 return DispatchOutcome::Done;
             }
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
-            let r = crate::connect_users_routes::handle_set_disabled(&body_bytes);
+            let r = crate::connect_users_routes::handle_set_role(&body_bytes);
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         // ── K2SO #620 — password policy ─────────────────────────────────
@@ -1022,10 +1071,11 @@ async fn handle_one_request(
             }
         }
         // GET /cli/users — list accounts (redacted views; no hashes).
-        // OWNER-ONLY (read-side of user management). `require_owner`
-        // drains+403s a non-owner; a GET needs no body.
+        // K2SO #629: read-side of user management → owner token OR a
+        // managing (Admin|Owner) session via `require_manage`. A Member or
+        // unknown token is drained+403'd; a GET needs no body.
         "/cli/users" => {
-            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+            if super::http::require_manage(&mut *stream, &mut buf, &query, state.token.as_str()).await.is_none() {
                 return DispatchOutcome::Done;
             }
             let _ = stream.read(&mut buf).await;
@@ -1065,12 +1115,21 @@ async fn handle_one_request(
         "/cli/auth/whoami" => {
             let _ = stream.read(&mut buf).await;
             let tok = super::http::extract_token(&query).unwrap_or("");
+            // K2SO #629: also return the caller's resolved role so the
+            // client can gate the Users/Access UI + the role selector. The
+            // owner token → Owner; a session → its stored role.
             let r = if !tok.is_empty() && tok == state.token.as_str() {
-                crate::connect_users_routes::handle_whoami(None, true)
+                crate::connect_users_routes::handle_whoami(
+                    None,
+                    true,
+                    k2so_core::connect_users::Role::Owner,
+                )
             } else if let Some(username) =
                 k2so_core::connect_users::validate_session(tok)
             {
-                crate::connect_users_routes::handle_whoami(Some(username), false)
+                let role = k2so_core::connect_users::role_for_user(&username)
+                    .unwrap_or(k2so_core::connect_users::Role::Member);
+                crate::connect_users_routes::handle_whoami(Some(username), false, role)
             } else {
                 crate::cli::CliResponse::forbidden()
             };

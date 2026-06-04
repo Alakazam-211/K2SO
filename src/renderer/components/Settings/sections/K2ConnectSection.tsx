@@ -94,10 +94,26 @@ interface TunnelStatus {
   frpc_installed: boolean
 }
 
+// K2SO #629 — connect-user permission tier.
+type K2Role = 'owner' | 'admin' | 'member'
+
 interface K2User {
   username: string
   createdAt?: string | null
   disabled: boolean
+  // K2SO #629. Pre-#629 daemons omit it → treat as 'member'.
+  role?: K2Role
+}
+
+// Whether a viewer of `role` may see + use the Users/Access management UI
+// (add/remove/enable/disable). Admin + Owner only.
+function canManageUsers(role: K2Role | null): boolean {
+  return role === 'admin' || role === 'owner'
+}
+
+// Whether a viewer of `role` may change other users' roles. Owner only.
+function canChangeRoles(role: K2Role | null): boolean {
+  return role === 'owner'
 }
 
 interface PasswordPolicyView {
@@ -171,6 +187,20 @@ async function userPost(suffix: string, body?: unknown): Promise<Response> {
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
+  }
+  const res = await send()
+  if (res.status !== 403) return res
+  invalidateDaemonWs()
+  return send()
+}
+
+// GET /cli/auth/whoami — resolve the LOCAL viewer's identity + role
+// (K2SO #629). With the local daemon owner token this returns
+// {owner:true, role:'owner'}; the role gates the management UI below.
+async function whoamiGet(): Promise<Response> {
+  const send = async (): Promise<Response> => {
+    const creds = await getDaemonWs()
+    return fetch(`${daemonHttpBase(creds)}/cli/auth/whoami?token=${creds.token}`, { method: 'GET' })
   }
   const res = await send()
   if (res.status !== 403) return res
@@ -258,6 +288,12 @@ export function K2ConnectSection(): React.JSX.Element {
   const confirm = useConfirmDialogStore((s) => s.confirm)
 
   // ── Users / Access state ──────────────────────────────────────────────
+  // K2SO #629: the LOCAL viewer's role (from whoami). The desktop app talks
+  // to its OWN daemon with the owner token, so this is normally 'owner';
+  // null until resolved. It gates the whole management panel + the role
+  // selector below.
+  const [viewerRole, setViewerRole] = useState<K2Role | null>(null)
+  const [whoamiLoaded, setWhoamiLoaded] = useState(false)
   const [users, setUsers] = useState<K2User[]>([])
   const [usersLoaded, setUsersLoaded] = useState(false)
   const [newUsername, setNewUsername] = useState('')
@@ -298,8 +334,16 @@ export function K2ConnectSection(): React.JSX.Element {
         }
       } catch { /* ignore */ }
       void refreshStatus()
-      void refreshUsers()
-      void refreshPolicy()
+      // K2SO #629: resolve the viewer's role FIRST so the management UI
+      // gates correctly; only load the user list + policy when the viewer
+      // can actually manage users (else those routes 403).
+      void (async () => {
+        const role = await refreshWhoami()
+        if (canManageUsers(role)) {
+          void refreshUsers()
+          void refreshPolicy()
+        }
+      })()
     })()
     // Restore the account session from the keychain (independent of the
     // tunnel-config load above — must NOT block it).
@@ -387,6 +431,34 @@ export function K2ConnectSection(): React.JSX.Element {
   }, [status?.running, session, subdomain])
 
   // ── Users / Access actions ────────────────────────────────────────────
+  // K2SO #629: resolve the local viewer's role. Returns the role (also
+  // stored in state) so the mount effect can decide whether to load the
+  // user list. Defaults to null on any failure (UI then shows the
+  // "handled by an administrator" note rather than a raw token error).
+  const refreshWhoami = async (): Promise<K2Role | null> => {
+    try {
+      const res = await whoamiGet()
+      if (res.ok) {
+        const data = (await res.json()) as { role?: string; owner?: boolean }
+        const role: K2Role | null =
+          data.role === 'owner' || data.role === 'admin' || data.role === 'member'
+            ? data.role
+            : data.owner
+              ? 'owner'
+              : null
+        setViewerRole(role)
+        return role
+      }
+      setViewerRole(null)
+      return null
+    } catch {
+      setViewerRole(null)
+      return null
+    } finally {
+      setWhoamiLoaded(true)
+    }
+  }
+
   const refreshUsers = async (): Promise<void> => {
     try {
       const res = await userGet('')
@@ -524,6 +596,26 @@ export function K2ConnectSection(): React.JSX.Element {
       await refreshUsers()
     } catch (e) {
       setUsersError(e instanceof Error ? e.message : 'Failed to remove user')
+    }
+  }
+
+  // K2SO #629: change a user's role (Owner-only; POST /cli/users/set-role).
+  // Optimistic with revert-on-failure, mirroring toggleDisabled.
+  const changeRole = async (username: string, role: K2Role): Promise<void> => {
+    const prevRole = users.find((u) => u.username === username)?.role
+    setUsers((prev) => prev.map((u) => (u.username === username ? { ...u, role } : u)))
+    setUsersError(null)
+    try {
+      const res = await userPost('/set-role', { username, role })
+      if (!res.ok) {
+        setUsers((prev) => prev.map((u) => (u.username === username ? { ...u, role: prevRole } : u)))
+        setUsersError(await errText(res))
+        return
+      }
+      await refreshUsers()
+    } catch (e) {
+      setUsers((prev) => prev.map((u) => (u.username === username ? { ...u, role: prevRole } : u)))
+      setUsersError(e instanceof Error ? e.message : 'Failed to change role')
     }
   }
 
@@ -1088,9 +1180,21 @@ export function K2ConnectSection(): React.JSX.Element {
           )}
         </div>
 
-        {/* ── Users / Access — owner-gated multi-user list (task #617) ──── */}
+        {/* ── Users / Access — role-gated multi-user list (#617 / #629) ─── */}
         <SettingsGroup title="Users / Access">
           <div data-settings-id="k2-connect.users" className="space-y-3">
+            {/* K2SO #629: only viewers who can manage users (Owner|Admin)
+                see the management surface. A Member viewer (or an
+                unresolved/forbidden whoami) gets a clean note — never the
+                raw token/403 error. */}
+            {whoamiLoaded && !canManageUsers(viewerRole) ? (
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed py-1">
+                User management is handled by an administrator.
+              </p>
+            ) : !whoamiLoaded ? (
+              <p className="text-[10px] text-[var(--color-text-muted)] py-1">Loading…</p>
+            ) : (
+            <>
             <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed">
               People you allow to connect IN to this device&apos;s daemon. You set each
               person&apos;s username + initial password; they sign in from their K2 app (or
@@ -1239,6 +1343,26 @@ export function K2ConnectSection(): React.JSX.Element {
                         )}
                       </span>
                       <div className="flex items-center gap-3 flex-shrink-0">
+                        {/* K2SO #629 — role selector. Editable only for an
+                            Owner viewer; Admins see the role read-only. */}
+                        {canChangeRoles(viewerRole) ? (
+                          <select
+                            value={u.role ?? 'member'}
+                            onChange={(e) => void changeRole(u.username, e.target.value as K2Role)}
+                            title="Permission role"
+                            aria-label={`Role for ${u.username}`}
+                            className={`${inputCls} no-drag cursor-pointer`}
+                            style={{ colorScheme: 'dark', paddingTop: 2, paddingBottom: 2 }}
+                          >
+                            <option value="member">Member</option>
+                            <option value="admin">Admin</option>
+                            <option value="owner">Owner</option>
+                          </select>
+                        ) : (
+                          <span className="text-[9px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-text-secondary)]">
+                            {u.role ?? 'member'}
+                          </span>
+                        )}
                         {/* Disable / Enable — peer-checked checkbox (matches auto-start) */}
                         <label className="flex items-center gap-1.5 cursor-pointer select-none no-drag">
                           <input
@@ -1332,6 +1456,8 @@ export function K2ConnectSection(): React.JSX.Element {
                   </div>
                 ))}
               </div>
+            )}
+            </>
             )}
           </div>
         </SettingsGroup>

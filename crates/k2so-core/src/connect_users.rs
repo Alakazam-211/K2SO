@@ -46,6 +46,81 @@ const LOCKOUT_THRESHOLD: u32 = 3;
 /// How long a username stays locked once the threshold is hit.
 const LOCKOUT_DURATION_MINUTES: i64 = 15;
 
+/// Permission tier for a connect-user (K2SO #629). Strict hierarchy
+/// `Owner > Admin > Member`. The local daemon-token holder (the host
+/// machine's owner) is ALWAYS treated as `Owner` regardless of any stored
+/// row — that authority lives in the token, not the file.
+///
+/// - **Owner**: add/remove/enable/disable ANY user + CHANGE ROLES + use
+///   K2SO. Assignable to a connect-user.
+/// - **Admin**: add/remove/enable/disable users + use K2SO. CANNOT change
+///   roles; CANNOT act on an Owner-role user.
+/// - **Member**: connect + use K2SO only. No user management. The DEFAULT
+///   for existing rows (via `#[serde(default)]`) and newly added users.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Lowest tier — listed first so the derived `Ord` ranks
+    /// `Member < Admin < Owner`.
+    Member,
+    Admin,
+    Owner,
+}
+
+impl Default for Role {
+    fn default() -> Self {
+        // Existing stored rows (pre-#629) and new users default to Member.
+        Role::Member
+    }
+}
+
+impl Role {
+    /// Parse a wire role string (`"owner"` | `"admin"` | `"member"`).
+    /// Case-insensitive; returns `None` for anything else.
+    pub fn from_wire(s: &str) -> Option<Role> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "owner" => Some(Role::Owner),
+            "admin" => Some(Role::Admin),
+            "member" => Some(Role::Member),
+            _ => None,
+        }
+    }
+
+    /// The canonical wire string for this role (snake_case, matches serde).
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Role::Owner => "owner",
+            Role::Admin => "admin",
+            Role::Member => "member",
+        }
+    }
+}
+
+/// Whether `role` may manage users at all (add/remove/enable/disable).
+/// True for `Admin` and `Owner`; false for `Member`.
+pub fn can_manage_users(role: Role) -> bool {
+    matches!(role, Role::Admin | Role::Owner)
+}
+
+/// Whether `role` may CHANGE other users' roles. Owner only.
+pub fn can_change_roles(role: Role) -> bool {
+    matches!(role, Role::Owner)
+}
+
+/// Whether an actor of `actor` role may perform a management action
+/// (remove/disable/etc.) on a target of `target` role.
+///
+/// - `Owner` can act on anyone (Owner/Admin/Member).
+/// - `Admin` can act on `Admin`/`Member` but NOT on an `Owner`.
+/// - `Member` can act on no one.
+pub fn can_act_on(actor: Role, target: Role) -> bool {
+    match actor {
+        Role::Owner => true,
+        Role::Admin => target != Role::Owner,
+        Role::Member => false,
+    }
+}
+
 /// A provisioned connect-user account. Persisted to
 /// `~/.k2so/connect-users.json`. The `password_hash` is an argon2id
 /// PHC string and is NEVER exposed off-disk (see [`ConnectUserView`]).
@@ -62,6 +137,10 @@ pub struct ConnectUser {
     /// row is retained so the owner can re-enable it.
     #[serde(default)]
     pub disabled: bool,
+    /// Permission tier (K2SO #629). `#[serde(default)]` → `Member` so
+    /// pre-#629 stored rows (no `role` field) deserialize as Member.
+    #[serde(default)]
+    pub role: Role,
 }
 
 /// Redacted projection of a [`ConnectUser`] safe to return over the
@@ -71,6 +150,10 @@ pub struct ConnectUserView {
     pub username: String,
     pub created_at: DateTime<Utc>,
     pub disabled: bool,
+    /// Permission tier (K2SO #629). `#[serde(default)]` mirrors the stored
+    /// row so a view round-trips even from a pre-#629 source.
+    #[serde(default)]
+    pub role: Role,
 }
 
 impl From<&ConnectUser> for ConnectUserView {
@@ -79,6 +162,7 @@ impl From<&ConnectUser> for ConnectUserView {
             username: u.username.clone(),
             created_at: u.created_at,
             disabled: u.disabled,
+            role: u.role,
         }
     }
 }
@@ -324,6 +408,9 @@ pub fn add_user(username: &str, password: &str) -> Result<(), String> {
             password_hash: hash,
             created_at: Utc::now(),
             disabled: false,
+            // New users default to Member (K2SO #629); an Owner promotes
+            // via set_role.
+            role: Role::Member,
         });
         Ok(())
     })
@@ -390,6 +477,47 @@ pub fn set_disabled(username: &str, disabled: bool) -> Result<(), String> {
         revoke_user_sessions(&username);
     }
     Ok(())
+}
+
+/// Set a user's permission role (K2SO #629). Authorization (only an
+/// Owner may change roles) is enforced at the route layer; this is the
+/// raw store mutation. Errors when the user doesn't exist.
+pub fn set_role(username: &str, role: Role) -> Result<(), String> {
+    let username = normalize_username(username)?;
+    update_store(|store| {
+        let user = store
+            .users
+            .iter_mut()
+            .find(|u| u.username == username)
+            .ok_or_else(|| format!("user '{username}' not found"))?;
+        user.role = role;
+        Ok(())
+    })
+}
+
+/// Look up the stored role for `username`. `None` when the user doesn't
+/// exist (or the store can't be read). Used by the route layer to resolve
+/// a target's role before an `can_act_on` check.
+pub fn role_for_user(username: &str) -> Option<Role> {
+    let normalized = normalize_username(username).ok()?;
+    let store = load_store().ok()?;
+    store
+        .users
+        .iter()
+        .find(|u| u.username == normalized)
+        .map(|u| u.role)
+}
+
+/// Resolve the effective role for a session `token` (K2SO #629). Returns
+/// the connect-user's stored role for a live session, else `None`.
+///
+/// NOTE: the OWNER (host daemon-token holder) is ALWAYS `Role::Owner`, but
+/// that authority lives in the daemon token — NOT in any session — so the
+/// route layer maps the owner token to `Role::Owner` BEFORE calling this.
+/// This function only handles connect-user *session* tokens.
+pub fn role_for_session(token: &str) -> Option<Role> {
+    let username = validate_session(token)?;
+    role_for_user(&username)
 }
 
 /// Verify a username+password against the store. Returns `true` only for
@@ -1107,6 +1235,127 @@ mod tests {
                 ChangePasswordOutcome::Ok
             );
             assert!(verify("polB", "newpass!"));
+        });
+    }
+
+    // ── K2SO #629 — role model ──────────────────────────────────────────
+
+    #[test]
+    fn role_ordering_is_member_lt_admin_lt_owner() {
+        assert!(Role::Member < Role::Admin);
+        assert!(Role::Admin < Role::Owner);
+        assert!(Role::Member < Role::Owner);
+        assert_eq!(Role::default(), Role::Member);
+    }
+
+    #[test]
+    fn role_wire_round_trips() {
+        for r in [Role::Owner, Role::Admin, Role::Member] {
+            assert_eq!(Role::from_wire(r.as_wire()), Some(r));
+        }
+        // Case-insensitive + trimmed.
+        assert_eq!(Role::from_wire("  OWNER "), Some(Role::Owner));
+        assert_eq!(Role::from_wire("Admin"), Some(Role::Admin));
+        assert_eq!(Role::from_wire("nonsense"), None);
+        // serde uses the same snake_case strings.
+        assert_eq!(serde_json::to_string(&Role::Owner).unwrap(), "\"owner\"");
+        assert_eq!(serde_json::to_string(&Role::Member).unwrap(), "\"member\"");
+    }
+
+    #[test]
+    fn can_manage_users_admin_and_owner_only() {
+        assert!(can_manage_users(Role::Owner));
+        assert!(can_manage_users(Role::Admin));
+        assert!(!can_manage_users(Role::Member));
+    }
+
+    #[test]
+    fn can_change_roles_owner_only() {
+        assert!(can_change_roles(Role::Owner));
+        assert!(!can_change_roles(Role::Admin));
+        assert!(!can_change_roles(Role::Member));
+    }
+
+    #[test]
+    fn can_act_on_enforces_admin_cannot_touch_owner() {
+        // Owner can act on anyone.
+        assert!(can_act_on(Role::Owner, Role::Owner));
+        assert!(can_act_on(Role::Owner, Role::Admin));
+        assert!(can_act_on(Role::Owner, Role::Member));
+        // Admin can act on Admin/Member but NOT Owner.
+        assert!(!can_act_on(Role::Admin, Role::Owner));
+        assert!(can_act_on(Role::Admin, Role::Admin));
+        assert!(can_act_on(Role::Admin, Role::Member));
+        // Member can act on no one.
+        assert!(!can_act_on(Role::Member, Role::Owner));
+        assert!(!can_act_on(Role::Member, Role::Admin));
+        assert!(!can_act_on(Role::Member, Role::Member));
+    }
+
+    #[test]
+    fn new_user_defaults_to_member_and_set_role_promotes() {
+        with_temp_home(|| {
+            add_user("rolea", "password").expect("add");
+            assert_eq!(role_for_user("rolea"), Some(Role::Member));
+            set_role("rolea", Role::Admin).expect("promote");
+            assert_eq!(role_for_user("rolea"), Some(Role::Admin));
+            set_role("rolea", Role::Owner).expect("promote owner");
+            assert_eq!(role_for_user("rolea"), Some(Role::Owner));
+            // Unknown user errors.
+            assert!(set_role("ghost", Role::Admin).is_err());
+            assert_eq!(role_for_user("ghost"), None);
+        });
+    }
+
+    #[test]
+    fn role_for_session_resolves_stored_role() {
+        with_temp_home(|| {
+            add_user("rsess", "password").expect("add");
+            set_role("rsess", Role::Admin).expect("promote");
+            let tok = create_session("rsess");
+            assert_eq!(role_for_session(&tok), Some(Role::Admin));
+            // Unknown token → None.
+            assert_eq!(role_for_session("deadbeef"), None);
+        });
+    }
+
+    #[test]
+    fn list_users_includes_role() {
+        with_temp_home(|| {
+            add_user("rl1", "password").expect("add");
+            set_role("rl1", Role::Admin).expect("promote");
+            let views = list_users().expect("list");
+            assert_eq!(views.len(), 1);
+            assert_eq!(views[0].role, Role::Admin);
+            // Wire shape carries the role string.
+            let json = serde_json::to_string(&views[0]).unwrap();
+            assert!(json.contains("\"role\":\"admin\""), "got: {json}");
+        });
+    }
+
+    #[test]
+    fn legacy_json_without_role_migrates_to_member() {
+        with_temp_home(|| {
+            // Hand-write a pre-#629 store: a user row with NO `role` field.
+            let dir = config_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let legacy = r#"{
+                "users": [
+                    {
+                        "username": "legacy",
+                        "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "disabled": false
+                    }
+                ]
+            }"#;
+            fs::write(store_path(), legacy).unwrap();
+            // Deserializes cleanly; missing role → Member.
+            let views = list_users().expect("legacy store loads");
+            assert_eq!(views.len(), 1);
+            assert_eq!(views[0].username, "legacy");
+            assert_eq!(views[0].role, Role::Member, "missing role defaults to Member");
+            assert_eq!(role_for_user("legacy"), Some(Role::Member));
         });
     }
 
