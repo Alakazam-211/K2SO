@@ -948,7 +948,8 @@ try:
     data = json.loads(sys.stdin.read())
     if data.get("ok"):
         url = data.get("url") or ""
-        print(f"Companion started.{(\" Tunnel: \" + url) if url else \"\"}")
+        suffix = (" Tunnel: " + url) if url else ""
+        print(f"Companion started.{suffix}")
     else:
         msg = data.get("error") or "unknown error"
         print(f"Failed to start companion: {msg}", file=sys.stderr)
@@ -996,9 +997,11 @@ clients = data.get("connectedClients", 0)
 ws_clients = data.get("wsClients", 0)
 sessions = data.get("sessions") or []
 print("Companion server")
-print(f"  Running:    {\"yes\" if running else \"no\"}")
+running_label = "yes" if running else "no"
+print(f"  Running:    {running_label}")
 if running:
-    print(f"  Tunnel URL: {url or \"(not connected)\"}")
+    tunnel_label = url or "(not connected)"
+    print(f"  Tunnel URL: {tunnel_label}")
     print(f"  Sessions:   {clients}")
     print(f"  WS clients: {ws_clients}")
     for s in sessions:
