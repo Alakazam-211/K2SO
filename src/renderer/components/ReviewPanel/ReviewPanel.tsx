@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { terminalGetGrid } from '@/lib/terminal-daemon'
 import { useProjectsStore } from '@/stores/projects'
@@ -356,10 +355,10 @@ export default function ReviewPanel(): React.JSX.Element {
 
     setActing(true)
     try {
-      await invoke('k2so_agents_review_approve', {
-        projectPath: activeProject.path,
+      await daemonCliGet('review/approve', {
+        project: activeProject.path,
         branch: review.branch,
-        agentName: review.agentName,
+        agent: review.agentName,
       })
       await fetchReviews()
     } catch (e) {
@@ -381,9 +380,9 @@ export default function ReviewPanel(): React.JSX.Element {
 
     setActing(true)
     try {
-      await invoke('k2so_agents_review_reject', {
-        projectPath: activeProject.path,
-        agentName: review.agentName,
+      await daemonCliGet('review/reject', {
+        project: activeProject.path,
+        agent: review.agentName,
         reason: 'Work rejected by reviewer.',
       })
       await fetchReviews()
@@ -398,9 +397,9 @@ export default function ReviewPanel(): React.JSX.Element {
     if (!activeProject || !feedbackAgent || !feedbackText.trim()) return
     setActing(true)
     try {
-      await invoke('k2so_agents_review_request_changes', {
-        projectPath: activeProject.path,
-        agentName: feedbackAgent,
+      await daemonCliGet('review/feedback', {
+        project: activeProject.path,
+        agent: feedbackAgent,
         feedback: feedbackText.trim(),
       })
       setFeedbackAgent(null)
