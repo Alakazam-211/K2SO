@@ -296,3 +296,87 @@ async fn relations_create_rejects_missing_token() {
         assert_eq!(r.status, 403, "no token must 403; body={}", r.body);
     });
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// /cli/relations/list{,-incoming} — host-aware GET list reads
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relations_list_reads_rows_via_real_dispatch() {
+    let _g = lock();
+    with_temp_home(|_workspace| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+
+        // Seed two projects + one relation (src oversees dst).
+        {
+            let db = k2so_core::db::shared();
+            let conn = db.lock();
+            k2so_core::db::schema::Project::create(
+                &conn, "proj-src-list", "Src", "/tmp/src-list", "#fff", 0, 0, None, None,
+            )
+            .expect("seed src project");
+            k2so_core::db::schema::Project::create(
+                &conn, "proj-dst-list", "Dst", "/tmp/dst-list", "#fff", 1, 0, None, None,
+            )
+            .expect("seed dst project");
+        }
+        k2so_core::workspace::relations::workspace_relations_create(
+            "proj-src-list".to_string(),
+            "proj-dst-list".to_string(),
+            None,
+        )
+        .expect("seed relation");
+
+        // OUTGOING list for the SOURCE project must contain the row, in
+        // the camelCase `WorkspaceRelation` shape the renderer parses.
+        let r = http(
+            d.port,
+            "GET",
+            &format!("/cli/relations/list?project_id=proj-src-list&token={OWNER_TOKEN}"),
+            None,
+        );
+        assert_eq!(r.status, 200, "owner GET relations/list → 200; body={}", r.body);
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&r.body).expect("relations/list returns a JSON array");
+        assert_eq!(rows.len(), 1, "exactly the seeded row; body={}", r.body);
+        // camelCase keys — the EXACT shape `WorkspaceRelation[]` expects.
+        let row = &rows[0];
+        assert_eq!(row["sourceProjectId"], "proj-src-list", "body={}", r.body);
+        assert_eq!(row["targetProjectId"], "proj-dst-list", "body={}", r.body);
+        assert_eq!(row["relationType"], "oversees", "body={}", r.body);
+        assert!(row["id"].is_string(), "id present; body={}", r.body);
+        assert!(row["createdAt"].is_number(), "createdAt present; body={}", r.body);
+
+        // INCOMING list for the SOURCE is empty; for the TARGET it has the row.
+        let empty = http(
+            d.port,
+            "GET",
+            &format!("/cli/relations/list-incoming?project_id=proj-src-list&token={OWNER_TOKEN}"),
+            None,
+        );
+        assert_eq!(empty.status, 200, "body={}", empty.body);
+        assert_eq!(empty.body, "[]", "src has no incoming; body={}", empty.body);
+
+        let inc = http(
+            d.port,
+            "GET",
+            &format!("/cli/relations/list-incoming?project_id=proj-dst-list&token={OWNER_TOKEN}"),
+            None,
+        );
+        assert_eq!(inc.status, 200, "body={}", inc.body);
+        let inc_rows: Vec<serde_json::Value> =
+            serde_json::from_str(&inc.body).expect("list-incoming returns a JSON array");
+        assert_eq!(inc_rows.len(), 1, "dst has one incoming; body={}", inc.body);
+        assert_eq!(inc_rows[0]["sourceProjectId"], "proj-src-list", "body={}", inc.body);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relations_list_rejects_missing_token() {
+    let _g = lock();
+    with_temp_home(|_workspace| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        let r = http(d.port, "GET", "/cli/relations/list?project_id=x", None);
+        assert_eq!(r.status, 403, "no token must 403; body={}", r.body);
+    });
+}

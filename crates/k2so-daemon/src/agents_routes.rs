@@ -375,6 +375,16 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
             }
             Err(r) => r,
         },
+        // ── Read-only: workspace relations (host-aware list reads) ───
+        // K2 Connect GAP: the renderer's "Connected Workspaces" panel
+        // previously read relations via LOCAL Tauri invoke(), which
+        // misfired against a remote host. These mirror the
+        // `workspace_relations_list{,_incoming}(projectId)` Tauri commands
+        // and return `WorkspaceRelation[]` (camelCase) verbatim.
+        "/cli/relations/list" => handle_relations_list(str_param(params, "project_id")),
+        "/cli/relations/list-incoming" => {
+            handle_relations_list_incoming(str_param(params, "project_id"))
+        }
         // 0.39.0f Phase 2.1b: `/cli/agents/work` retired → `/cli/inbox/list`.
         "/cli/agents/work" => CliResponse::gone(
             "agents/work route deprecated in Phase 2.1; use /cli/inbox/list — see `k2so help-deprecated`",
@@ -909,6 +919,47 @@ pub fn handle_relations_delete(body: &[u8]) -> CliResponse {
     }
 }
 
+/// Handler for `GET /cli/relations/list?project_id=…`.
+///
+/// Wraps `k2so_core::workspace::relations::workspace_relations_list`.
+/// Mirrors the `workspace_relations_list(projectId)` Tauri command —
+/// returns the OUTGOING relations (rows where the project is the SOURCE)
+/// as a JSON array of `WorkspaceRelation` (camelCase via the schema's
+/// `serde(rename_all = "camelCase")`), the exact shape the renderer's
+/// `WorkspaceRelation[]` deserializes. K2 Connect host-awareness GAP:
+/// the renderer previously fired this via LOCAL Tauri invoke(), which
+/// misfires when driving a remote host.
+pub fn handle_relations_list(project_id: String) -> CliResponse {
+    if project_id.is_empty() {
+        return CliResponse::bad_request("missing project_id");
+    }
+    match k2so_core::workspace::relations::workspace_relations_list(project_id) {
+        Ok(rows) => CliResponse::ok_json(
+            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `GET /cli/relations/list-incoming?project_id=…`.
+///
+/// Wraps `k2so_core::workspace::relations::workspace_relations_list_incoming`.
+/// Mirrors the `workspace_relations_list_incoming(projectId)` Tauri
+/// command — returns the INCOMING relations (rows where the project is
+/// the TARGET) as a JSON `WorkspaceRelation[]`. See
+/// [`handle_relations_list`] for the host-awareness GAP note.
+pub fn handle_relations_list_incoming(project_id: String) -> CliResponse {
+    if project_id.is_empty() {
+        return CliResponse::bad_request("missing project_id");
+    }
+    match k2so_core::workspace::relations::workspace_relations_list_incoming(project_id) {
+        Ok(rows) => CliResponse::ok_json(
+            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
 #[cfg(test)]
 mod gap_route_tests {
     use super::*;
@@ -998,5 +1049,41 @@ mod gap_route_tests {
         let r = handle_relations_delete(b"{}");
         assert_eq!(r.status, "400 Bad Request");
         assert!(r.body.contains("id"), "body={}", r.body);
+    }
+
+    #[test]
+    fn relations_list_rejects_missing_project_id() {
+        let r = handle_relations_list(String::new());
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("project_id"), "body={}", r.body);
+    }
+
+    #[test]
+    fn relations_list_incoming_rejects_missing_project_id() {
+        let r = handle_relations_list_incoming(String::new());
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("project_id"), "body={}", r.body);
+    }
+
+    #[test]
+    fn relations_list_routes_dispatch_as_get() {
+        // Both list routes must be reachable via the agents-domain GET
+        // dispatch (not 404 / None). A project with no relations returns
+        // an empty JSON array — the exact `WorkspaceRelation[]` shape the
+        // renderer deserializes.
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "project_id".to_string(),
+            "k2so-relations-dispatch-test-nonexistent".to_string(),
+        );
+        let out = dispatch("/cli/relations/list", &params)
+            .expect("/cli/relations/list must be handled by agents dispatch");
+        assert_eq!(out.status, "200 OK", "body={}", out.body);
+        assert_eq!(out.body, "[]", "body={}", out.body);
+
+        let inc = dispatch("/cli/relations/list-incoming", &params)
+            .expect("/cli/relations/list-incoming must be handled by agents dispatch");
+        assert_eq!(inc.status, "200 OK", "body={}", inc.body);
+        assert_eq!(inc.body, "[]", "body={}", inc.body);
     }
 }
