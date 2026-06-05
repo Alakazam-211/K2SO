@@ -338,6 +338,27 @@ async fn handle_one_request(
             | "/cli/inbox/delete"
             | "/cli/inbox/respond"
             | "/cli/inbox/migrate"
+            // K2 Connect host-awareness GAP — workspace skill / agent /
+            // session / relations / heartbeat-flag / onboarding writes.
+            // The renderer previously fired these via LOCAL Tauri
+            // invoke(), which misfires when driving a remote host. Each is
+            // a JSON-bodied POST wrapping the same k2so_core fn the Tauri
+            // command called; workspace-scoped (project_path/project_id in
+            // the body), token-gated like every /cli data route. Listed
+            // here so the top-level 405 guard never short-circuits them.
+            | "/cli/skills/create"
+            | "/cli/skills/remove"
+            | "/cli/skills/write-opt-in"
+            | "/cli/onboarding/set-harness-fanout-enabled"
+            | "/cli/agents/regenerate-workspace-skill"
+            | "/cli/agents/save-agent-md"
+            | "/cli/agents/disable-workspace-claude-md"
+            | "/cli/agents/run-workspace-ingest"
+            | "/cli/agents/save-session-id"
+            | "/cli/session/set-surfaced"
+            | "/cli/heartbeat/set-show-sessions"
+            | "/cli/relations/create"
+            | "/cli/relations/delete"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -1599,6 +1620,57 @@ async fn handle_one_request(
             });
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
+        // K2 Connect host-awareness GAP — workspace skill / agent /
+        // session / relations / heartbeat-flag / onboarding POST writes.
+        // Each wraps the same k2so_core fn the renderer's old LOCAL Tauri
+        // command called, so the write lands on whichever daemon the
+        // renderer is actually talking to (local OR remote). JSON-bodied;
+        // method-gated by the `is_post && post_allowed` arm guard + the
+        // explicit `require_post` is unnecessary here (the guard IS the
+        // gate — a GET on these paths can't match this arm and falls
+        // through to the catchall → 404, never a silent mutation).
+        // Token-gated like every /cli data route. F5: FS-walk / DB-lock
+        // work runs on a blocking thread.
+        p if is_post
+            && post_allowed
+            && (p.starts_with("/cli/skills/")
+                || p == "/cli/onboarding/set-harness-fanout-enabled"
+                || p == "/cli/agents/regenerate-workspace-skill"
+                || p == "/cli/agents/save-agent-md"
+                || p == "/cli/agents/disable-workspace-claude-md"
+                || p == "/cli/agents/run-workspace-ingest"
+                || p == "/cli/agents/save-session-id"
+                || p == "/cli/session/set-surfaced"
+                || p == "/cli/heartbeat/set-show-sessions"
+                || p == "/cli/relations/create"
+                || p == "/cli/relations/delete") =>
+        {
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let p_owned = p.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                dispatch_connect_gap_post(&p_owned, &body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            super::http::send_response(&mut *stream, result.status, result.content_type, &result.body)
+                .await;
+        }
         // Phase 2 Unit 4 — POST routes for git (libgit2 ops). F5:
         // spawn_blocking because diff/merge/status on large repos
         // can block for 100s of ms.
@@ -1908,6 +1980,49 @@ fn dispatch_unit6_post(path: &str, body: &[u8]) -> crate::cli::CliResponse {
         "/cli/review-checklist/write" => crate::review_checklist_routes::handle_write(body),
         "/cli/review-checklist/toggle" => crate::review_checklist_routes::handle_toggle(body),
         "/cli/review-checklist/init" => crate::review_checklist_routes::handle_init(body),
+        _ => crate::cli::CliResponse::not_found(),
+    }
+}
+
+/// Dispatch a K2 Connect host-awareness GAP POST route to its handler.
+///
+/// These wrap the same `k2so_core` fns the renderer used to call via
+/// LOCAL Tauri `invoke()` — exposed over HTTP so the write targets
+/// whichever daemon the renderer is talking to (local OR remote host).
+/// Method gate is upstream (the `is_post && post_allowed` arm guard);
+/// token gate is upstream too. Unknown paths 404.
+fn dispatch_connect_gap_post(path: &str, body: &[u8]) -> crate::cli::CliResponse {
+    match path {
+        // Workspace skill CRUD + canonical opt-in + harness-fanout marker.
+        "/cli/skills/create" => crate::skills_routes::handle_create(body),
+        "/cli/skills/remove" => crate::skills_routes::handle_remove(body),
+        "/cli/skills/write-opt-in" => crate::skills_routes::handle_write_opt_in(body),
+        "/cli/onboarding/set-harness-fanout-enabled" => {
+            crate::skills_routes::handle_set_harness_fanout_enabled(body)
+        }
+        // Agent / session writes.
+        "/cli/agents/regenerate-workspace-skill" => {
+            crate::agents_routes::handle_regenerate_workspace_skill(body)
+        }
+        "/cli/agents/save-agent-md" => crate::agents_routes::handle_save_agent_md(body),
+        "/cli/agents/disable-workspace-claude-md" => {
+            crate::agents_routes::handle_disable_workspace_claude_md(body)
+        }
+        "/cli/agents/run-workspace-ingest" => {
+            crate::agents_routes::handle_run_workspace_ingest(body)
+        }
+        "/cli/agents/save-session-id" => crate::agents_routes::handle_save_session_id(body),
+        "/cli/session/set-surfaced" => {
+            crate::agents_routes::handle_session_set_surfaced(body)
+        }
+        // Workspace heartbeat-sessions visibility flag.
+        "/cli/heartbeat/set-show-sessions" => {
+            crate::heartbeat_routes::handle_set_show_heartbeat_sessions(body)
+        }
+        // Workspace relations (id-based — mirrors the renderer's
+        // workspace_relations_* Tauri commands 1:1).
+        "/cli/relations/create" => crate::agents_routes::handle_relations_create(body),
+        "/cli/relations/delete" => crate::agents_routes::handle_relations_delete(body),
         _ => crate::cli::CliResponse::not_found(),
     }
 }
