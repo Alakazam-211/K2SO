@@ -12,6 +12,8 @@ import { useFileSelectionStore } from '@/stores/file-selection'
 import { useFileClipboardStore } from '@/stores/file-clipboard'
 import { useFileUndoStore } from '@/stores/file-undo'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { executeRemoteDrop } from '@/lib/handle-remote-drop'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -779,6 +781,17 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
         }
       }
 
+      // REMOTE host (K2 Connect): the dropped `paths` are LOCAL paths with
+      // no bytes on the daemon, so fs/move|copy (which expect daemon-side
+      // paths) can't work. Upload the bytes INTO the target folder instead
+      // (the "folder" case of the shared drop router). No path injection —
+      // a file-tree drop is a plain copy-into-folder, like the local case.
+      if (useConnectHostStore.getState().activeHost !== 'local') {
+        await executeRemoteDrop(paths, { kind: 'folder', path: targetFolder }, {})
+        await loadDir(targetFolder, true)
+        return
+      }
+
       const toast = useToastStore.getState()
       const undo = useFileUndoStore.getState()
       const isCopy = optionKeyRef.current
@@ -1452,7 +1465,7 @@ export default function FileTree({ rootPath }: FileTreeProps): React.JSX.Element
   }
 
   return (
-    <div ref={treeRef} className="flex flex-col h-full" tabIndex={-1}>
+    <div ref={treeRef} className="flex flex-col h-full" tabIndex={-1} data-file-tree-panel="true">
       {/* Env files section */}
       {envFiles.length > 0 && (
         <div className="px-3 pt-2 pb-1 border-b border-[var(--color-border)]">
