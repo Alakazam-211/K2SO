@@ -55,6 +55,7 @@ mod heartbeat_routes;
 mod inbox_routes;
 mod llm_host;
 mod llm_routes;
+mod misc_routes;
 mod pending_live;
 mod project_config_routes;
 mod providers;

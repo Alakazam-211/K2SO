@@ -44,6 +44,7 @@ pub mod heartbeat_routes;
 pub mod inbox_routes;
 pub mod llm_host;
 pub mod llm_routes;
+pub mod misc_routes;
 pub mod pending_live;
 pub mod project_config_routes;
 pub mod providers;
