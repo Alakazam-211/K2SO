@@ -3,6 +3,14 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.28 — Clone to: fix crash on workspaces with symlinked folders
+
+- **Clone to** no longer fails with *"Is a directory"* on a workspace that
+  contains a **symlink pointing at a folder** (for example, linked
+  agent-skills under `.k2so/`). Those links are now skipped while bundling;
+  symlinks to individual files are still copied. (0.39.27 introduced Clone
+  to — this makes it work for those workspaces.)
+
 ## 0.39.27 — Clone a workspace to another machine + rock-solid remote tunnels
 
 - **"Clone to" — move a whole workspace to a remote machine.** Right-click a
