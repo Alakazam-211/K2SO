@@ -3,6 +3,28 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.33 — Remote reboot + remote updates (beta)
+
+- **Restart a machine you're connected to — from the app or the terminal.** A
+  new **Restart host** control (Settings) appears only when you're on a remote
+  host and is clearly labelled for *that* machine, not your Mac. From the CLI,
+  `k2so daemon restart --host <url> --wait` does the same and waits for it to
+  come back up. Owner/Admin only.
+- **Update a remote machine over K2 Connect (beta).** On a remote host:
+  check → download → verify → install & restart, with live progress and an
+  automatic **rollback** if the new build doesn't come back. The download is
+  **minisign-verified** before anything is swapped. The flow names the remote
+  machine at every step so it can never be mistaken for your local one.
+- **Install on a headless server from the CLI (beta).** `k2so daemon install`
+  (and a `curl … | sh` one-liner) fetches, **verifies the signature**, and
+  installs the standalone daemon, registering a systemd/launchd service so it
+  stays up across restarts.
+
+> Remote update and headless install are **beta**: the macOS path is wired end
+> to end, while the Linux server binaries (built in CI) and the live
+> download → swap → relaunch want a real-world shakeout. Signature verification
+> is mandatory; all of it is Owner/Admin gated.
+
 ## 0.39.32 — Leaner memory, smoother relaunch
 
 - **Closed a memory leak that piled up background agent processes.** Terminal
