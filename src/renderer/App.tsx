@@ -30,6 +30,8 @@ import MergeDialog from './components/MergeDialog/MergeDialog'
 import Toast from './components/Toast/Toast'
 import AssistantBar from './components/WorkspaceAssistant/AssistantBar'
 import { useProjectsStore } from './stores/projects'
+import { useConnectHostStore } from './stores/connect-host'
+import { executeRemoteDrop } from './lib/handle-remote-drop'
 import { usePanelsStore } from './stores/panels'
 import { useSettingsStore } from './stores/settings'
 import { useCommandPaletteStore } from './stores/command-palette'
@@ -258,6 +260,50 @@ export default function App(): React.JSX.Element {
   // behind the rest of the initial render.
   useEffect(() => {
     prewarmDaemonWs()
+  }, [])
+
+  // K2 Connect remote-files Phase 3 — window-level "miss" drop handler.
+  //
+  // `tauri://drag-drop` is window-level: the terminal panes + file-tree all
+  // receive it and each acts when the drop lands inside ITS container.
+  // A drop on bare window chrome (neither a terminal nor the file-tree) is
+  // unhandled. On a REMOTE host we route that miss to the "Save to…"
+  // RemoteFolderPicker (the {kind:'miss'} case of the shared router), which
+  // uploads the bytes to a host directory the user chooses. On LOCAL this
+  // listener does nothing — a window-chrome drop has no meaning there.
+  //
+  // Self-contained hit-test: we only fire when the drop point is NOT inside
+  // a terminal ([data-terminal-id]) and NOT inside the file-tree panel
+  // ([data-file-tree-panel]) — exactly the targets the other listeners own
+  // — so we never double-handle a drop those listeners already consumed.
+  useEffect(() => {
+    const unlisteners: Array<() => void> = []
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-drop',
+        (event) => {
+          if (useConnectHostStore.getState().activeHost === 'local') return
+          const { paths, position } = event.payload
+          if (!paths || paths.length === 0 || !position) return
+          const el = document.elementFromPoint(position.x, position.y)
+          // No element, or the drop landed on a target another listener
+          // owns → not a miss; let that listener handle it.
+          if (
+            el &&
+            (el as HTMLElement).closest?.(
+              '[data-terminal-id],[data-file-tree-panel],[data-path]',
+            )
+          ) {
+            return
+          }
+          // True miss on window chrome → prompt for a host destination.
+          void executeRemoteDrop(paths, { kind: 'miss' }, {})
+        },
+      ).then((fn) => unlisteners.push(fn))
+    })
+    return () => {
+      unlisteners.forEach((fn) => fn())
+    }
   }, [])
 
   // Cmd+, settings, Cmd+K command palette, Cmd+L assistant, Cmd+P review queue
