@@ -56,3 +56,8 @@ pub mod secrets;
 // K2 Connect — client address book persistence (`~/.k2so/connect-hosts.json`,
 // non-secret host list only). Tokens live in the keychain (see `secrets`).
 pub mod connect_hosts;
+// K2 Connect remote-files Phase 2 — read a LOCAL dropped file's bytes
+// (base64) so the renderer can POST them to the remote daemon's
+// `/cli/fs/upload-binary`. HOST-side exception (the file lives on the
+// client's disk; the daemon may be remote).
+pub mod local_upload;

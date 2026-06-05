@@ -1161,6 +1161,9 @@ pub fn run() {
             // host-aware via `/cli/*` on the active daemon.
             // Phase 2 Unit 6 — `commands::filesystem::*` shims
             // deleted. Renderer hits `/cli/fs/*` on the daemon.
+            // K2 Connect remote-files Phase 2 — read a LOCAL dropped
+            // file's bytes (base64) for upload to the remote daemon.
+            commands::local_upload::read_local_file_base64,
             // 0.37.9 — macOS permissions surface for Settings UI
             commands::permissions::permissions_get_status,
             commands::permissions::permissions_request_full_disk_access,
