@@ -114,6 +114,14 @@ pub(crate) struct DaemonState {
     /// Broadcast channel the daemon's `AgentHookEventSink` publishes into.
     /// Every `/events` WS subscriber takes a `Receiver` off this sender.
     pub event_tx: Arc<broadcast::Sender<WireEvent>>,
+    /// Supervisor-agnostic graceful-shutdown trigger (#651). `Some` in the
+    /// running daemon (cloned from the process `shutdown_tx`); a `send(())`
+    /// here drives the SAME teardown path SIGINT uses — async_main wakes,
+    /// reaps PTY children, the process exits, and the supervisor (launchd
+    /// `KeepAlive` / systemd `Restart=always`) respawns it. `None` in the
+    /// test harness so the `POST /cli/daemon/restart` happy-path can be
+    /// asserted (200 + would-restart) WITHOUT ever firing a real restart.
+    pub shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
 fn main() {
@@ -362,13 +370,6 @@ async fn async_main() {
     let event_tx = Arc::new(event_tx);
     k2so_core::agent_hooks::set_sink(Box::new(DaemonBroadcastSink::new((*event_tx).clone())));
 
-    let state = DaemonState {
-        token: Arc::new(token.clone()),
-        started_at: Instant::now(),
-        port,
-        event_tx: event_tx.clone(),
-    };
-
     // Graceful-shutdown channel. launchd sends SIGTERM on system shutdown
     // or `launchctl unload`; Ctrl+C is the local-dev path. Both land on
     // the same broadcast so in-flight handlers get a chance to flush.
@@ -376,8 +377,20 @@ async fn async_main() {
     // sweep so a Ctrl+C during migration is buffered and observed when
     // async_main awaits it below. The outer `shutdown_tx` stays owned by
     // async_main for its whole lifetime so receivers never see `Closed`.
+    //
+    // #651: created BEFORE `state` so a clone can ride into `DaemonState`,
+    // letting `POST /cli/daemon/restart` trigger the SAME graceful teardown
+    // (supervisor-agnostic restart) the SIGINT handler uses.
     let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1);
     let mut main_shutdown_rx = shutdown_tx.subscribe();
+
+    let state = DaemonState {
+        token: Arc::new(token.clone()),
+        started_at: Instant::now(),
+        port,
+        event_tx: event_tx.clone(),
+        shutdown_tx: Some(shutdown_tx.clone()),
+    };
     {
         let shutdown_tx_for_signal = shutdown_tx.clone();
         tokio::spawn(async move {

@@ -23,6 +23,9 @@
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
+// #651: `flush()` on the TcpStream before the restart handler triggers
+// graceful shutdown — the 200 MUST be on the wire before the process dies.
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 /// Outcome of [`handle_one_request`] — tells the outer keep-alive loop
@@ -196,6 +199,12 @@ async fn handle_one_request(
             // crate::cli::dispatch.
             | "/cli/tunnel/start"
             | "/cli/tunnel/stop"
+            // K2SO #651 — supervisor-agnostic daemon restart. OWNER-ONLY
+            // (restarting is the most privileged op; a connect-user session
+            // token is rejected). Method-gated per-handler below
+            // (feedback_post_only_route_guards). No body — owner token rides
+            // the query string.
+            | "/cli/daemon/restart"
             // GET reads the redacted config (tokenSet bool, never the
             // secret); POST sets token/subdomain/server. Claimed here for
             // both methods; the handler branches on `is_post`.
@@ -907,6 +916,64 @@ async fn handle_one_request(
             };
             super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
                 .await;
+        }
+        // POST /cli/daemon/restart — K2SO #651, supervisor-agnostic remote
+        // daemon restart (the foundational slice: bounce a remote K2 server
+        // with no GUI).
+        //
+        // Restart MECHANISM is deliberately NOT `launchctl` (macOS-only).
+        // The daemon will also run headless under systemd `Restart=always`.
+        // Both supervisors respawn a process that exits, so we restart by
+        // TRIGGERING GRACEFUL SHUTDOWN: fire the same `shutdown_tx` the
+        // SIGINT handler uses → async_main wakes, tears down (the new reaper
+        // reaps PTY children — an abrupt `std::process::exit` would ORPHAN
+        // them), the process exits, launchd/systemd respawns it.
+        //
+        // Method gate: explicit `require_post` — the top-level dispatch lets
+        // a GET through on POST-allowlisted routes, and a curl GET must
+        // never bounce the daemon (feedback_post_only_route_guards).
+        //
+        // Auth: strict `require_owner` (OWNER-ONLY). Restarting is the most
+        // privileged op — a connect-user session token (which reaches the
+        // daemon THROUGH the tunnel) is rejected with 403.
+        "/cli/daemon/restart" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
+                return DispatchOutcome::Done;
+            }
+            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            // No JSON body — owner token rides the query string. Drain to flush.
+            let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+
+            // Write + FLUSH the 200 BEFORE anything can trigger shutdown, so
+            // the caller always sees the ack even on the fastest teardown.
+            super::http::send_response(
+                &mut *stream,
+                "200 OK",
+                "application/json",
+                r#"{"ok":true,"restarting":true}"#,
+            )
+            .await;
+            let _ = stream.flush().await;
+
+            // SEAM (#651): `shutdown_tx` is `Some` only in the running
+            // daemon. In the test harness it is `None`, so the happy-path
+            // (200 + would-restart) is asserted WITHOUT ever firing a real
+            // restart — a test must NEVER kill the test process.
+            if let Some(tx) = state.shutdown_tx.clone() {
+                // Detached task: sleep briefly so the flushed 200 lands and
+                // the socket drains on the client side, THEN trigger the
+                // graceful teardown. We do NOT block this connection on it.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    k2so_core::log_debug!(
+                        "[daemon] #651 restart requested — triggering graceful shutdown"
+                    );
+                    let _ = tx.send(());
+                });
+            }
+            return DispatchOutcome::Done;
         }
         // GET/POST /cli/tunnel/config — read or set the K2 Connect tunnel
         // config. GET returns a REDACTED view (tokenSet bool, never the

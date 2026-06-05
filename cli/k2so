@@ -868,6 +868,67 @@ cmd_daemon_stop() {
 }
 
 cmd_daemon_restart() {
+    # Two modes:
+    #   LOCAL  (default): launchctl kickstart the local launch agent.
+    #   REMOTE (--host):  POST /cli/daemon/restart to a remote K2 daemon
+    #                     (e.g. over K2 Connect at https://<sub>.k2.dev),
+    #                     no GUI required. The remote route is supervisor-
+    #                     agnostic — it triggers graceful shutdown and the
+    #                     remote supervisor (launchd/systemd) respawns it.
+    local host="" token=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --host)  host="${2:-}";  shift 2 ;;
+            --host=*) host="${1#--host=}"; shift ;;
+            --token) token="${2:-}"; shift 2 ;;
+            --token=*) token="${1#--token=}"; shift ;;
+            *) echo "daemon restart: unknown argument: $1" >&2; exit 2 ;;
+        esac
+    done
+
+    # ── REMOTE restart ────────────────────────────────────────────────
+    if [ -n "$host" ]; then
+        # Default the owner token from ~/.k2so/daemon.token when --token
+        # is omitted (works when targeting the local daemon's own base URL).
+        if [ -z "$token" ]; then
+            if [ -f "$_daemon_token_file" ] && [ -s "$_daemon_token_file" ]; then
+                token=$(cat "$_daemon_token_file" 2>/dev/null | tr -d '[:space:]')
+            fi
+        fi
+        if [ -z "$token" ]; then
+            echo "daemon restart --host: no owner token (pass --token <tok> or populate $_daemon_token_file)" >&2
+            exit 1
+        fi
+        # Strip a trailing slash so we don't emit a double-slash URL.
+        local base="${host%/}"
+        # OWNER-ONLY route: token rides the query string (the daemon's
+        # require_owner reads it there), no body.
+        local resp
+        resp=$(curl -s -X POST "${base}/cli/daemon/restart?token=${token}" \
+            --connect-timeout 5 --max-time 30 2>/dev/null) || true
+        if [ -z "$resp" ]; then
+            echo "daemon restart --host: no response from ${base} (unreachable, or the daemon exited before flushing)" >&2
+            exit 1
+        fi
+        # Friendly parse: success when the JSON carries "restarting":true.
+        case "$resp" in
+            *'"restarting":true'*)
+                echo "Remote daemon at ${base} is restarting."
+                echo "$resp"
+                return 0
+                ;;
+            *'"error"'*|*'403'*|*'405'*)
+                echo "daemon restart --host: rejected by ${base}: $resp" >&2
+                exit 1
+                ;;
+            *)
+                echo "daemon restart --host: unexpected response from ${base}: $resp" >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    # ── LOCAL restart (unchanged behavior) ────────────────────────────
     local uid
     uid=$(id -u)
     # `launchctl kickstart -k` sends SIGTERM and respawns (thanks to
@@ -4607,7 +4668,16 @@ EOF
             log|logs)  shift 2; cmd_daemon_log "$@" ;;
             uninstall) shift 2; cmd_daemon_uninstall "$@" ;;
             companion) shift 2; cmd_daemon_companion "$@" ;;
-            *)         echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall|companion>" >&2; exit 1 ;;
+            *)
+                echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall|companion>" >&2
+                echo "" >&2
+                echo "  restart [--host <base-url>] [--token <owner-token>]" >&2
+                echo "    Default: restart the LOCAL daemon (launchctl kickstart)." >&2
+                echo "    --host:  restart a REMOTE daemon with no GUI by POSTing" >&2
+                echo "             <base-url>/cli/daemon/restart (e.g. --host https://<sub>.k2.dev)." >&2
+                echo "             Owner-only; --token defaults to ~/.k2so/daemon.token when omitted." >&2
+                exit 1
+                ;;
         esac
         ;;
     tunnel)

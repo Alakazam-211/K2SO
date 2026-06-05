@@ -1001,3 +1001,144 @@ fn futures_block<F: std::future::Future>(fut: F) -> F::Output {
         tokio::runtime::Handle::current().block_on(fut)
     })
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Group 5 — #651 supervisor-agnostic daemon restart gating.
+//
+// CRITICAL SAFETY: the test harness builds `DaemonState` with
+// `shutdown_tx: None` (see `k2so_daemon::test_harness::start`). That is
+// the SEAM: the `POST /cli/daemon/restart` handler returns its 200
+// "restarting" ack and then SKIPS the live shutdown trigger because
+// `shutdown_tx` is `None`. So NO real restart, SIGTERM, or process kill
+// EVER occurs in these tests — the happy-path is asserted as
+// "200 + would-restart" without firing it. These tests lock:
+//   - the route is in `post_allowed` (a POST is dispatched, not top-level
+//     405'd),
+//   - a GET is 405 (require_post),
+//   - a POST without the owner token is 403 (require_owner),
+//   - a POST with a connect-user SESSION token is 403 (owner-only — the
+//     most privileged op rejects session tokens),
+//   - a POST with the owner token is 200 with `"restarting":true`
+//     (handler reached; NO real restart fires thanks to the None seam).
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_restart_get_is_405() {
+    let _g = lock();
+    with_temp_home(|| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        // GET on the POST-only restart route → 405 (require_post). A curl
+        // GET must never bounce the daemon.
+        let r = http(
+            d.port,
+            "GET",
+            &format!("/cli/daemon/restart?token={OWNER_TOKEN}"),
+            None,
+        );
+        assert_eq!(
+            r.status, 405,
+            "GET /cli/daemon/restart must be 405 (POST-only gate); body={}",
+            r.body
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_restart_no_token_is_403() {
+    let _g = lock();
+    with_temp_home(|| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        // POST without a token → 403 (require_owner).
+        let r = http(d.port, "POST", "/cli/daemon/restart", Some(""));
+        assert_eq!(
+            r.status, 403,
+            "POST /cli/daemon/restart with no token must 403; body={}",
+            r.body
+        );
+        // POST with a garbage token → 403.
+        let r = http(
+            d.port,
+            "POST",
+            "/cli/daemon/restart?token=not-the-owner-token",
+            Some(""),
+        );
+        assert_eq!(
+            r.status, 403,
+            "POST /cli/daemon/restart with garbage token must 403; body={}",
+            r.body
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_restart_rejects_connect_user_session() {
+    let _g = lock();
+    with_temp_home(|| {
+        // A connect-user (even an Admin) reaches the daemon THROUGH the
+        // tunnel and must NEVER be able to restart the host — restarting is
+        // owner-token-only. require_owner uses token_is_owner, so a session
+        // token (which passes the general token_ok gate) is rejected here.
+        let member = seed_user_session("restart_member", "password123", Role::Member);
+        let admin = seed_user_session("restart_admin", "password123", Role::Admin);
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/daemon/restart?token={member}"),
+            Some(""),
+        );
+        assert_eq!(
+            r.status, 403,
+            "member session must NOT restart the daemon (owner-only); body={}",
+            r.body
+        );
+
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/daemon/restart?token={admin}"),
+            Some(""),
+        );
+        assert_eq!(
+            r.status, 403,
+            "admin session must NOT restart the daemon (owner-token-only); body={}",
+            r.body
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_restart_owner_gets_200_would_restart_without_firing() {
+    let _g = lock();
+    with_temp_home(|| {
+        // The harness's DaemonState has `shutdown_tx: None`, so the handler
+        // returns its 200 ack and SKIPS the live shutdown trigger. We assert
+        // the happy-path WITHOUT any real restart occurring — if the seam
+        // were wired live, this would SIGTERM the test process instead.
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/daemon/restart?token={OWNER_TOKEN}"),
+            Some(""),
+        );
+        assert_eq!(
+            r.status, 200,
+            "owner POST /cli/daemon/restart must reach the handler (200); body={}",
+            r.body
+        );
+        assert!(
+            r.body.contains("\"restarting\":true"),
+            "200 body must signal would-restart; body={}",
+            r.body
+        );
+        assert!(
+            r.body.contains("\"ok\":true"),
+            "200 body must be the ok ack; body={}",
+            r.body
+        );
+        // The test process is STILL ALIVE here — proof the None seam
+        // prevented a live restart. Reaching this assert is the assertion.
+    });
+}

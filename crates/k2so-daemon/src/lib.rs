@@ -105,6 +105,13 @@ pub struct DaemonState {
     /// Broadcast channel the daemon's `AgentHookEventSink` publishes into.
     /// Every `/events` WS subscriber takes a `Receiver` off this sender.
     pub event_tx: Arc<broadcast::Sender<WireEvent>>,
+    /// Supervisor-agnostic graceful-shutdown trigger (#651). Mirrors the
+    /// `main.rs` field. `Some` in the running daemon; a `send(())` here
+    /// drives the SAME teardown path SIGINT uses so the supervisor (launchd
+    /// `KeepAlive` / systemd `Restart=always`) respawns the process. `None`
+    /// in the test harness so `POST /cli/daemon/restart` can be asserted
+    /// (200 + would-restart) WITHOUT firing a real restart.
+    pub shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
 // ── #630 auth-route integration harness ─────────────────────────────
@@ -163,6 +170,12 @@ pub mod test_harness {
             started_at: Instant::now(),
             port,
             event_tx,
+            // #651: the test harness must NEVER fire a real restart. `None`
+            // makes the `POST /cli/daemon/restart` handler return its 200
+            // "would-restart" response and SKIP the live shutdown trigger,
+            // so gate + happy-path can be asserted without killing the test
+            // process.
+            shutdown_tx: None,
         };
 
         tokio::spawn(async move {
