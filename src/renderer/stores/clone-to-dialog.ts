@@ -7,25 +7,38 @@ import type {
 } from '@/lib/clone-to'
 import type { ConnectHost } from '@/stores/connect-host'
 
-// Store for the "Clone to" progress modal. Mirrors the open/close idiom of
+// Store for the "Clone to" modal. Mirrors the open/close idiom of
 // add-workspace-dialog / remote-folder-picker. The modal subscribes to this
-// and renders the current stage; the orchestration (`cloneWorkspaceTo`)
-// pushes updates here via its hooks.
+// and renders the current phase/stage; the orchestration (`cloneWorkspaceTo`)
+// pushes progress updates here via its hooks.
 //
-// Lifecycle: the context-menu handler calls `start({ projectPath, host })`,
-// then drives `cloneWorkspaceTo` whose hooks call setStage / setSummary /
-// setDone / setError on this store. The modal stays open through 'done' /
-// 'error' so the user sees the result + the re-supply checklist; they close
-// it manually.
+// Lifecycle:
+//   1. The context-menu handler calls `start({ projectPath, host, onConfirm })`.
+//      The modal opens in the 'options' PHASE — a pre-flight panel with the
+//      "Include secrets" toggle (default INCLUDE) + a Clone button.
+//   2. The user picks the toggle and clicks Clone → `confirm()` flips the
+//      phase to 'running' and invokes the stored `onConfirm(carrySecrets)`,
+//      which drives `cloneWorkspaceTo` whose hooks call setStage / setSummary
+//      / setDone / setError on this store.
+//   3. The modal stays open through 'done' / 'error' so the user sees the
+//      result + the re-supply checklist; they close it manually.
+
+/** Two-phase modal: the pre-flight options panel, then the progress run. */
+export type ClonePhase = 'options' | 'running'
 
 interface CloneToDialogState {
   isOpen: boolean
+  /** Pre-flight options vs. the running progress UI. */
+  phase: ClonePhase
   /** Source workspace path (LOCAL). */
   projectPath: string | null
   /** Source workspace display name (for the header). */
   projectName: string | null
   /** Destination K2 Connect host. */
   host: ConnectHost | null
+  /** "Include secrets" toggle — default true (include). Read at confirm time
+   *  and threaded into `cloneWorkspaceTo` → `clone/bundle` as carry_secrets. */
+  carrySecrets: boolean
   stage: CloneStage
   /** Manifest summary, set once the bundle is built. */
   summary: CloneManifestSummary | null
@@ -33,9 +46,22 @@ interface CloneToDialogState {
   result: CloneUnpackResult | null
   /** Error message, set on failure. */
   error: string | null
+  /** Runner that starts the orchestration; set by `start`, invoked by
+   *  `confirm` with the chosen toggle value. Held so the dialog's Clone
+   *  button can kick off the run without re-plumbing deps through the UI. */
+  onConfirm: ((carrySecrets: boolean) => void) | null
 
-  /** Open the modal at the 'bundling' stage for a given source + host. */
-  start: (args: { projectPath: string; projectName: string; host: ConnectHost }) => void
+  /** Open the modal at the 'options' phase for a given source + host. */
+  start: (args: {
+    projectPath: string
+    projectName: string
+    host: ConnectHost
+    onConfirm: (carrySecrets: boolean) => void
+  }) => void
+  /** Toggle the "Include secrets" checkbox (options phase only). */
+  setCarrySecrets: (carrySecrets: boolean) => void
+  /** Proceed from the options panel: flip to 'running' and start the run. */
+  confirm: () => void
   setStage: (stage: CloneStage) => void
   setSummary: (summary: CloneManifestSummary) => void
   setDone: (result: CloneUnpackResult) => void
@@ -44,42 +70,48 @@ interface CloneToDialogState {
   close: () => void
 }
 
-export const useCloneToDialogStore = create<CloneToDialogState>((set) => ({
+const RESET = {
   isOpen: false,
+  phase: 'options' as ClonePhase,
   projectPath: null,
   projectName: null,
   host: null,
-  stage: 'bundling',
+  carrySecrets: true,
+  stage: 'bundling' as CloneStage,
   summary: null,
   result: null,
   error: null,
+  onConfirm: null,
+}
 
-  start: ({ projectPath, projectName, host }) =>
+export const useCloneToDialogStore = create<CloneToDialogState>((set, get) => ({
+  ...RESET,
+
+  start: ({ projectPath, projectName, host, onConfirm }) =>
     set({
+      ...RESET,
       isOpen: true,
+      phase: 'options',
       projectPath,
       projectName,
       host,
-      stage: 'bundling',
-      summary: null,
-      result: null,
-      error: null,
+      carrySecrets: true,
+      onConfirm,
     }),
+
+  setCarrySecrets: (carrySecrets) => set({ carrySecrets }),
+
+  confirm: () => {
+    const { phase, onConfirm, carrySecrets } = get()
+    if (phase !== 'options') return
+    set({ phase: 'running', stage: 'bundling' })
+    onConfirm?.(carrySecrets)
+  },
 
   setStage: (stage) => set({ stage }),
   setSummary: (summary) => set({ summary }),
   setDone: (result) => set({ stage: 'done', result }),
   setError: (error) => set({ stage: 'error', error }),
 
-  close: () =>
-    set({
-      isOpen: false,
-      projectPath: null,
-      projectName: null,
-      host: null,
-      stage: 'bundling',
-      summary: null,
-      result: null,
-      error: null,
-    }),
+  close: () => set({ ...RESET }),
 }))

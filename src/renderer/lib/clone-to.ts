@@ -160,6 +160,15 @@ export async function cloneWorkspaceTo(
   destinationHost: ConnectHost,
   deps: CloneDeps,
   hooks: CloneHooks = {},
+  /**
+   * Whether to carry secrets (.env, .auth/, in-workspace tokens) into the
+   * bundle. Default `true` (include): the bundle travels over the encrypted
+   * K2 Connect link between the user's own machines. When `false`, the
+   * daemon scrubs secrets and the user re-supplies them on the host (the
+   * done screen's re-supply checklist). Threaded into the `clone/bundle`
+   * call as `carry_secrets`.
+   */
+  carrySecrets = true,
 ): Promise<CloneUnpackResult> {
   const { onStage, onBundled, onDone, onError } = hooks
   try {
@@ -167,6 +176,7 @@ export async function cloneWorkspaceTo(
     onStage?.('bundling')
     const bundle = await deps.daemonCliPost<CloneBundleResult>('clone/bundle', {
       project_path: projectPath,
+      carry_secrets: carrySecrets,
     })
     if (!bundle?.bundle_path) {
       throw new Error('Bundle step returned no bundle_path.')
