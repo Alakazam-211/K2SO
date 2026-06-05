@@ -74,14 +74,6 @@ pub fn handle_states_list() -> CliResponse {
     serialized(dops::states_list())
 }
 
-pub fn handle_states_get(params: &HashMap<String, String>) -> CliResponse {
-    let id = str_param(params, "id");
-    if id.is_empty() {
-        return CliResponse::bad_request("Missing 'id' parameter");
-    }
-    serialized(dops::states_get(&id))
-}
-
 // ── Workspaces ────────────────────────────────────────────────────────
 
 pub fn handle_workspaces_list(params: &HashMap<String, String>) -> CliResponse {
