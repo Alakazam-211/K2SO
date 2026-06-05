@@ -421,6 +421,11 @@ export interface SerializedTab {
   mosaicTree: MosaicNode<string> | null
   paneGroups: Record<string, SerializedPaneGroup>
   isSystemAgent?: boolean
+  /** #587 — pinned HTML file tab. Rendered immediately after the
+   *  system (Chat/Inbox) tabs and before regular tabs. Survives reload
+   *  via the same serialize/restore path as system tabs; closing one
+   *  unpins (removes) it rather than hiding. */
+  isPinnedFile?: boolean
 }
 
 export interface SerializedLayout {
@@ -453,6 +458,10 @@ export interface Tab {
   isDirty?: boolean
   /** System agent tab — pinned at start of tab bar, can't be closed or reordered */
   isSystemAgent?: boolean
+  /** #587 — pinned HTML file tab. Sits right after the system (Chat/
+   *  Inbox) tabs and before regular tabs. Carries a pinned file-viewer
+   *  item (html mode). Closing it unpins rather than hides. */
+  isPinnedFile?: boolean
 }
 
 interface TabsState {
@@ -576,6 +585,20 @@ interface TabsState {
   ensureSystemAgentTabs: (agentName: string, projectPath: string, title: string) => string
   /** Remove the pinned system agent tab (when agent mode is turned off). */
   removeSystemAgentTab: () => void
+
+  // ── Pinned HTML file tabs (#587) ─────────────────────────────────
+  /** Pin an HTML file as a top-level tab. The pinned tab renders the
+   *  file in FileViewerPane (html mode, rendered by default) and sits
+   *  immediately after the system (Chat/Inbox) tabs, before regular
+   *  tabs. Per-workspace (lives in this workspace's tab list, which is
+   *  serialized/restored per workspace). No-op if already pinned;
+   *  focuses the existing tab instead. */
+  pinFileAsTab: (filePath: string) => void
+  /** Unpin a pinned HTML file tab (also used as the close=unpin path). */
+  unpinFileTab: (filePath: string) => void
+  /** True if `filePath` is currently pinned as a top-level tab in the
+   *  active workspace. */
+  isFilePinned: (filePath: string) => boolean
   /** Activate the pinned system agent tab (switches to it). */
   activateSystemAgentTab: () => void
   /** Get the pinned system agent tab if it exists. */
@@ -777,6 +800,7 @@ function serializeTab(tab: Tab): SerializedTab {
     mosaicTree: tab.mosaicTree,
     paneGroups: paneGroupsObj,
     ...(tab.isSystemAgent ? { isSystemAgent: true } : {}),
+    ...(tab.isPinnedFile ? { isPinnedFile: true } : {}),
   }
 }
 
@@ -1078,6 +1102,17 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const tab = get().tabs.find((t) => t.id === tabId)
     if (tab?.isSystemAgent) return
 
+    // #587 — closing a pinned HTML file tab means UNPIN, not just hide.
+    // Route through unpinFileTab so the pin state stays consistent
+    // (and so a re-pin later re-creates the tab rather than colliding).
+    if (tab?.isPinnedFile) {
+      const item = Array.from(tab.paneGroups.values())[0]?.items[0]
+      if (item?.type === 'file-viewer') {
+        get().unpinFileTab((item.data as FileViewerItemData).filePath)
+        return
+      }
+    }
+
     // Kill all PTYs in the removed tab (PTYs survive tab switches for persistence)
     if (tab) {
       for (const [, pg] of tab.paneGroups) {
@@ -1169,8 +1204,15 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     set((state) => {
       if (groupIndex === 0) {
         const tabs = [...state.tabs]
-        // Don't reorder the pinned system agent tab (always at index 0)
-        if (tabs[fromIndex]?.isSystemAgent || tabs[toIndex]?.isSystemAgent) return {}
+        // Don't reorder the pinned system agent tabs (always at the
+        // front) or the pinned HTML file tabs (#587 — fixed slot right
+        // after the system tabs). Either endpoint touching a pinned
+        // tab cancels the reorder so the canonical
+        // [system][pinned-file][regular] order is preserved.
+        if (
+          tabs[fromIndex]?.isSystemAgent || tabs[toIndex]?.isSystemAgent ||
+          tabs[fromIndex]?.isPinnedFile || tabs[toIndex]?.isPinnedFile
+        ) return {}
         const [moved] = tabs.splice(fromIndex, 1)
         tabs.splice(toIndex, 0, moved)
         return { tabs }
@@ -1742,6 +1784,87 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   getSystemAgentTab: () => {
     return get().tabs.find((t) => t.isSystemAgent)
+  },
+
+  // ── Pinned HTML file tabs (#587) ─────────────────────────────────
+
+  pinFileAsTab: (filePath: string) => {
+    const filePathOf = (tab: Tab): string | null => {
+      const item = Array.from(tab.paneGroups.values())[0]?.items[0]
+      if (item?.type !== 'file-viewer') return null
+      return (item.data as FileViewerItemData).filePath
+    }
+
+    set((state) => {
+      // Already pinned? Just focus it (idempotent — no duplicate tab).
+      const existing = state.tabs.find((t) => t.isPinnedFile && filePathOf(t) === filePath)
+      if (existing) {
+        return { activeTabId: existing.id }
+      }
+
+      // Build a dedicated pinned-file tab. The file-viewer item is
+      // `pinned: true` so the pane's own pin affordance reflects the
+      // pinned state and `openFileInPane` won't recycle this slot.
+      const pgId = crypto.randomUUID()
+      const tabId = crypto.randomUUID()
+      const title = filePath.split('/').pop() || filePath
+      const pg = makeFileViewerPaneGroup(pgId, filePath, true)
+      const newTab: Tab = {
+        id: tabId,
+        title,
+        mosaicTree: pgId,
+        paneGroups: new Map([[pgId, pg]]),
+        isPinnedFile: true,
+      }
+
+      // Order: [system…] [pinned-file…] [regular…]. Insert the new
+      // pinned tab after the existing system + pinned-file tabs but
+      // before the first regular tab — mirrors how ensureSystemAgentTabs
+      // keeps system tabs at the front.
+      const leading: Tab[] = []
+      const regular: Tab[] = []
+      for (const t of state.tabs) {
+        if (t.isSystemAgent || t.isPinnedFile) leading.push(t)
+        else regular.push(t)
+      }
+      return {
+        tabs: [...leading, newTab, ...regular],
+        activeTabId: tabId,
+      }
+    })
+    get().persistActiveWorkspace()
+  },
+
+  unpinFileTab: (filePath: string) => {
+    const filePathOf = (tab: Tab): string | null => {
+      const item = Array.from(tab.paneGroups.values())[0]?.items[0]
+      if (item?.type !== 'file-viewer') return null
+      return (item.data as FileViewerItemData).filePath
+    }
+
+    set((state) => {
+      const target = state.tabs.find((t) => t.isPinnedFile && filePathOf(t) === filePath)
+      if (!target) return state
+      const newTabs = state.tabs.filter((t) => t.id !== target.id)
+      let newActiveId = state.activeTabId
+      if (state.activeTabId === target.id) {
+        const idx = state.tabs.findIndex((t) => t.id === target.id)
+        newActiveId = newTabs.length > 0
+          ? newTabs[Math.min(idx, newTabs.length - 1)].id
+          : null
+      }
+      return { tabs: newTabs, activeTabId: newActiveId }
+    })
+    get().persistActiveWorkspace()
+  },
+
+  isFilePinned: (filePath: string): boolean => {
+    return get().tabs.some((t) => {
+      if (!t.isPinnedFile) return false
+      const item = Array.from(t.paneGroups.values())[0]?.items[0]
+      if (item?.type !== 'file-viewer') return false
+      return (item.data as FileViewerItemData).filePath === filePath
+    })
   },
 
   openFileAsTab: (filePath: string) => {
@@ -2548,6 +2671,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         mosaicTree: remappedTree,
         paneGroups,
         ...(serializedTab.isSystemAgent ? { isSystemAgent: true } : {}),
+        ...(serializedTab.isPinnedFile ? { isPinnedFile: true } : {}),
       }
     })
 

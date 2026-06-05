@@ -467,7 +467,15 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               {(() => {
                 // Determine which icon to show
                 let icon: React.ReactNode = null
-                if (isWorktreeTab) {
+                if (tab.isPinnedFile) {
+                  // #587 — pinned HTML file tab. A pin glyph reads as
+                  // "kept open next to the Inbox".
+                  icon = (
+                    <svg className="w-3 h-3 text-[var(--color-accent)]" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707l-.71-.71-3.18 3.18a3.5 3.5 0 0 1-.4.3L11 11.106V14.5a.5.5 0 0 1-.854.354L7.5 12.207 4.854 14.854a.5.5 0 0 1-.708-.708L6.793 11.5 4.146 8.854A.5.5 0 0 1 4.5 8h3.394a3.5 3.5 0 0 0 .3-.4l3.18-3.18-.71-.71a.5.5 0 0 1 .354-.854z" />
+                    </svg>
+                  )
+                } else if (isWorktreeTab) {
                   icon = (
                     <svg className="w-3 h-3 text-[var(--color-text-muted)] opacity-70" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
                       <circle cx="4" cy="4" r="1.5" /><circle cx="12" cy="4" r="1.5" /><circle cx="4" cy="12" r="1.5" />

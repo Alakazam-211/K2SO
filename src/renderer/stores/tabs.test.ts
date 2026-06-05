@@ -361,3 +361,101 @@ describe('moveTabToGroup (cross-column drag)', () => {
     expect(useTabsStore.getState().extraGroups[0].tabs.map((t) => t.id)).toEqual(before.extra)
   })
 })
+
+// ── #587 — pinned HTML file tabs ─────────────────────────────────────────
+//
+// A pinned HTML file is a top-level tab (isPinnedFile) carrying a pinned
+// file-viewer item. It sits right after the system (Chat/Inbox) tabs and
+// before regular tabs, survives a serialize → restore round-trip, and is
+// closed by *unpinning* (removal) rather than hiding.
+
+/** Pull the filePath off a tab's first file-viewer item (helper for the
+ *  pinned-file assertions below). */
+function pinnedFilePath(tab: { paneGroups: Map<string, { items: Array<{ type: string; data: unknown }> }> }): string | null {
+  const item = Array.from(tab.paneGroups.values())[0]?.items[0]
+  if (item?.type !== 'file-viewer') return null
+  return (item.data as { filePath?: string }).filePath ?? null
+}
+
+describe('pinned HTML file tabs (#587)', () => {
+  beforeEach(reset)
+
+  it('pins an HTML file into the workspace pinned-file list', () => {
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/report.html')
+
+    const s = useTabsStore.getState()
+    const pinned = s.tabs.filter((t) => t.isPinnedFile)
+    expect(pinned).toHaveLength(1)
+    expect(pinnedFilePath(pinned[0])).toBe('/tmp/proj/report.html')
+    expect(useTabsStore.getState().isFilePinned('/tmp/proj/report.html')).toBe(true)
+    // The pinned file-viewer item is itself marked pinned so the
+    // unpinned-slot recycling in openFileInPane won't reuse it.
+    const item = Array.from(pinned[0].paneGroups.values())[0].items[0]
+    expect(item.pinned).toBe(true)
+    // Pinning focuses the new tab.
+    expect(s.activeTabId).toBe(pinned[0].id)
+  })
+
+  it('does not duplicate when pinning the same file twice (focuses instead)', () => {
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/a.html')
+    const firstId = useTabsStore.getState().tabs.find((t) => t.isPinnedFile)?.id
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/a.html')
+
+    const s = useTabsStore.getState()
+    expect(s.tabs.filter((t) => t.isPinnedFile)).toHaveLength(1)
+    expect(s.activeTabId).toBe(firstId)
+  })
+
+  it('orders pinned HTML tabs right after the system Chat/Inbox tabs', () => {
+    // Seed the system Chat + Inbox tabs, then a regular terminal tab.
+    useTabsStore.getState().ensureSystemAgentTabs('manager', '/tmp/proj', 'Manager')
+    useTabsStore.getState().addTab('/tmp/proj', { title: 'Terminal 1' })
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/dash.html')
+
+    const titles = useTabsStore.getState().tabs.map((t) => t.title)
+    // [Chat] [Inbox] [pinned HTML] [regular terminal]
+    expect(titles).toEqual(['Chat', 'Inbox', 'dash.html', 'Terminal 1'])
+  })
+
+  it('unpins a pinned HTML tab (removes it from the list)', () => {
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/x.html')
+    useTabsStore.getState().unpinFileTab('/tmp/proj/x.html')
+
+    const s = useTabsStore.getState()
+    expect(s.tabs.filter((t) => t.isPinnedFile)).toHaveLength(0)
+    expect(s.isFilePinned('/tmp/proj/x.html')).toBe(false)
+  })
+
+  it('closing a pinned HTML tab unpins it (removeTab → unpin)', () => {
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/y.html')
+    const tabId = useTabsStore.getState().tabs.find((t) => t.isPinnedFile)!.id
+    useTabsStore.getState().removeTab(tabId)
+
+    expect(useTabsStore.getState().isFilePinned('/tmp/proj/y.html')).toBe(false)
+  })
+
+  it('survives a serialize → restore round-trip in the right order', () => {
+    useTabsStore.getState().ensureSystemAgentTabs('manager', '/tmp/proj', 'Manager')
+    useTabsStore.getState().addTab('/tmp/proj', { title: 'Terminal 1' })
+    useTabsStore.getState().pinFileAsTab('/tmp/proj/dash.html')
+
+    // Round-trip through the same path workspace layout persistence uses.
+    const layout = useTabsStore.getState().serializeCurrentLayout()
+    reset()
+    useTabsStore.getState().restoreLayout(layout, '/tmp/proj')
+
+    const tabs = useTabsStore.getState().tabs
+    expect(tabs.map((t) => t.title)).toEqual(['Chat', 'Inbox', 'dash.html', 'Terminal 1'])
+
+    const pinned = tabs.filter((t) => t.isPinnedFile)
+    expect(pinned).toHaveLength(1)
+    expect(pinned[0].isPinnedFile).toBe(true)
+    expect(pinnedFilePath(pinned[0])).toBe('/tmp/proj/dash.html')
+    // The restored pinned-file tab still sits immediately after the
+    // two system tabs and before the regular terminal tab.
+    const pinnedIdx = tabs.findIndex((t) => t.isPinnedFile)
+    expect(tabs[pinnedIdx - 1].isSystemAgent).toBe(true)
+    expect(tabs[pinnedIdx + 1].isSystemAgent).toBeFalsy()
+    expect(tabs[pinnedIdx + 1].isPinnedFile).toBeFalsy()
+  })
+})
