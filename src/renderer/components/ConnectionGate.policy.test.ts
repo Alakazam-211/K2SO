@@ -8,7 +8,7 @@
 //     (a remote daemon may run a different marketing version).
 
 import { describe, it, expect } from 'vitest'
-import { localPairedPolicy, remoteHostPolicy } from './ConnectionGate'
+import { localPairedPolicy, remoteHostPolicy, shouldSurfaceRemoteDrop } from './ConnectionGate'
 
 const status = (over: Partial<{ version: string; protocol: number; phase: string; detail: string }> = {}) => ({
   version: '0.39.15',
@@ -71,5 +71,29 @@ describe('remoteHostPolicy', () => {
     const s = status({ version: 'something-else' })
     expect(local.decide(s).kind).toBe('wait')
     expect(remote.decide(s).kind).toBe('accept')
+  })
+})
+
+// K2 Connect step #4 — DEBOUNCE the drop. A single slow/blipped health-poll
+// over a higher-latency tunnel must NOT surface the reconnect banner while
+// the data WS is still streaming; only >= REMOTE_DROP_THRESHOLD (2)
+// CONSECUTIVE failed polls count as a genuine drop. This pins the threshold
+// rule the gate's poll loop uses (N-1 fails → no banner; Nth → banner).
+describe('shouldSurfaceRemoteDrop (debounced drop)', () => {
+  it('a single blip does NOT surface the banner (N-1 = 1 fail)', () => {
+    expect(shouldSurfaceRemoteDrop(1)).toBe(false)
+  })
+
+  it('the threshold-th consecutive fail surfaces the banner (N = 2)', () => {
+    expect(shouldSurfaceRemoteDrop(2)).toBe(true)
+  })
+
+  it('stays surfaced past the threshold', () => {
+    expect(shouldSurfaceRemoteDrop(3)).toBe(true)
+    expect(shouldSurfaceRemoteDrop(10)).toBe(true)
+  })
+
+  it('zero fails (just connected / recovered) is never a drop', () => {
+    expect(shouldSurfaceRemoteDrop(0)).toBe(false)
   })
 })
