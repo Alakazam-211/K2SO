@@ -426,6 +426,69 @@ fn bundle_round_trips_secrets_absent_by_default() {
     assert!(body.contains("project docs"));
 }
 
+/// Regression: a symlink that points at a DIRECTORY inside the workspace
+/// (the real-world `.k2so/external/agent-skills/.opencode/skills` case) must
+/// be skipped, not appended as a file. Before the fix the walker — running
+/// with follow_links(false) — saw a symlink (not a dir), let it through, and
+/// `append_file`'s `File::open` followed it into the directory, crashing the
+/// whole clone with EISDIR ("Is a directory", os error 21). A symlink to a
+/// real FILE must still be copied (it resolves to a regular file).
+#[test]
+#[cfg(unix)]
+fn symlink_to_dir_skipped_symlink_to_file_copied() {
+    use std::os::unix::fs::symlink;
+    let fx = build_fixture();
+
+    // symlink-to-dir: the production crash path.
+    let ext_dir = fx
+        .project
+        .join(".k2so/external/agent-skills/.opencode/realskills");
+    fs::create_dir_all(&ext_dir).unwrap();
+    write(&ext_dir.join("note.md"), "skill\n");
+    symlink(
+        &ext_dir,
+        fx.project
+            .join(".k2so/external/agent-skills/.opencode/skills"),
+    )
+    .unwrap();
+
+    // symlink-to-file: must still be copied (resolves to a regular file).
+    let real_file = fx.project.join("real-config.toml");
+    write(&real_file, "key = 1\n");
+    symlink(&real_file, fx.project.join("linked-config.toml")).unwrap();
+
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+
+    // The bundle MUST build (previously: EISDIR on the symlinked dir).
+    let out = fx._root.path().join("symlink-bundle.tar.gz");
+    build_bundle(
+        &inv,
+        &opts(&fx.home),
+        "2026-06-05T00:00:00Z".to_string(),
+        None,
+        &out,
+    )
+    .expect("bundle must build despite a symlink-to-directory in the tree");
+
+    let extract = fx._root.path().join("symlink-extract");
+    fs::create_dir_all(&extract).unwrap();
+    let names = untar(&out, &extract);
+
+    // The symlink-to-dir itself is NOT bundled.
+    assert!(
+        !names.iter().any(|n| n.ends_with(".opencode/skills")),
+        "symlink-to-dir must be skipped, got {names:?}"
+    );
+    // The symlink-to-file IS copied, with its target's bytes.
+    assert!(
+        names.iter().any(|n| n == "workspace/linked-config.toml"),
+        "symlink-to-file must be copied, got {names:?}"
+    );
+    let copied =
+        fs::read_to_string(extract.join("workspace/linked-config.toml")).unwrap();
+    assert!(copied.contains("key = 1"), "symlink-to-file content copied");
+}
+
 #[test]
 fn bundle_carries_secrets_when_opted_in() {
     let fx = build_fixture();

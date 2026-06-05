@@ -97,6 +97,20 @@ fn resolve_home(opts: &CloneOptions) -> Result<PathBuf, String> {
     dirs::home_dir().ok_or_else(|| "cannot resolve home directory".to_string())
 }
 
+/// True only if `path` resolves (following symlinks) to a regular file the
+/// bundler can `File::open` + stream into the tar. The walkers run with
+/// `follow_links(false)`, so a symlink is reported with its OWN type — a
+/// symlink that targets a directory is NOT a dir by `entry.file_type()` and
+/// slips past the is_dir skips. `append_file` would then follow it into the
+/// directory and crash with EISDIR. Resolving here excludes real dirs,
+/// symlinked dirs, and broken/unreadable links; symlinks to real files still
+/// resolve to `is_file()` and copy their bytes.
+fn is_appendable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
 /// Walk the PROJECT tree with the `ignore` crate (honors `.gitignore` /
 /// `.ignore` / `.k2soignore`), apply the bulk skip-list (also inside
 /// nested git repos), and secret-classify every surviving file.
@@ -150,6 +164,17 @@ fn collect_workspace(
             continue; // entries are files; dirs are recreated implicitly.
         }
         let path = entry.path();
+        // A symlink reports its OWN type under follow_links(false), so a
+        // symlink pointing at a directory (e.g.
+        // `.k2so/external/agent-skills/.opencode/skills`) escapes the is_dir
+        // skip above. append_file's `File::open` would then follow it into
+        // the directory and crash with EISDIR ("Is a directory"). Resolve the
+        // target and skip anything that isn't a real file — symlinked dirs,
+        // broken/unreadable links. Symlinks to real files still resolve to a
+        // file here and copy their bytes.
+        if !is_appendable_file(path) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         if is_bulk_file(&name) {
             continue;
@@ -201,6 +226,12 @@ fn collect_memory(slug_dir: &Path, entries: &mut Vec<InventoryEntry>) {
             continue;
         }
         let path = entry.path();
+        // Same symlink-to-dir guard as collect_workspace: a symlink reports
+        // its own type under follow_links(false), so skip anything that
+        // doesn't resolve to a real file (else append_file hits EISDIR).
+        if !is_appendable_file(path) {
+            continue;
+        }
         // rel is relative to the memory dir → re-rooted under `memory/`
         // in the bundle.
         if let Ok(rel) = path.strip_prefix(&memory_dir) {
