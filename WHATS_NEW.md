@@ -3,6 +3,14 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.30 — Fix: pinned-chat dropdown works on a remote machine
+
+- **The pinned chat tab's chat-picker now switches chats on the machine
+  you're connected to.** Selecting a different chat from the dropdown was
+  updating only your *local* machine, so on a remote the chosen chat never
+  loaded — it now writes to the active host, so it works the same remote as
+  it does locally. (Working directly on the machine was already fine.)
+
 ## 0.39.29 — Clone to: the cloned workspace shows up + "Open on host"
 
 - **The cloned workspace now appears on the host immediately** — no more
