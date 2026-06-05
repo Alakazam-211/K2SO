@@ -1373,18 +1373,15 @@ export function K2ConnectSection(): React.JSX.Element {
                         {/* K2SO #629 — role selector. Editable only for an
                             Owner viewer; Admins see the role read-only. */}
                         {canChangeRoles(viewerRole) ? (
-                          <select
+                          <SettingDropdown
                             value={u.role ?? 'member'}
-                            onChange={(e) => void changeRole(u.username, e.target.value as K2Role)}
-                            title="Permission role"
-                            aria-label={`Role for ${u.username}`}
-                            className={`${inputCls} no-drag cursor-pointer`}
-                            style={{ colorScheme: 'dark', paddingTop: 2, paddingBottom: 2 }}
-                          >
-                            <option value="member">Member</option>
-                            <option value="admin">Admin</option>
-                            <option value="owner">Owner</option>
-                          </select>
+                            options={[
+                              { value: 'member', label: 'Member' },
+                              { value: 'admin', label: 'Admin' },
+                              { value: 'owner', label: 'Owner' },
+                            ]}
+                            onChange={(value) => void changeRole(u.username, value as K2Role)}
+                          />
                         ) : (
                           <span className="text-[9px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-[var(--color-accent)]/15 text-[var(--color-text-secondary)]">
                             {u.role ?? 'member'}
