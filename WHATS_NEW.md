@@ -3,6 +3,15 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.29 — Clone to: the cloned workspace shows up + "Open on host"
+
+- **The cloned workspace now appears on the host immediately** — no more
+  manual window reload to see it. After a clone finishes, the destination's
+  workspace list refreshes on its own.
+- **"Open on \<host\>" button on the done screen** — jump straight into the
+  freshly-cloned workspace on the remote machine, instead of hunting for it
+  in the sidebar.
+
 ## 0.39.28 — Clone to: fix crash on workspaces with symlinked folders
 
 - **Clone to** no longer fails with *"Is a directory"* on a workspace that
