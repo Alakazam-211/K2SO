@@ -4,26 +4,42 @@
 //! one-click migration to a remote host has to gather all three, scrub
 //! the secrets, drop the bulk, and package the result so the remote can
 //! reconstruct a resumable agent at recomputed paths. This module is the
-//! shared CORE that does the gathering + scrubbing (this commit) +
-//! packaging (follow-up commit). It has NO HTTP, NO Tauri, NO daemon — a
-//! pure, unit-testable library consumed by both the high-bar "Clone to"
-//! push (P2) and the save-locally README fallback (P3). See PRD
-//! `k2-connect-clone-to.md`.
+//! shared CORE that does the gathering + scrubbing + packaging. It has
+//! NO HTTP, NO Tauri, NO daemon — it is a pure, unit-testable library
+//! consumed by both the high-bar "Clone to" push (P2) and the
+//! save-locally README fallback (P3).
 //!
-//! ## The three locations
+//! ## The three locations (see PRD `k2-connect-clone-to.md`)
 //! For a project at `PROJECT` with
 //! `SLUG = chat_history::claude_project_hash(PROJECT)`:
-//! 1. **Workspace dir** — the `PROJECT` tree, minus excludes + scrubbed
+//! 1. **Workspace dir** — the `PROJECT` tree (`.k2so/`, project-local
+//!    `.claude/`, config/persona/tools/docs), minus excludes + scrubbed
 //!    secrets.
 //! 2. **Durable memory** — the entire `<home>/.claude/projects/<SLUG>/
-//!    memory/` directory.
+//!    memory/` directory (`MEMORY.md` + every `*.md`).
 //! 3. **Live session(s)** — `<session-id>.jsonl` directly under
-//!    `<home>/.claude/projects/<SLUG>/`. Default: the newest-mtime one;
-//!    opt-in: all of them (+ `<SLUG>-<branch>/` worktree variants).
+//!    `<home>/.claude/projects/<SLUG>/`. Default: the newest-mtime one
+//!    (the conversation you're in). Opt-in: all of them. Worktree
+//!    variants live under `<SLUG>-<branch>/`.
+//!
+//! ## Pipeline
+//! `inventory()` resolves PROJECT + SLUG, walks the three locations
+//! (honoring `.gitignore`/`.k2soignore` + the bulk skip-list via the
+//! `ignore` crate), runs the secret classifier, and returns a structured
+//! [`CloneInventory`]. `CloneInventory::manifest()` produces the
+//! serializable [`CloneManifest`] (entry list + re-supply report + source
+//! slug + metadata). `build_bundle()` tar+gz's the included files under
+//! per-class subdirs (`workspace/`, `memory/`, `sessions/`) alongside
+//! `manifest.json`.
 
+mod bundle;
 mod inventory;
 mod scrub;
 
+#[cfg(test)]
+mod tests;
+
+pub use bundle::{build_bundle, read_manifest_from_bundle};
 pub use inventory::inventory;
 
 use serde::{Deserialize, Serialize};
@@ -80,13 +96,13 @@ impl Default for CloneOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryEntry {
     /// Absolute path on the source machine. Not serialized into the
-    /// manifest (the bundle is portable).
+    /// manifest (the bundle is portable) — see [`ManifestEntry`].
     #[serde(skip)]
     pub abs_path: PathBuf,
     /// Path relative to the location root, used as the destination key
     /// inside the per-class subdir. For `Workspace` this is relative to
     /// `PROJECT`; for `Memory` relative to `.../<slug>/memory/`; for
-    /// `Session` relative to `.../projects/` (so worktree variants keep
+    /// `Session` relative to `.../<slug>/` (so worktree variants keep
     /// their `<slug>-<branch>/<id>.jsonl` shape).
     pub rel_path: String,
     /// Destination class.
@@ -106,4 +122,98 @@ pub struct CloneInventory {
     /// Relative paths of files scrubbed as secrets (empty when
     /// `carry_secrets` is set). Surfaced verbatim in the re-supply report.
     pub scrubbed_secrets: Vec<String>,
+}
+
+/// A manifest entry — the portable (relative path + class) pair written
+/// into `manifest.json`. Absolute paths are intentionally dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub rel_path: String,
+    pub class: DestinationClass,
+}
+
+/// The external re-auth checklist shipped in every bundle. These are the
+/// things a bundle physically CANNOT carry (or must not), so the remote
+/// operator re-supplies them by hand. Static today; structured so the UI
+/// can render it and future work can make items workspace-specific.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReauthChecklist {
+    /// Scrubbed (or carried) secret files, by relative path.
+    pub secret_paths: Vec<String>,
+    /// Free-form re-auth items (MCP creds, OS-permission-gated tooling,
+    /// "the remote needs its own Claude Code auth", …).
+    pub items: Vec<String>,
+}
+
+/// The serializable bundle manifest — written as `manifest.json` at the
+/// archive root and read back by the remote unpack route (P2) or the
+/// human following the README (P3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloneManifest {
+    /// Manifest format version (bump on breaking layout changes).
+    pub version: u32,
+    /// The SOURCE slug. Informational — the remote recomputes its own.
+    pub source_slug: String,
+    /// Original (source) PROJECT path. Informational.
+    pub source_project_path: String,
+    /// RFC3339 creation timestamp (caller-supplied for determinism).
+    pub created_at: String,
+    /// Whether secrets were carried (`true`) or scrubbed (`false`).
+    pub carry_secrets: bool,
+    /// Whether all session history was included (`true`) or just the live
+    /// session (`false`).
+    pub include_all_history: bool,
+    /// Every file in the bundle, with its destination class.
+    pub entries: Vec<ManifestEntry>,
+    /// The re-supply / re-auth checklist.
+    pub reauth: ReauthChecklist,
+}
+
+impl CloneInventory {
+    /// Build the serializable [`CloneManifest`].
+    ///
+    /// `created_at` is supplied by the caller (RFC3339) so the manifest is
+    /// deterministic and the engine stays free of ambient clock calls —
+    /// e.g. `chrono::Utc::now().to_rfc3339()`.
+    pub fn manifest(&self, opts: &CloneOptions, created_at: String) -> CloneManifest {
+        let entries = self
+            .entries
+            .iter()
+            .map(|e| ManifestEntry {
+                rel_path: e.rel_path.clone(),
+                class: e.class,
+            })
+            .collect();
+
+        CloneManifest {
+            version: 1,
+            source_slug: self.slug.clone(),
+            source_project_path: self.project_path.clone(),
+            created_at,
+            carry_secrets: opts.carry_secrets,
+            include_all_history: opts.include_all_history,
+            entries,
+            reauth: ReauthChecklist {
+                secret_paths: self.scrubbed_secrets.clone(),
+                items: default_reauth_items(),
+            },
+        }
+    }
+}
+
+/// The standing external re-auth checklist (PRD: MCP creds; OS-permission
+/// -gated tooling; the remote's own Claude Code auth). The bundle can't
+/// carry these, so they're always listed for the operator.
+fn default_reauth_items() -> Vec<String> {
+    vec![
+        "MCP server credentials/config — re-supply on the remote (the bundle \
+         does not carry MCP auth tokens)."
+            .to_string(),
+        "OS-permission-gated tooling — re-grant on the remote (e.g. macOS Full \
+         Disk Access + Automation permissions)."
+            .to_string(),
+        "Claude Code auth — the remote authenticates itself; \
+         ~/.claude/.credentials.json is never migrated."
+            .to_string(),
+    ]
 }
