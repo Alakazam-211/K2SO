@@ -641,7 +641,15 @@ interface TabsState {
   serializeCurrentLayout: () => SerializedLayout
   restoreLayout: (layout: SerializedLayout, cwd: string) => void
   saveLayoutForWorkspace: (projectId: string, workspaceId: string) => void
-  loadLayoutForWorkspace: (projectId: string, workspaceId: string, cwd: string) => void
+  /** Restore the saved tab layout for a workspace into the active view.
+   *  Returns a promise that resolves once the *initial* restore has run
+   *  (`restoreLayout` synchronously sets tabs + activeTabId + sessionId,
+   *  or `launchDefaultAgent` seeds the empty-workspace case). The daemon
+   *  reconcile pass runs in the background and is NOT awaited. Cold-boot
+   *  callers (#658) await this before `ensurePinnedAgentTabForMode` so
+   *  the restored Chat tab — with its activeTabId + sessionId — wins the
+   *  ordering race against the pinned-tab ensure. */
+  loadLayoutForWorkspace: (projectId: string, workspaceId: string, cwd: string) => Promise<void>
   loadWorkspaceSessionsFromDb: () => Promise<void>
   /** @deprecated Use loadWorkspaceSessionsFromDb instead */
   loadWorkspaceLayoutsFromSettings: () => Promise<void>
@@ -1801,12 +1809,45 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       }
     }
 
+    // #658 — sessionId hint for a freshly-created Chat tab. When the
+    // saved layout hasn't restored yet (cold-boot race) and we have to
+    // create the Chat tab from scratch, seed it with the chat session id
+    // persisted in this workspace's saved layout (in-memory cache loaded
+    // by `loadWorkspaceSessionsFromDb`). Carrying the sessionId lets
+    // AgentChatPane take the fast `--resume` path instead of the slower
+    // `resumeChatArgs` daemon round-trip. Only valid for THIS workspace's
+    // own saved layout, and only when the saved agent item's projectPath
+    // matches the workspace we're ensuring (a path mismatch means the
+    // session belonged to a different workspace — drop it, same rule as
+    // reconcileSystemAgentTab).
+    const savedChatSessionId = ((): string | undefined => {
+      const activeKey = state.activeWorkspaceKey
+      if (!activeKey) return undefined
+      const layout = state.workspaceLayouts[activeKey]
+      if (!layout?.tabs) return undefined
+      for (const t of layout.tabs) {
+        const groups = t.paneGroups
+        if (!groups) continue
+        for (const pg of Object.values(groups)) {
+          for (const si of pg.items ?? []) {
+            if (si.type === 'agent' && (si.section ?? 'inbox') === 'chat' && si.sessionId) {
+              if ((si.projectPath ?? projectPath) === projectPath) return si.sessionId
+            }
+          }
+        }
+      }
+      return undefined
+    })()
+
     // Build the canonical-ordered system tab list, creating any
     // missing sections as we go. Idempotent: existing tabs are
     // preserved with all their state; only the ordering changes
     // when a previous insertion landed sections out of order.
     const orderedSystemTabs: Tab[] = []
     let firstTabId: string | null = null
+    // #658 — id of the Chat tab in the ordered list, so we can adopt it
+    // as the active tab below when nothing else is currently active.
+    let chatTabId: string | null = null
     for (const section of wantSections) {
       const existing = bySection.get(section)
       if (existing) {
@@ -1827,15 +1868,23 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         const reconciled = reconcileSystemAgentTab(existing, agentName, projectPath)
         orderedSystemTabs.push(reconciled)
         if (!firstTabId) firstTabId = reconciled.id
+        if (section === 'chat') chatTabId = reconciled.id
         continue
       }
       const tabId = crypto.randomUUID()
       if (!firstTabId) firstTabId = tabId
+      if (section === 'chat') chatTabId = tabId
       const pgId = crypto.randomUUID()
       const agentItem: Item = {
         id: crypto.randomUUID(),
         type: 'agent',
-        data: { agentName, projectPath, section },
+        // #658 — seed the freshly-created Chat tab with the saved chat
+        // sessionId (when we have one) so AgentChatPane resumes the same
+        // Claude session via the fast `--resume` path. Inbox/board tabs
+        // don't render Claude, so they never carry a sessionId.
+        data: section === 'chat' && savedChatSessionId
+          ? { agentName, projectPath, section, sessionId: savedChatSessionId }
+          : { agentName, projectPath, section },
       }
       const pg: PaneGroup = {
         id: pgId,
@@ -1856,11 +1905,30 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       })
     }
 
-    // Always write the canonical order back. Cheap when nothing
-    // changed (Zustand's shallow eq sees a new array but the items
-    // are the same references), and guarantees the strip looks
-    // right after a back-fill or a half-migrated layout restore.
-    set({ tabs: [...orderedSystemTabs, ...nonSystemTabs] })
+    // #658 — active-tab adoption. When this ensure is what surfaces the
+    // pinned Chat tab for the workspace being activated and there is no
+    // valid active tab yet (cold boot before restore set one, or the
+    // current activeTabId belongs to a different workspace's tab that's
+    // no longer present), make the Chat tab active. Without this the
+    // pinned tab exists but isn't active → `isTabVisible` is false → its
+    // grid-WS never opens → the session never spawns until a manual
+    // refresh. We only adopt when nothing else is currently active; if
+    // restoreLayout already set a live activeTabId (the normal switch
+    // path) we leave the user's active tab untouched.
+    const nextTabs = [...orderedSystemTabs, ...nonSystemTabs]
+    const currentActiveId = state.activeTabId
+    const activeStillPresent = currentActiveId != null
+      && nextTabs.some((t) => t.id === currentActiveId)
+    const shouldAdoptChat = !activeStillPresent && chatTabId != null
+    if (shouldAdoptChat) {
+      set({ tabs: nextTabs, activeTabId: chatTabId })
+    } else {
+      // Always write the canonical order back. Cheap when nothing
+      // changed (Zustand's shallow eq sees a new array but the items
+      // are the same references), and guarantees the strip looks
+      // right after a back-fill or a half-migrated layout restore.
+      set({ tabs: nextTabs })
+    }
     return firstTabId ?? orderedSystemTabs[0]?.id ?? ''
   },
 
@@ -2908,7 +2976,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     })
   },
 
-  loadLayoutForWorkspace: (projectId: string, workspaceId: string, cwd: string) => {
+  loadLayoutForWorkspace: async (projectId: string, workspaceId: string, cwd: string): Promise<void> => {
     const key = `${projectId}:${workspaceId}`
     const savedLayout = get().workspaceLayouts[key]
     // Kill any existing PTYs in the active view before restoring
@@ -3082,48 +3150,55 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // Set key early so race-condition guards work
       set({ activeWorkspaceKey: key })
 
-      // Try loading from DB. GET query params are snake_case (the daemon
-      // reads `project_id`/`workspace_id`); the route returns the layout
-      // JSON string or null (`Option<String>` serialized).
-      daemonCliGet<string | null>('workspace-layouts/load', { project_id: projectId, workspace_id: workspaceId })
-        .then((json) => {
-          // Guard: bail if user already switched to a different workspace
-          if (get().activeWorkspaceKey !== key) return
+      // #658 — AWAIT the DB load so the returned promise resolves only
+      // AFTER `restoreLayout` (or `launchDefaultAgent`) has populated
+      // tabs + activeTabId + the restored chat sessionId. Cold-boot
+      // callers await `loadLayoutForWorkspace` before running the
+      // pinned-tab ensure, so the restored Chat tab (active, with its
+      // saved sessionId) wins the ordering race. The daemon reconcile
+      // pass below stays fire-and-forget — it's a background refresh,
+      // not part of the initial restore the caller waits on.
+      try {
+        // Try loading from DB. GET query params are snake_case (the daemon
+        // reads `project_id`/`workspace_id`); the route returns the layout
+        // JSON string or null (`Option<String>` serialized).
+        const json = await daemonCliGet<string | null>('workspace-layouts/load', { project_id: projectId, workspace_id: workspaceId })
+        // Guard: bail if user already switched to a different workspace
+        if (get().activeWorkspaceKey !== key) return
 
-          if (json) {
-            try {
-              const layout = JSON.parse(json) as SerializedLayout
-              if (layout.tabs && layout.tabs.length > 0) {
-                const wasPreV2 = (layout.version ?? 1) < LAYOUT_SCHEMA_VERSION
-                set({ workspaceLayouts: { ...get().workspaceLayouts, [key]: layout } })
-                get().restoreLayout(layout, cwd)
-                healAndSave()
-                if (wasPreV2) {
-                  console.warn(`[tabs] migrated workspace_layouts to v2 for ${key}`)
-                  get().saveLayoutForWorkspace(projectId, workspaceId)
-                }
-                void reconcileWithDaemon()
-                return
+        if (json) {
+          try {
+            const layout = JSON.parse(json) as SerializedLayout
+            if (layout.tabs && layout.tabs.length > 0) {
+              const wasPreV2 = (layout.version ?? 1) < LAYOUT_SCHEMA_VERSION
+              set({ workspaceLayouts: { ...get().workspaceLayouts, [key]: layout } })
+              get().restoreLayout(layout, cwd)
+              healAndSave()
+              if (wasPreV2) {
+                console.warn(`[tabs] migrated workspace_layouts to v2 for ${key}`)
+                get().saveLayoutForWorkspace(projectId, workspaceId)
               }
-            } catch (err) {
-              console.error('[tabs] Failed to parse DB layout:', err)
+              void reconcileWithDaemon()
+              return
             }
+          } catch (err) {
+            console.error('[tabs] Failed to parse DB layout:', err)
           }
-          // No saved layout — auto-launch default agent after short delay
-          // (launchDefaultAgent has its own adoption flow for the
-          // empty-workspace case; reconcileWithDaemon's job is the
-          // existing-layout-plus-orphan-PTY case)
-          get().launchDefaultAgent(key, cwd)
-          // 0.38.0 Commit 4 — even on the empty-workspace path we
-          // need the WS push subscription so subsequent Cmd+T or
-          // mobile-companion spawns surface here without polling.
-          subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
-        })
-        .catch(() => {
-          // DB unavailable — auto-launch default agent
-          get().launchDefaultAgent(key, cwd)
-          subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
-        })
+        }
+        // No saved layout — auto-launch default agent after short delay
+        // (launchDefaultAgent has its own adoption flow for the
+        // empty-workspace case; reconcileWithDaemon's job is the
+        // existing-layout-plus-orphan-PTY case)
+        get().launchDefaultAgent(key, cwd)
+        // 0.38.0 Commit 4 — even on the empty-workspace path we
+        // need the WS push subscription so subsequent Cmd+T or
+        // mobile-companion spawns surface here without polling.
+        subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
+      } catch {
+        // DB unavailable — auto-launch default agent
+        get().launchDefaultAgent(key, cwd)
+        subscribeForActiveWorkspace(key, projectId, workspaceId, cwd)
+      }
     }
   },
 

@@ -227,11 +227,27 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
           activeWorkspaceId: restoredWorkspaceId
         })
 
-        // Load saved layout for the restored workspace
+        // Load saved layout for the restored workspace.
+        //
+        // #658 — cold-boot ordering. AWAIT the layout restore before
+        // running the pinned-tab ensure. On a cold boot the in-memory
+        // `workspaceLayouts` cache is still empty (it loads async via
+        // `loadWorkspaceSessionsFromDb`), so `loadLayoutForWorkspace`
+        // takes its DB-load branch and resolves only after
+        // `restoreLayout` has set tabs + activeTabId + the restored chat
+        // sessionId. Without the await, `ensurePinnedAgentTabForMode`'s
+        // deferred `ensureSystemAgentTabs` ran FIRST, found no restored
+        // pinned tab, and created a fresh sessionless one that never
+        // became the active tab — so the landed-on workspace's Chat tab
+        // sat invisible (isTabVisible=false) and never spawned its
+        // session until a manual refresh. Awaiting makes restoreLayout
+        // win; the subsequent ensure then reconciles the already-active,
+        // sessionId-carrying tab in place (idempotent).
         if (restoredWorkspaceId) {
           const workspace = restoredProject.workspaces.find((w) => w.id === restoredWorkspaceId)
           const cwd = workspace?.worktreePath ?? restoredProject.path ?? '~'
-          useTabsStore.getState().loadLayoutForWorkspace(restoredProject.id, restoredWorkspaceId, cwd)
+          await useTabsStore.getState().loadLayoutForWorkspace(restoredProject.id, restoredWorkspaceId, cwd)
+          ensurePinnedAgentTabForMode(restoredProject.agentMode, restoredProject.path)
         }
       }
       // Phase 2.5 fix (finding #547): flip the persist gate ONLY
