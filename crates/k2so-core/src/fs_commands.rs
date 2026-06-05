@@ -389,10 +389,13 @@ fn collision_free_path(dir: &Path, filename: &str) -> PathBuf {
 }
 
 /// Write `bytes` into `dir` under a sanitized, collision-free name.
-/// `dir` must already exist and be a directory; `filename` is reduced to
-/// a basename so it can't escape `dir`. On a name collision the file is
-/// written as `name (1).ext`, `name (2).ext`, … (non-destructive).
-/// Returns the final absolute path written.
+/// `dir` is created (recursively) when absent — Phase 3 terminal drops
+/// target `<workspace>/.k2so/downloads/`, which may not exist yet, and
+/// folder-drops target an existing tree; `create_dir_all` is idempotent
+/// for the latter. `filename` is reduced to a basename so it can't escape
+/// `dir`. On a name collision the file is written as `name (1).ext`,
+/// `name (2).ext`, … (non-destructive). Returns the final absolute path
+/// written.
 ///
 /// Sandbox/auth note: this function does NOT itself enforce who may
 /// write where — the destination `dir` is the caller's choice and the
@@ -402,6 +405,16 @@ pub fn write_upload(dir: &str, filename: &str, bytes: &[u8]) -> Result<PathBuf, 
     if bytes.len() as u64 > MAX_UPLOAD_SIZE {
         return Err("File too large (>100MB)".to_string());
     }
+    if dir.is_empty() {
+        return Err("Destination directory is empty".to_string());
+    }
+    // Auto-create the destination so the terminal-drop convenience path
+    // (`<ws>/.k2so/downloads/`) needn't pre-exist. `create_dir_all` is a
+    // no-op when the tree already exists (folder-drop case). We create
+    // BEFORE validate_path so its canonicalize() (which requires the path
+    // to exist) succeeds.
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create destination dir: {e}"))?;
     let dir_path = validate_path(dir)?;
     if !dir_path.is_dir() {
         return Err(format!("Destination is not a directory: {dir}"));
@@ -1183,13 +1196,18 @@ mod tests {
     }
 
     #[test]
-    fn write_upload_rejects_nonexistent_dir() {
+    fn write_upload_creates_missing_dir() {
+        // Phase 3: the terminal-drop path `<ws>/.k2so/downloads/` may not
+        // exist. write_upload must create it (recursively) and land the
+        // file inside, not error.
         let tmp = TempDir::new("upload-nodir");
-        let missing = tmp.path().join("does-not-exist");
-        let err = write_upload(missing.to_str().unwrap(), "f.txt", b"x")
-            .expect_err("missing dir must fail");
-        // validate_path surfaces a parent/exists error for the missing dir.
-        assert!(!err.is_empty(), "got: {err}");
+        let missing = tmp.path().join("a").join("b").join("downloads");
+        assert!(!missing.exists());
+        let path = write_upload(missing.to_str().unwrap(), "f.txt", b"x")
+            .expect("missing dir must be auto-created");
+        assert!(missing.exists() && missing.is_dir(), "dir was created");
+        assert_eq!(fs::read(&path).unwrap(), b"x");
+        assert!(path.ends_with("f.txt"), "got: {}", path.display());
     }
 
     #[test]
@@ -1199,6 +1217,15 @@ mod tests {
         fs::write(&f, "x").unwrap();
         let err = write_upload(f.to_str().unwrap(), "g.txt", b"y")
             .expect_err("dir-is-file must fail");
-        assert!(err.contains("not a directory"), "got: {err}");
+        // With auto-create, `create_dir_all` on a path that's already a
+        // regular file fails first (the OS won't make a dir over a file),
+        // so the error surfaces from there rather than the is_dir() guard.
+        // Either way it must reject loudly and write nothing.
+        assert!(
+            err.contains("create destination dir") || err.contains("not a directory"),
+            "got: {err}",
+        );
+        // The intended upload file was never written.
+        assert!(!tmp.path().join("g.txt").exists());
     }
 }
