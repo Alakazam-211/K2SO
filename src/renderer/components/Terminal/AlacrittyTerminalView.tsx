@@ -19,6 +19,8 @@ import { detectLinks, type DetectedLink } from './terminalLinkDetector'
 import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useToastStore } from '@/stores/toast'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { executeRemoteDrop } from '@/lib/handle-remote-drop'
 
 // ── Types matching Rust GridUpdate / CompactLine / StyleSpan ──────────
 
@@ -550,8 +552,28 @@ export function AlacrittyTerminalView({
           // Only accept if the drop landed inside *this* terminal's container
           if (!containerRef.current?.contains(el)) return
 
-          // Accept the drop — paste paths into terminal (images get
-          // bracketed-paste wrapping so Claude Code's image detector fires)
+          // REMOTE host (K2 Connect): the dropped `paths` are LOCAL paths
+          // with no bytes on the daemon. Upload them to the workspace's
+          // `.k2so/downloads/` then inject the returned REMOTE paths so the
+          // agent can resolve a file that actually exists on the host. The
+          // payload is built with this view's existing buildDropPayload
+          // (same shell-quote + bracketed-paste logic) over remote paths.
+          if (useConnectHostStore.getState().activeHost !== 'local') {
+            const pty = ptyIdRef.current
+            void executeRemoteDrop(
+              paths,
+              { kind: 'terminal' },
+              { workspacePath: cwd },
+              buildDropPayload,
+            ).then((payload) => {
+              if (payload && pty) terminalWrite(pty, payload)
+            })
+            return
+          }
+
+          // LOCAL host — unchanged: paste the local paths directly (images
+          // get bracketed-paste wrapping so Claude Code's image detector
+          // fires).
           terminalWrite(ptyIdRef.current, buildDropPayload(paths))
         }
       )
@@ -737,7 +759,23 @@ export function AlacrittyTerminalView({
         if (filePath) paths.push(filePath)
       }
       if (paths.length > 0) {
-        terminalWrite(ptyIdRef.current, buildDropPayload(paths))
+        // REMOTE host: these are local file paths — upload + inject the
+        // remote paths (same router as the tauri://drag-drop path). This
+        // DOM handler is a rare fallback under Tauri (drag-drop is normally
+        // intercepted natively), but keep it host-aware for parity.
+        if (useConnectHostStore.getState().activeHost !== 'local') {
+          const pty = ptyIdRef.current
+          void executeRemoteDrop(
+            paths,
+            { kind: 'terminal' },
+            { workspacePath: cwd },
+            buildDropPayload,
+          ).then((payload) => {
+            if (payload && pty) terminalWrite(pty, payload)
+          })
+        } else {
+          terminalWrite(ptyIdRef.current, buildDropPayload(paths))
+        }
       }
     }
 
@@ -746,7 +784,7 @@ export function AlacrittyTerminalView({
     if (text && files.length === 0) {
       terminalWrite(ptyIdRef.current, text)
     }
-  }, [])
+  }, [cwd])
 
   // ── Link detection: Cmd key tracking ────────────────────────────────
 
