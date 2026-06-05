@@ -269,6 +269,102 @@ cat > "/tmp/latest.json" <<MANIFEST
 MANIFEST
 echo "  latest.json generated."
 
+# ── Step 8.5: Standalone per-OS daemon binary + signature + manifest ──
+#
+# Remote-update P1: publish a STANDALONE k2so-daemon binary (no .app
+# wrapper) so headless servers and the daemon self-update path (P3) can
+# fetch + verify + install the daemon on its own.
+#
+# This step produces the NATIVE macos-aarch64 standalone daemon, signs it
+# with the SAME minisign key the Tauri updater uses (so P3 verifies it
+# against `plugins.updater.pubkey` in tauri.conf.json), computes sha256,
+# and emits `daemon-latest.json` (schema below).
+#
+# Linux binaries are NOT cross-built here — clang/ggml cross-compilation on
+# macOS is the wrong tool. The `.github/workflows/daemon-binaries.yml`
+# workflow builds + signs the linux-x86_64 / linux-aarch64 artifacts on
+# native ubuntu runners and uploads them to this same release. If those CI
+# artifacts have already been fetched into target/release/daemon-dist/ (by
+# name: k2so-daemon-linux-x86_64{,.sig}, k2so-daemon-linux-aarch64{,.sig}),
+# this step merges them into the manifest; otherwise it emits a macos-only
+# manifest (documented — P2/P3 treat a missing artifact key as "no build
+# for that platform yet").
+#
+# daemon-latest.json schema (P2/P3 consume this):
+#   {
+#     "version":  "<x.y.z>",
+#     "pub_date": "<iso8601 UTC>",
+#     "artifacts": {
+#       "<platform-key>": {
+#         "url":    "https://github.com/.../releases/download/v<ver>/<asset>",
+#         "sig":    "<base64 minisign signature string>",
+#         "sha256": "<hex>"
+#       }, ...
+#     }
+#   }
+# platform-key ∈ { macos-aarch64, linux-x86_64, linux-aarch64 }.
+echo ""
+echo "Step 8.5: Building + signing standalone daemon + daemon-latest.json..."
+
+DIST_DIR="$PROJECT_DIR/target/release/daemon-dist"
+mkdir -p "$DIST_DIR"
+
+# The native standalone daemon is the SAME binary already built in Step 2.5
+# (target/release/k2so-daemon). Publish it under its platform-stamped name.
+MAC_ASSET="k2so-daemon-macos-aarch64"
+cp "$PROJECT_DIR/target/release/k2so-daemon" "$DIST_DIR/$MAC_ASSET"
+
+# Sign with the Tauri updater key (minisign-format .sig, identical
+# mechanism to Step 5's K2SO.app.tar.gz.sig).
+bunx @tauri-apps/cli@2 signer sign \
+    "$DIST_DIR/$MAC_ASSET" \
+    --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
+    --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+MAC_SIG=$(cat "$DIST_DIR/${MAC_ASSET}.sig")
+MAC_SHA256=$(shasum -a 256 "$DIST_DIR/$MAC_ASSET" | awk '{print $1}')
+echo "  macos-aarch64 daemon built, signed, hashed."
+
+DL_BASE="https://github.com/Alakazam-211/K2SO/releases/download/${TAG}"
+
+# Build the artifacts object incrementally. macos-aarch64 is always present.
+ARTIFACTS_JSON=$(cat <<JSON
+    "macos-aarch64": {
+      "url": "${DL_BASE}/${MAC_ASSET}",
+      "sig": "${MAC_SIG}",
+      "sha256": "${MAC_SHA256}"
+    }
+JSON
+)
+
+# Merge any CI-produced Linux artifacts present in $DIST_DIR.
+for LX in "linux-x86_64" "linux-aarch64"; do
+    LX_ASSET="k2so-daemon-${LX}"
+    if [ -f "$DIST_DIR/$LX_ASSET" ] && [ -f "$DIST_DIR/${LX_ASSET}.sig" ]; then
+        LX_SIG=$(cat "$DIST_DIR/${LX_ASSET}.sig")
+        LX_SHA256=$(shasum -a 256 "$DIST_DIR/$LX_ASSET" | awk '{print $1}')
+        ARTIFACTS_JSON="${ARTIFACTS_JSON},
+    \"${LX}\": {
+      \"url\": \"${DL_BASE}/${LX_ASSET}\",
+      \"sig\": \"${LX_SIG}\",
+      \"sha256\": \"${LX_SHA256}\"
+    }"
+        echo "  Merged CI artifact: ${LX_ASSET}."
+    else
+        echo "  (no CI artifact for ${LX} — left out; CI workflow uploads it separately)"
+    fi
+done
+
+cat > "$DIST_DIR/daemon-latest.json" <<MANIFEST
+{
+  "version": "${VERSION}",
+  "pub_date": "${PUB_DATE}",
+  "artifacts": {
+${ARTIFACTS_JSON}
+  }
+}
+MANIFEST
+echo "  daemon-latest.json generated at $DIST_DIR/daemon-latest.json"
+
 # ── Step 9: Create GitHub Release ──
 echo ""
 echo "Step 9: Creating GitHub release ${TAG}..."
@@ -278,6 +374,23 @@ ASSETS=(
 )
 [ -f "$SIG_FILE" ] && ASSETS+=("$SIG_FILE")
 ASSETS+=("/tmp/latest.json")
+
+# Standalone daemon assets (remote-update P1): the native macos-aarch64
+# binary + its .sig, plus the daemon manifest. Any CI-fetched Linux
+# binaries in $DIST_DIR are uploaded too (the daemon-binaries.yml workflow
+# normally uploads those directly to the release on its own, but if they
+# were staged here first we attach them in the same `gh release create`).
+ASSETS+=(
+    "$DIST_DIR/${MAC_ASSET}"
+    "$DIST_DIR/${MAC_ASSET}.sig"
+    "$DIST_DIR/daemon-latest.json"
+)
+for LX in "linux-x86_64" "linux-aarch64"; do
+    LX_ASSET="k2so-daemon-${LX}"
+    if [ -f "$DIST_DIR/$LX_ASSET" ] && [ -f "$DIST_DIR/${LX_ASSET}.sig" ]; then
+        ASSETS+=("$DIST_DIR/$LX_ASSET" "$DIST_DIR/${LX_ASSET}.sig")
+    fi
+done
 
 if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
     NOTES_SRC="$NOTES_FILE"

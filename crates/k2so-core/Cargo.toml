@@ -72,8 +72,15 @@ git2 = { version = "0.19", features = ["vendored-openssl"] }
 # recover a reject-then-reject-again worktree from the Finder trash.
 trash = "5"
 
-# Local LLM inference (llama.cpp bindings with Metal acceleration).
-llama-cpp-2 = { version = "0.1", features = ["metal", "sampler"] }
+# Local LLM inference (llama.cpp bindings). The `metal` feature compiles
+# ggml-metal, which is macOS-only — keep it OFF in the base dependency so
+# the crate (and therefore k2so-daemon) can compile on Linux for headless
+# servers. macOS re-enables `metal` via the per-target block below, so the
+# desktop app + native daemon keep GPU acceleration. The `sampler` feature
+# is platform-neutral and stays here. The Rust API surface llm/mod.rs uses
+# is identical with or without `metal`; the only effect is whether GPU
+# offload layers (`with_n_gpu_layers`) actually engage at runtime.
+llama-cpp-2 = { version = "0.1", default-features = false, features = ["sampler"] }
 
 # Blocking HTTP client for llm::download (reqwest with rustls — same
 # stack src-tauri uses).
@@ -138,11 +145,19 @@ ngrok = "0.18"
 tokio = { version = "1", features = ["full"] }
 url = "2"
 
-# macOS-only: Cocoa + Objective-C runtime bindings used by
-# `fs_commands::clipboard_read_file_paths` to read the
-# `NSFilenamesPboardType` pasteboard entry (Finder Cmd+C file copy).
-# Phase 2 Unit 6 — migrated from src-tauri so the daemon owns the
-# pasteboard read alongside the rest of the filesystem surface.
+# macOS-only deps.
+#
+# - cocoa + objc: Cocoa + Objective-C runtime bindings used by
+#   `fs_commands::clipboard_read_file_paths` to read the
+#   `NSFilenamesPboardType` pasteboard entry (Finder Cmd+C file copy).
+#   Phase 2 Unit 6 — migrated from src-tauri so the daemon owns the
+#   pasteboard read alongside the rest of the filesystem surface.
+# - llama-cpp-2 `metal`: re-enables ggml-metal GPU acceleration on macOS
+#   only. The base [dependencies] entry above keeps `metal` OFF (so Linux
+#   headless builds compile); this turns it back on for the desktop app +
+#   native macOS daemon. cargo unions feature sets per crate, so the macOS
+#   build gets `["sampler", "metal"]`.
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2"
+llama-cpp-2 = { version = "0.1", features = ["metal"] }
