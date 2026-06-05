@@ -35,12 +35,14 @@
 mod bundle;
 mod inventory;
 mod scrub;
+mod settings;
 
 #[cfg(test)]
 mod tests;
 
 pub use bundle::{build_bundle, read_manifest_from_bundle};
 pub use inventory::inventory;
+pub use settings::{capture_settings, WorkspaceSettings};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -167,6 +169,16 @@ pub struct CloneManifest {
     pub entries: Vec<ManifestEntry>,
     /// The re-supply / re-auth checklist.
     pub reauth: ReauthChecklist,
+    /// The source workspace's USER-meaningful K2 settings, read from the
+    /// source projects DB row. The remote unpack route applies these to
+    /// the freshly registered project so it appears configured + ready to
+    /// resume. `None` when the source path isn't a registered project (we
+    /// still bundle the files; the remote registers with defaults).
+    /// Machine-specific fields (local `id`, absolute `path`,
+    /// `focus_group_id`) are intentionally NOT carried — the remote gets a
+    /// fresh id + its own path.
+    #[serde(default)]
+    pub settings: Option<WorkspaceSettings>,
 }
 
 impl CloneInventory {
@@ -175,7 +187,16 @@ impl CloneInventory {
     /// `created_at` is supplied by the caller (RFC3339) so the manifest is
     /// deterministic and the engine stays free of ambient clock calls —
     /// e.g. `chrono::Utc::now().to_rfc3339()`.
-    pub fn manifest(&self, opts: &CloneOptions, created_at: String) -> CloneManifest {
+    ///
+    /// `settings` is the source workspace's captured K2 settings (via
+    /// [`capture_settings`]) or `None` when the source path isn't a
+    /// registered project.
+    pub fn manifest(
+        &self,
+        opts: &CloneOptions,
+        created_at: String,
+        settings: Option<WorkspaceSettings>,
+    ) -> CloneManifest {
         let entries = self
             .entries
             .iter()
@@ -197,6 +218,7 @@ impl CloneInventory {
                 secret_paths: self.scrubbed_secrets.clone(),
                 items: default_reauth_items(),
             },
+            settings,
         }
     }
 }

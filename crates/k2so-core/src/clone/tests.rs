@@ -350,7 +350,7 @@ fn credentials_json_never_enumerated() {
 fn manifest_entries_have_correct_classes() {
     let fx = build_fixture();
     let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
-    let m = inv.manifest(&opts(&fx.home), "2026-06-05T00:00:00Z".to_string());
+    let m = inv.manifest(&opts(&fx.home), "2026-06-05T00:00:00Z".to_string(), None);
 
     assert_eq!(m.source_slug, fx.slug);
     assert_eq!(m.created_at, "2026-06-05T00:00:00Z");
@@ -382,6 +382,7 @@ fn bundle_round_trips_secrets_absent_by_default() {
         &inv,
         &opts(&fx.home),
         "2026-06-05T00:00:00Z".to_string(),
+        None,
         &out,
     )
     .unwrap();
@@ -432,7 +433,7 @@ fn bundle_carries_secrets_when_opted_in() {
     o.carry_secrets = true;
     let inv = inventory(&fx.project.to_string_lossy(), o.clone()).unwrap();
     let out = fx._root.path().join("bundle-carry.tar.gz");
-    build_bundle(&inv, &o, "2026-06-05T00:00:00Z".to_string(), &out).unwrap();
+    build_bundle(&inv, &o, "2026-06-05T00:00:00Z".to_string(), None, &out).unwrap();
 
     let extract = fx._root.path().join("extract-carry");
     fs::create_dir_all(&extract).unwrap();
@@ -484,4 +485,142 @@ fn credential_scanner_catches_expected_patterns() {
     assert!(!scan("the password field was empty:"), "empty value → no hit");
     assert!(!scan("gh_short_token"), "gh token below length floor");
     assert!(!scan("focus-group: blue"), "benign k2so config");
+}
+
+// ── settings capture + manifest round-trip ──────────────────────────
+
+/// Insert a synthetic `projects` row, capture its USER-meaningful
+/// settings, and assert the machine-specific fields are excluded.
+#[test]
+fn settings_captured_from_project_row() {
+    use crate::db::schema::Project;
+
+    let conn = crate::db::isolated_test_connection();
+    let project_path = "/tmp/some-cloned-agent";
+
+    Project::create(
+        &conn,
+        "proj-clone-1",
+        "Cloned Agent",
+        project_path,
+        "#ff8800",
+        0,
+        2, // worktree_mode
+        None,
+        None,
+    )
+    .expect("create synthetic project");
+    // agent_mode is set via update (create defaults it to "off"); this
+    // also syncs agent_enabled = 1.
+    Project::update(
+        &conn,
+        "proj-clone-1",
+        None,                          // name
+        None,                          // path
+        None,                          // color
+        None,                          // tab_order
+        None,                          // worktree_mode
+        None,                          // icon_url
+        None,                          // focus_group_id
+        None,                          // pinned
+        None,                          // manually_active
+        None,                          // agent_enabled (synced via agent_mode)
+        Some(1),                       // heartbeat_enabled
+        Some("manager".to_string()),   // agent_mode → agent_enabled = 1
+        None,                          // state_id
+        None,                          // heartbeat_mode
+        None,                          // heartbeat_schedule
+    )
+    .expect("set agent_mode + heartbeat");
+
+    let captured = capture_settings(&conn, project_path)
+        .expect("capture must not error")
+        .expect("row exists → Some");
+
+    assert_eq!(captured.agent_mode, "manager");
+    assert!(captured.agent_enabled, "manager → enabled");
+    assert!(captured.heartbeat_enabled);
+    assert_eq!(captured.name, "Cloned Agent");
+    assert_eq!(captured.color, "#ff8800");
+    assert_eq!(captured.worktree_mode, 2);
+
+    // Trailing-slash normalization still finds the row.
+    let via_slash = capture_settings(&conn, "/tmp/some-cloned-agent/")
+        .expect("no error")
+        .expect("trailing-slash path resolves");
+    assert_eq!(via_slash, captured);
+
+    // Unregistered path → None (graceful).
+    let none = capture_settings(&conn, "/tmp/not-a-project").expect("no error");
+    assert!(none.is_none(), "unregistered path yields None, got {none:?}");
+}
+
+/// Settings round-trip: capture → build_bundle → read_manifest_from_bundle
+/// → the same `WorkspaceSettings` come back.
+#[test]
+fn settings_round_trip_through_bundle() {
+    use crate::db::schema::Project;
+
+    let fx = build_fixture();
+
+    // Register the synthetic workspace as a project so capture finds it.
+    let conn = crate::db::isolated_test_connection();
+    let path_str = fx.project.to_string_lossy().to_string();
+    Project::create(
+        &conn,
+        "proj-rt-1",
+        "Round Trip",
+        &path_str,
+        "#112233",
+        0,
+        1,
+        None,
+        None,
+    )
+    .expect("create project");
+    Project::update(
+        &conn,
+        "proj-rt-1",
+        None,                          // name
+        None,                          // path
+        None,                          // color
+        None,                          // tab_order
+        None,                          // worktree_mode
+        None,                          // icon_url
+        None,                          // focus_group_id
+        None,                          // pinned
+        None,                          // manually_active
+        None,                          // agent_enabled
+        Some(0),                       // heartbeat_enabled = false
+        Some("pod".to_string()),       // agent_mode
+        None,                          // state_id
+        None,                          // heartbeat_mode
+        None,                          // heartbeat_schedule
+    )
+    .expect("set agent_mode");
+
+    let settings = capture_settings(&conn, &path_str)
+        .expect("no error")
+        .expect("Some");
+
+    let inv = inventory(&path_str, opts(&fx.home)).unwrap();
+    let out = fx._root.path().join("bundle-settings.tar.gz");
+    build_bundle(
+        &inv,
+        &opts(&fx.home),
+        "2026-06-05T00:00:00Z".to_string(),
+        Some(settings.clone()),
+        &out,
+    )
+    .unwrap();
+
+    let m = read_manifest_from_bundle(&out).unwrap();
+    let got = m.settings.expect("manifest carries settings");
+    assert_eq!(got, settings, "settings round-trip intact");
+    assert_eq!(got.agent_mode, "pod");
+    assert!(got.agent_enabled, "pod → enabled");
+    assert!(!got.heartbeat_enabled);
+    assert_eq!(got.name, "Round Trip");
+    assert_eq!(got.color, "#112233");
+    assert_eq!(got.worktree_mode, 1);
 }

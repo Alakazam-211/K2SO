@@ -11,7 +11,7 @@
 //! back out to PROJECT vs `~/.claude/projects/<remote-slug>/` without
 //! re-deriving the class from path heuristics.
 
-use super::{CloneInventory, CloneManifest, CloneOptions, DestinationClass};
+use super::{CloneInventory, CloneManifest, CloneOptions, DestinationClass, WorkspaceSettings};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::path::{Path, PathBuf};
@@ -31,13 +31,17 @@ fn class_prefix(class: DestinationClass) -> &'static str {
 ///
 /// `created_at` is the caller-supplied RFC3339 timestamp baked into the
 /// manifest (keeps the engine clock-free; see [`CloneInventory::manifest`]).
+///
+/// `settings` is the source workspace's captured K2 settings (or `None`),
+/// recorded in the manifest so the remote unpack route can re-apply them.
 pub fn build_bundle(
     inventory: &CloneInventory,
     opts: &CloneOptions,
     created_at: String,
+    settings: Option<WorkspaceSettings>,
     out_path: &Path,
 ) -> Result<PathBuf, String> {
-    let manifest = inventory.manifest(opts, created_at);
+    let manifest = inventory.manifest(opts, created_at, settings);
     let manifest_json = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| format!("serialize manifest: {e}"))?;
 
