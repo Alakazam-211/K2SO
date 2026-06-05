@@ -114,9 +114,14 @@ transfers files directly, so it doesn't apply. Apply the same bulk-excludes
    re-supply list.
 2. **Bundle:** tar+gz the included files + the manifest (new crate: `tar` +
    `flate2`).
-3. **Destination:** user picks the connected server + a dest path via the
-   existing `RemoteFolderPicker`. Compute the remote slug =
-   `claude_project_hash(DEST_PATH)`; the host home comes from `fs/info`.
+3. **Destination:** user picks the connected server + a **PARENT** folder on
+   the host via the existing `RemoteFolderPicker` (it browses real dirs over
+   `fs/read-dir`/`fs/info`). We then create the workspace folder INSIDE it,
+   named after the **source workspace** — `DEST_PATH = <parent>/<name>` —
+   with a collision-safe suffix (`name (1)`) if taken. **No new-folder-name
+   prompt** (keep it simple); the preview just shows the resulting full
+   `DEST_PATH` so the user can see where it'll land. Compute the remote slug
+   = `claude_project_hash(DEST_PATH)`; the host home comes from `fs/info`.
 4. **Push + unpack (high bar):** upload the bundle (reuse
    `fs/upload-binary` for the bytes, or a streaming variant for large
    bundles) → a NEW daemon route `POST /cli/clone/unpack { bundle_path,
@@ -131,9 +136,10 @@ transfers files directly, so it doesn't apply. Apply the same bulk-excludes
 ## UX
 
 Right-click a workspace in the navbar → **"Clone to ▸ \<server\>"** →
-RemoteFolderPicker for the dest path → a **preview** (what transfers, what's
-scrubbed, total size, session-history scope) → **Clone** → progress →
-**done** screen with the re-supply checklist + "resume on the host" note.
+RemoteFolderPicker to pick the **parent** folder on the host → a **preview**
+(the resulting full `DEST_PATH`, what transfers, what's scrubbed, total
+size, session-history scope) → **Clone** → progress → **done** screen with
+the re-supply checklist + "resume on the host" note.
 
 ## New surfaces
 
