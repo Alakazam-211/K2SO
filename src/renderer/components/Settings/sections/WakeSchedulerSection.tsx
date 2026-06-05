@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { useToastStore } from '@/stores/toast'
 // Phase 2 Unit 7a — settings live in the daemon.

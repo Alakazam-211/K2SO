@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { terminalGetGrid } from '@/lib/terminal-daemon'
 import { useProjectsStore } from '@/stores/projects'
