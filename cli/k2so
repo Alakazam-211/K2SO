@@ -2409,7 +2409,8 @@ try:
 except Exception as e:
     print(f"Failed to parse daemon response: {e}", file=sys.stderr); sys.exit(1)
 if d.get("error"):
-    print(f"Failed to start tunnel: {d[\"error\"]}", file=sys.stderr); sys.exit(1)
+    err = d["error"]
+    print(f"Failed to start tunnel: {err}", file=sys.stderr); sys.exit(1)
 url = d.get("public_url") or ""
 print("Tunnel started." + (f" Public URL: {url}" if url else " (subdomain will be assigned by the server)"))
 '
@@ -2424,7 +2425,8 @@ except Exception as e:
 if d.get("ok"):
     print("Tunnel stopped.")
 else:
-    print(f"Failed to stop tunnel: {d.get(\"error\") or \"unknown error\"}", file=sys.stderr); sys.exit(1)
+    err = d.get("error") or "unknown error"
+    print(f"Failed to stop tunnel: {err}", file=sys.stderr); sys.exit(1)
 '
             ;;
         status)
@@ -2440,11 +2442,17 @@ try:
 except Exception as e:
     print(f"Failed to parse tunnel status: {e}", file=sys.stderr); sys.exit(1)
 print("K2 Connect tunnel")
-print(f"  Running:    {\"yes\" if d.get(\"running\") else \"no\"}")
+running = "yes" if d.get("running") else "no"
+print(f"  Running:    {running}")
 if d.get("running"):
-    print(f"  Public URL: {d.get(\"public_url\") or \"(assigned by server)\"}")
-    if d.get("local_port"): print(f"  Local port: {d[\"local_port\"]}")
-    if d.get("server_addr"): print(f"  Server:     {d[\"server_addr\"]}")
+    public_url = d.get("public_url") or "(assigned by server)"
+    print(f"  Public URL: {public_url}")
+    if d.get("local_port"):
+        lp = d["local_port"]
+        print(f"  Local port: {lp}")
+    if d.get("server_addr"):
+        sa = d["server_addr"]
+        print(f"  Server:     {sa}")
 '
             ;;
         *)
