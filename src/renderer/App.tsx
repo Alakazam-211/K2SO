@@ -17,6 +17,7 @@ import Settings from './components/Settings/Settings'
 import GitInitDialog from './components/GitInitDialog/GitInitDialog'
 import AddWorkspaceDialog from './components/AddWorkspaceDialog/AddWorkspaceDialog'
 import RemoteFolderPicker from './components/RemoteFolderPicker/RemoteFolderPicker'
+import { pickWorkspaceFolder } from './lib/pick-workspace-folder'
 import RemoveWorkspaceDialog from './components/RemoveWorkspaceDialog/RemoveWorkspaceDialog'
 import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
@@ -446,10 +447,8 @@ export default function App(): React.JSX.Element {
         tabsState.splitPane(activeTab.id, firstPaneId, newPaneId, { type: 'terminal', terminalId: newPaneId, cwd }, 'column')
       }).then((fn) => unlisteners.push(fn))
       listen('menu:open-workspace', () => {
-        import('@tauri-apps/api/core').then(({ invoke }) => {
-          invoke<string | null>('projects_pick_folder').then((path) => {
-            if (path) useProjectsStore.getState().addProject(path)
-          })
+        pickWorkspaceFolder().then((path) => {
+          if (path) useProjectsStore.getState().addProject(path)
         })
       }).then((fn) => unlisteners.push(fn))
       listen('menu:close-tab', () => {

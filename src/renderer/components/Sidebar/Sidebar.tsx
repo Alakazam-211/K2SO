@@ -17,6 +17,7 @@ import { emit } from '@tauri-apps/api/event'
 // delete) go through the host-aware `/cli/*` HTTP layer. Host-only ops
 // (open-in-finder/editor, open-focus-window) stay on Tauri `invoke`.
 import { daemonCliPost } from '@/lib/daemon-cli'
+import { pickWorkspaceFolder } from '@/lib/pick-workspace-folder'
 import { showContextMenu } from '@/lib/context-menu'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import ResizeHandle from './ResizeHandle'
@@ -928,7 +929,7 @@ export default function Sidebar(): React.JSX.Element {
 
 
   const handleAddProject = useCallback(async () => {
-    const folderPath = await invoke<string | null>('projects_pick_folder')
+    const folderPath = await pickWorkspaceFolder()
     if (!folderPath) return
     // Harness fan-out is off by default (canonical-agents PRD §4), so the
     // add has no destructive effects — no consent preview needed.

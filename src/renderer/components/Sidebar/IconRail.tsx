@@ -11,6 +11,7 @@ import { useRemoveWorkspaceDialogStore } from '../../stores/remove-workspace-dia
 import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '../../lib/context-menu'
+import { pickWorkspaceFolder } from '../../lib/pick-workspace-folder'
 import ProjectAvatar from './ProjectAvatar'
 
 const RAIL_WIDTH = 48
@@ -154,7 +155,7 @@ export default function IconRail(): React.JSX.Element {
   }, [projects, pinnedProjects, activeProjectId, hasActiveAgents, paneStatuses, backgroundWorkspaces, tick])
 
   const handleAddProject = useCallback(async () => {
-    const folderPath = await invoke<string | null>('projects_pick_folder')
+    const folderPath = await pickWorkspaceFolder()
     if (!folderPath) return
     // Harness fan-out is off by default (canonical-agents PRD §4), so the
     // add has no destructive effects — no consent preview needed. The

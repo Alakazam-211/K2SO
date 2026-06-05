@@ -8,6 +8,7 @@ import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { getActiveBarItems } from '@/components/Sidebar/ActiveBar'
+import { pickWorkspaceFolder } from '@/lib/pick-workspace-folder'
 import type { TerminalPane } from '@/stores/tabs'
 
 /**
@@ -145,7 +146,7 @@ export function useTerminalShortcuts(cwd: string): void {
         case 'o': {
           if (e.shiftKey || e.altKey) return
           e.preventDefault()
-          invoke<string | null>('projects_pick_folder').then((folderPath) => {
+          pickWorkspaceFolder().then((folderPath) => {
             if (folderPath) {
               useProjectsStore.getState().addProject(folderPath)
             }
