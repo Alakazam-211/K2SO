@@ -2495,8 +2495,12 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
   const fetchRelations = useCallback(async () => {
     try {
       const [outgoing, inc] = await Promise.all([
-        invoke<WorkspaceRelation[]>('workspace_relations_list', { projectId }),
-        invoke<WorkspaceRelation[]>('workspace_relations_list_incoming', { projectId }),
+        // Host-aware: read through the daemon so the "Connected Workspaces"
+        // panel works when driving a remote K2 Connect host (the LOCAL
+        // Tauri invoke misfired against a remote daemon). Mirrors the
+        // host-aware relations/create + relations/delete writes.
+        daemonCliGet<WorkspaceRelation[]>('relations/list', { project_id: projectId }),
+        daemonCliGet<WorkspaceRelation[]>('relations/list-incoming', { project_id: projectId }),
       ])
       setRelations(outgoing)
       setIncoming(inc)

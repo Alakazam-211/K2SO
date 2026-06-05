@@ -161,6 +161,59 @@ describe('host-aware CLI POST swaps — GAP wire contract', () => {
     expect(body).not.toHaveProperty('sourceProjectId')
     expect(body).not.toHaveProperty('targetProjectId')
   })
+})
+
+// ════════════════════════════════════════════════════════════════════
+// K2 Connect host-awareness GAP — relations LIST reads (GET wire contract)
+// ════════════════════════════════════════════════════════════════════
+//
+// Unit 2a/2b made relations CREATE + DELETE host-aware but left the LIST
+// reads on LOCAL Tauri invoke(), so the "Connected Workspaces" panel went
+// blank against a remote K2 Connect host. These two GET reads close that
+// gap. The renderer holds a camelCase `projectId`; the route reads the
+// query param `project_id` (verified crates/k2so-daemon/src/agents_routes.rs
+// `/cli/relations/list{,-incoming}` → `str_param(params, "project_id")`).
+// A regression that sends `projectId` again would silently read an empty
+// id → empty array → blank panel; the not-toHaveProperty guards catch it.
+
+// Mirrors ProjectsSection.fetchRelations: source (outgoing) + incoming.
+function listRelations(projectId: string) {
+  return cli('relations/list', { project_id: projectId })
+}
+function listRelationsIncoming(projectId: string) {
+  return cli('relations/list-incoming', { project_id: projectId })
+}
+
+describe('host-aware CLI GET swaps — relations LIST wire contract', () => {
+  beforeEach(() => {
+    daemonCliGet.mockReset()
+    daemonCliGet.mockResolvedValue([])
+  })
+
+  it('relations/list remaps projectId → project_id (outgoing)', async () => {
+    await listRelations('proj-a')
+    expect(daemonCliGet).toHaveBeenCalledWith('relations/list', {
+      project_id: 'proj-a',
+    })
+    const [, params] = daemonCliGet.mock.calls[0] as [string, Record<string, unknown>]
+    expect(params).not.toHaveProperty('projectId')
+  })
+
+  it('relations/list-incoming remaps projectId → project_id (incoming)', async () => {
+    await listRelationsIncoming('proj-b')
+    expect(daemonCliGet).toHaveBeenCalledWith('relations/list-incoming', {
+      project_id: 'proj-b',
+    })
+    const [, params] = daemonCliGet.mock.calls[0] as [string, Record<string, unknown>]
+    expect(params).not.toHaveProperty('projectId')
+  })
+})
+
+describe('host-aware CLI POST swaps — set-surfaced (cont.)', () => {
+  beforeEach(() => {
+    daemonCliPost.mockReset()
+    daemonCliPost.mockResolvedValue({ success: true })
+  })
 
   it('session/set-surfaced maps all 8 fields to snake_case body', async () => {
     await setSurfaced(

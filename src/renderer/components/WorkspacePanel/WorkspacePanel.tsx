@@ -519,7 +519,10 @@ function ConnectedAgentsSection({ projectId }: { projectId: string }): React.JSX
 
   useEffect(() => {
     let cancelled = false
-    invoke<WorkspaceRelation[]>('workspace_relations_list_incoming', { projectId })
+    // Host-aware: read through the daemon so incoming connections resolve
+    // when driving a remote K2 Connect host (the LOCAL Tauri invoke
+    // misfired against a remote daemon).
+    daemonCliGet<WorkspaceRelation[]>('relations/list-incoming', { project_id: projectId })
       .then((result) => { if (!cancelled) { setRelations(result); setLoaded(true) } })
       .catch(() => { if (!cancelled) { setRelations([]); setLoaded(true) } })
     return () => { cancelled = true }
