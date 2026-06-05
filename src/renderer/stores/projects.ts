@@ -16,9 +16,16 @@ import { onDaemonConnected } from '@/lib/daemon-reconnect'
 import { onActiveHostChange } from '@/stores/connect-host'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
-import { useTabsStore, ensurePinnedAgentTabForMode } from './tabs'
+import { useTabsStore, ensurePinnedAgentTabForMode, registerActiveProjectIdGetter } from './tabs'
 import { useFocusGroupsStore } from './focus-groups'
 import { useSettingsStore } from './settings'
+
+// #657 — hand tabs.ts a lazy reader for `activeProjectId` so the
+// dismiss-reap path can honor "never reap the foreground workspace"
+// without a static projects→tabs→projects import cycle. Registered at
+// module load; safe to call before the store has any projects (returns
+// the initial `null`).
+registerActiveProjectIdGetter(() => useProjectsStore.getState().activeProjectId)
 
 // Debounce touchInteraction to avoid excessive DB writes (5 min per project)
 const TOUCH_DEBOUNCE_MS = 5 * 60 * 1000
@@ -397,6 +404,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
     const project = state.projects.find((p) => p.id === id)
     if (project) {
+      // #657 — re-activating a project cancels any pending dismiss-reap
+      // of its pinned chat PTY so a quick return keeps the warm session.
+      tabsStore.cancelWorkspaceChatReap(id)
       const newWorkspaceId = project.workspaces[0]?.id ?? null
       set({
         activeProjectId: id,
@@ -427,6 +437,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     if (state.activeProjectId === projectId && state.activeWorkspaceId === workspaceId) return
 
     const tabsStore = useTabsStore.getState()
+
+    // #657 — activating any workspace of this project cancels a pending
+    // dismiss-reap of its pinned chat PTY (return-within-grace path).
+    tabsStore.cancelWorkspaceChatReap(projectId)
 
     // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {

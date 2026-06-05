@@ -61,11 +61,16 @@ vi.mock('./tabs', () => ({
       restoreWorkspace: vi.fn(),
       loadLayoutForWorkspace: vi.fn(),
       clearBackgroundWorkspace: vi.fn(),
+      cancelWorkspaceChatReap: vi.fn(),
       tabs: [],
       backgroundWorkspaces: {},
     }),
   },
   ensurePinnedAgentTabForMode: vi.fn(),
+  // #657 — projects.ts registers a lazy activeProjectId getter on the
+  // tabs module at load time; the mock must expose the export so the
+  // module-eval call resolves.
+  registerActiveProjectIdGetter: vi.fn(),
 }))
 vi.mock('./focus-groups', () => ({
   useFocusGroupsStore: {

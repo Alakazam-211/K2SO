@@ -123,60 +123,215 @@ pub fn smart_launch(project_path: &str, name: &str) -> serde_json::Value {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    // Branch 1: no saved session — fresh fire.
-    if saved_session.is_none() {
-        return run_fresh_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs);
-    }
-    let session_id = saved_session.unwrap();
+    // ── Resolve live-PTY candidates (keeping the handles) ──────────────
+    //
+    // 0.39.x dismiss-reap safety: a candidate PTY is only eligible for
+    // Branch 2 (inject) if its child is actually alive. The dismiss-reap
+    // path (15s after a workspace leaves the Active bar) calls v2/close →
+    // unregister, which clears this row's active_terminal_id and kills
+    // the child — so the lookups below normally miss. But a stale pointer
+    // (daemon restart mid-teardown, a zombie child whose ChildExit landed
+    // before unregister) could still resolve a registered-but-dead
+    // session. `find_live_for_resume` (Branch 2b) already filters dead
+    // children; here we resolve the stamped-pointer candidate (Branch 2a)
+    // and probe its liveness so the pure planner can reject a corpse and
+    // fall through to Branch 3 (resume + fresh PTY) instead of injecting
+    // a WAKEUP into a dead PTY.
 
-    // Branch 2a: SQL-stamped active_terminal_id is the source of truth
-    // for which PTY this heartbeat is bonded to. Honor it first so
-    // every fire lands in the same PTY (the one a previous fire chose),
+    // Branch 2a candidate: the SQL-stamped active_terminal_id. This is the
+    // source of truth for which PTY this heartbeat is bonded to — honored
+    // first so every fire lands in the same PTY a previous fire chose,
     // even when multiple live PTYs share the same `--resume <id>` argv.
-    // Without this, `find_live_for_resume`'s argv-scan can pick a
-    // different match each time and inject lands in a PTY the user
-    // isn't watching.
+    let mut active_candidate: Option<session_lookup::LiveSession> = None;
+    let mut stale_active_stamp = false;
     if let Some(active_id_str) = hb.active_terminal_id.as_deref()
         .filter(|s| !s.is_empty())
     {
-        if let Some(sid) = SessionId::parse(active_id_str) {
-            if let Some(live) = session_lookup::lookup_by_session_id(&sid) {
-                return run_inject(project_path, &project_id, &agent_name, &hb,
-                    &wakeup_abs, &session_id, String::new(), live);
+        match SessionId::parse(active_id_str)
+            .and_then(|sid| session_lookup::lookup_by_session_id(&sid))
+        {
+            Some(live) if live.is_child_alive() => active_candidate = Some(live),
+            // Stamp pointed at a corpse, a dead/zombie child, or an
+            // unparseable id — mark it for cleanup so we don't keep
+            // stumbling on the same dead pointer next fire.
+            _ => stale_active_stamp = true,
+        }
+    }
+
+    // Branch 2b candidate: argv-scan fallback for the cold-start case
+    // (first fire after restart, or active_terminal_id was just cleared).
+    // Only alive children are returned (filtered inside the helper).
+    let argv_candidate = saved_session
+        .as_deref()
+        .and_then(find_live_for_resume);
+
+    // JSONL existence for the self-heal branch — a saved session whose
+    // JSONL was never written (daemon restart in the spawn → wakeup-write
+    // window) would make `claude --resume <ghost>` fail; the planner
+    // routes that to a fresh fire instead.
+    let saved_jsonl_exists = saved_session
+        .as_deref()
+        .map(|s| k2so_core::chat_history::claude_session_file_exists(s, project_path))
+        .unwrap_or(false);
+
+    // ── Pure branch selection ──────────────────────────────────────────
+    let inputs = LaunchInputs {
+        saved_session_id: saved_session.clone(),
+        active_terminal_candidate: active_candidate.as_ref().map(|live| LiveCandidate {
+            session_id: live.session_id().to_string(),
+            child_alive: true, // already gated above
+        }),
+        argv_scan_candidate: argv_candidate.as_ref().map(|(_, live)| LiveCandidate {
+            session_id: live.session_id().to_string(),
+            child_alive: true, // find_live_for_resume only returns alive
+        }),
+        saved_jsonl_exists,
+    };
+    let decision = plan_launch_decision(&inputs);
+
+    // Clear a stale active_terminal_id stamp once the decision is made
+    // (regardless of branch) so the next fire starts from clean state.
+    if stale_active_stamp {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let _ = AgentHeartbeat::clear_active_terminal_id(&conn, &project_id, &hb.name);
+    }
+
+    // ── Dispatch on the decision, reusing the held live handles ─────────
+    match decision {
+        LaunchDecision::FreshFire => {
+            // Distinguish the two fresh-fire causes for the audit trail:
+            // (a) no saved session at all, vs (b) a saved session whose
+            // JSONL vanished — the latter clears the ghost id first.
+            if saved_session.is_some() && !saved_jsonl_exists {
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+                let _ = AgentHeartbeat::clear_session_id(&conn, &project_id, &hb.name);
+            }
+            run_fresh_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs)
+        }
+        LaunchDecision::Inject { .. } => {
+            // Prefer the stamped (2a) handle; fall back to the argv (2b)
+            // handle. The planner already guaranteed one is present + alive.
+            let session_id = saved_session.clone().unwrap_or_default();
+            if let Some(live) = active_candidate {
+                run_inject(project_path, &project_id, &agent_name, &hb,
+                    &wakeup_abs, &session_id, String::new(), live)
+            } else if let Some((live_agent, live)) = argv_candidate {
+                run_inject(project_path, &project_id, &agent_name, &hb,
+                    &wakeup_abs, &session_id, live_agent, live)
+            } else {
+                // Unreachable: planner returned Inject only when a
+                // candidate existed. Defensive fall-through to resume.
+                run_resume_and_fire(project_path, &project_id, &agent_name, &hb,
+                    &wakeup_abs, &session_id)
             }
         }
-        // Stamp pointed at a corpse — clear it so we don't keep
-        // stumbling on the same dead pointer next fire.
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        let _ = AgentHeartbeat::clear_active_terminal_id(
-            &conn, &project_id, &hb.name,
-        );
+        LaunchDecision::ResumeAndFire { claude_session_id } => {
+            run_resume_and_fire(project_path, &project_id, &agent_name, &hb,
+                &wakeup_abs, &claude_session_id)
+        }
+        // The pure planner never returns the Skipped* variants — those
+        // are produced earlier in this function before branch selection.
+        LaunchDecision::SkippedArchived
+        | LaunchDecision::SkippedNotFound
+        | LaunchDecision::SkippedNoAgent
+        | LaunchDecision::SkippedWakeupMissing => {
+            run_fresh_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs)
+        }
+    }
+}
+
+/// A candidate live PTY surfaced to the decision planner. Decouples the
+/// pure branch-selection logic from the concrete `session_lookup`
+/// machinery so the heartbeat-safety decision is unit-testable without
+/// spawning a real child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCandidate {
+    /// k2so session id of the matched PTY.
+    pub session_id: String,
+    /// Whether the matched PTY's child process is still alive. A reaped
+    /// (dismiss-reap) or zombie PTY reports `false` and MUST NOT be
+    /// chosen for inject.
+    pub child_alive: bool,
+}
+
+/// Inputs to the pure heartbeat-launch decision planner. Mirrors the
+/// branch-selection inputs `smart_launch` reads off the DB row +
+/// session map, minus the spawn/inject side effects.
+#[derive(Debug, Clone)]
+pub struct LaunchInputs {
+    /// `agent_heartbeats.last_session_id` (None/"" → no saved session).
+    pub saved_session_id: Option<String>,
+    /// The PTY resolved from the row's stamped `active_terminal_id`, if
+    /// the id parsed AND the v2 map still holds it. None when the row
+    /// has no stamp, the stamp is unparseable, or the session was
+    /// already unregistered (e.g. by the dismiss-reap v2/close).
+    pub active_terminal_candidate: Option<LiveCandidate>,
+    /// The PTY found by argv-scan (`--resume`/`--session-id <saved>`),
+    /// if any is registered. The dismiss-reap path unregisters the
+    /// session, so this is None after a reap.
+    pub argv_scan_candidate: Option<LiveCandidate>,
+    /// Whether the saved session's JSONL exists on disk. False → the
+    /// ghost is cleared and we fall through to a fresh fire.
+    pub saved_jsonl_exists: bool,
+}
+
+/// Pure heartbeat-launch branch selection. Extracted from
+/// `smart_launch` so the dismiss-reap safety invariant — a
+/// reaped/dead/zombie PTY must NOT be chosen for Branch 2 (inject) —
+/// is asserted directly against the decision rather than indirectly
+/// through spawn side effects.
+///
+/// Maps to the legacy four-branch tree:
+///   • no saved session                          → `FreshFire`        (Branch 1)
+///   • stamped active_terminal_id, child alive    → `Inject`          (Branch 2a)
+///   • argv-scan match, child alive               → `Inject`          (Branch 2b)
+///   • saved session, JSONL missing               → `FreshFire`       (self-heal)
+///   • saved session, no live PTY, JSONL present  → `ResumeAndFire`   (Branch 3)
+///
+/// CRITICAL: a candidate with `child_alive == false` is treated as
+/// absent — it can never produce `Inject`. This is what makes the
+/// reap-then-heartbeat sequence resume (Branch 3) instead of writing a
+/// WAKEUP into a dead PTY.
+pub fn plan_launch_decision(inputs: &LaunchInputs) -> LaunchDecision {
+    // Branch 1: no saved session — fresh fire.
+    let Some(session_id) = inputs
+        .saved_session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    else {
+        return LaunchDecision::FreshFire;
+    };
+
+    // Branch 2a: stamped active_terminal_id, but only if its child is
+    // alive. A reaped/zombie PTY is treated as absent.
+    if let Some(cand) = &inputs.active_terminal_candidate {
+        if cand.child_alive {
+            return LaunchDecision::Inject {
+                target_session_id: cand.session_id.clone(),
+            };
+        }
     }
 
-    // Branch 2b: argv-scan fallback for the cold-start case (first
-    // fire after restart, or active_terminal_id was just cleared).
-    if let Some((live_agent, live)) = find_live_for_resume(&session_id) {
-        return run_inject(project_path, &project_id, &agent_name, &hb, &wakeup_abs,
-            &session_id, live_agent, live);
+    // Branch 2b: argv-scan match, same liveness gate.
+    if let Some(cand) = &inputs.argv_scan_candidate {
+        if cand.child_alive {
+            return LaunchDecision::Inject {
+                target_session_id: cand.session_id.clone(),
+            };
+        }
     }
 
-    // Self-heal: before resuming, verify the saved session's JSONL
-    // exists on disk. Daemon restarts during the spawn → wakeup-write
-    // window can leave `last_session_id` pointing at a session whose
-    // JSONL was never written. `claude --resume <ghost>` would fail
-    // with "No conversation found" — clear the ghost and fall through
-    // to fresh_fire so the next fire spawns cleanly.
-    if !k2so_core::chat_history::claude_session_file_exists(&session_id, project_path) {
-        let db = k2so_core::db::shared();
-        let conn = db.lock();
-        let _ = AgentHeartbeat::clear_session_id(&conn, &project_id, &hb.name);
-        drop(conn);
-        return run_fresh_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs);
+    // Self-heal: saved session whose JSONL was never written → fresh.
+    if !inputs.saved_jsonl_exists {
+        return LaunchDecision::FreshFire;
     }
 
-    // Branch 3: saved session, no live PTY — resume + fire.
-    run_resume_and_fire(project_path, &project_id, &agent_name, &hb, &wakeup_abs, &session_id)
+    // Branch 3: saved session, no live PTY, JSONL present — resume.
+    LaunchDecision::ResumeAndFire {
+        claude_session_id: session_id.to_string(),
+    }
 }
 
 // ── Implementation ───────────────────────────────────────────────────
@@ -235,7 +390,11 @@ fn find_live_for_resume(session_id: &str) -> Option<(String, session_lookup::Liv
             }
             i += 1;
         }
-        if found {
+        // 0.39.x dismiss-reap safety: only argv-matched PTYs whose
+        // child is actually alive count. A registered-but-dead session
+        // (ChildExit observed, unregister not yet run) must NOT be
+        // chosen for inject — fall through to Branch 3 (resume) instead.
+        if found && live.is_child_alive() {
             matches.push((agent, live));
         }
     }
@@ -624,4 +783,118 @@ fn auto_disable_missing_wakeup(
         wakeup_abs.display()
     );
     error_value("auto_disabled", &reason, &hb.name)
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+
+    fn alive(id: &str) -> LiveCandidate {
+        LiveCandidate { session_id: id.to_string(), child_alive: true }
+    }
+    fn dead(id: &str) -> LiveCandidate {
+        LiveCandidate { session_id: id.to_string(), child_alive: false }
+    }
+
+    /// Branch 1 — no saved session is a fresh fire regardless of the
+    /// other inputs.
+    #[test]
+    fn no_saved_session_is_fresh_fire() {
+        let inputs = LaunchInputs {
+            saved_session_id: None,
+            active_terminal_candidate: Some(alive("term-1")),
+            argv_scan_candidate: Some(alive("term-2")),
+            saved_jsonl_exists: true,
+        };
+        assert_eq!(plan_launch_decision(&inputs), LaunchDecision::FreshFire);
+    }
+
+    /// Branch 2a — a live stamped PTY injects.
+    #[test]
+    fn live_active_terminal_injects() {
+        let inputs = LaunchInputs {
+            saved_session_id: Some("claude-abc".into()),
+            active_terminal_candidate: Some(alive("term-live")),
+            argv_scan_candidate: None,
+            saved_jsonl_exists: true,
+        };
+        assert_eq!(
+            plan_launch_decision(&inputs),
+            LaunchDecision::Inject { target_session_id: "term-live".into() },
+        );
+    }
+
+    /// THE DISMISS-REAP INVARIANT: after a reap the session is
+    /// unregistered, so BOTH candidates are None and the JSONL still
+    /// exists on disk → the next fire MUST resume (Branch 3), never
+    /// inject into the dead PTY.
+    #[test]
+    fn reaped_session_resumes_not_injects() {
+        let inputs = LaunchInputs {
+            saved_session_id: Some("claude-reaped".into()),
+            active_terminal_candidate: None, // v2/close unregistered it
+            argv_scan_candidate: None,       // gone from the map too
+            saved_jsonl_exists: true,        // JSONL survives the reap
+        };
+        let decision = plan_launch_decision(&inputs);
+        assert_eq!(
+            decision,
+            LaunchDecision::ResumeAndFire { claude_session_id: "claude-reaped".into() },
+            "a reaped/dismissed session must resume via Branch 3, not inject into a dead PTY",
+        );
+        // Belt-and-suspenders: assert it is specifically NOT an inject.
+        assert!(
+            !matches!(decision, LaunchDecision::Inject { .. }),
+            "reaped session decision must never be Inject (Branch 2)",
+        );
+    }
+
+    /// DEFENSE-IN-DEPTH: even if a stale `active_terminal_id` still
+    /// resolves a registered-but-DEAD (zombie) PTY, the liveness gate
+    /// rejects it and we resume instead of injecting into the corpse.
+    #[test]
+    fn stale_dead_active_terminal_resumes_not_injects() {
+        let inputs = LaunchInputs {
+            saved_session_id: Some("claude-zombie".into()),
+            active_terminal_candidate: Some(dead("term-corpse")),
+            argv_scan_candidate: None,
+            saved_jsonl_exists: true,
+        };
+        let decision = plan_launch_decision(&inputs);
+        assert_eq!(
+            decision,
+            LaunchDecision::ResumeAndFire { claude_session_id: "claude-zombie".into() },
+        );
+        assert!(!matches!(decision, LaunchDecision::Inject { .. }));
+    }
+
+    /// A dead argv-scan candidate is likewise ignored (falls to resume).
+    #[test]
+    fn dead_argv_scan_candidate_resumes_not_injects() {
+        let inputs = LaunchInputs {
+            saved_session_id: Some("claude-x".into()),
+            active_terminal_candidate: None,
+            argv_scan_candidate: Some(dead("term-dead-argv")),
+            saved_jsonl_exists: true,
+        };
+        let decision = plan_launch_decision(&inputs);
+        assert!(!matches!(decision, LaunchDecision::Inject { .. }));
+        assert_eq!(
+            decision,
+            LaunchDecision::ResumeAndFire { claude_session_id: "claude-x".into() },
+        );
+    }
+
+    /// Self-heal: saved session whose JSONL was never written → fresh
+    /// fire (no live PTY to inject into, nothing to resume).
+    #[test]
+    fn missing_jsonl_falls_to_fresh_fire() {
+        let inputs = LaunchInputs {
+            saved_session_id: Some("claude-ghost".into()),
+            active_terminal_candidate: None,
+            argv_scan_candidate: None,
+            saved_jsonl_exists: false,
+        };
+        assert_eq!(plan_launch_decision(&inputs), LaunchDecision::FreshFire);
+    }
 }

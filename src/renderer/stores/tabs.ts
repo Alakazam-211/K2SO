@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
-import { agentDisplayName } from '@/lib/workspace-agent'
+import { agentDisplayName, setChatSession } from '@/lib/workspace-agent'
 import { terminalKill } from '@/lib/terminal-daemon'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
@@ -30,11 +30,92 @@ import {
  *  driven (tab open/close/move) rather than side-effects of UI mount. */
 let hasLoadedWorkspaceSessions = false
 
+// ── #657 dismiss-reap grace timers ──────────────────────────────────────
+//
+// When a workspace leaves the Active bar (dismiss), its PINNED Chat
+// (agent) PTY is reaped after a 15s grace delay to free memory. The
+// saved session lazily re-launches via `claude --resume` on return
+// (that path already works). The grace window lets a quick re-open /
+// re-activation cancel the reap so we don't churn the warm PTY.
+//
+// Module-level (not in the store) so the handle survives store updates
+// and is reachable from the cancel path without threading it through
+// React state.
+export const DISMISS_REAP_GRACE_MS = 15_000
+const _pendingChatReaps = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Test-only — clear every pending reap timer so vitest cases don't
+ *  leak handles into each other. Not exported through the store API. */
+export function __clearPendingChatReapsForTests(): void {
+  for (const handle of _pendingChatReaps.values()) clearTimeout(handle)
+  _pendingChatReaps.clear()
+}
+
+/** Test-only — inspect whether a reap is currently scheduled for a
+ *  given project. */
+export function __hasPendingChatReapForTests(projectId: string): boolean {
+  return _pendingChatReaps.has(projectId)
+}
+
+/** Find the pinned Chat agent item's persisted Claude session id for a
+ *  project, scanning the live tabs first, then any stashed background
+ *  workspace snapshots. Returns null when no chat item carries a
+ *  sessionId (e.g. the chat never spawned). */
+function findChatSessionIdForProject(
+  state: TabsState,
+  projectId: string,
+): string | null {
+  const scanItems = (items: Item[]): string | null => {
+    for (const item of items) {
+      if (item.type !== 'agent') continue
+      const d = item.data as AgentItemData
+      if (d.section !== 'chat') continue
+      // Match by the project this agent item belongs to. The agent
+      // item carries projectPath; the projectId is the canonical
+      // identity used as the v2 session agent_name (see
+      // AgentChatPane's `attachAgentName={projectId}`).
+      if (d.sessionId) return d.sessionId
+    }
+    return null
+  }
+  for (const tab of state.tabs) {
+    for (const [, pg] of tab.paneGroups) {
+      const found = scanItems(pg.items)
+      if (found) return found
+    }
+  }
+  for (const [key, snapshot] of Object.entries(state.backgroundWorkspaces)) {
+    if (!key.startsWith(`${projectId}:`)) continue
+    for (const tab of snapshot.tabs) {
+      for (const [, pg] of tab.paneGroups) {
+        const found = scanItems(pg.items)
+        if (found) return found
+      }
+    }
+  }
+  return null
+}
+
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
 let _presetsStoreRef: (() => { presets: any[] }) | null = null
 export function registerPresetsStore(getter: () => { presets: any[] }): void {
   _presetsStoreRef = getter
+}
+
+// #657 — lazy reference to the projects store's `activeProjectId`,
+// avoiding the projects → tabs → projects import cycle (projects.ts
+// statically imports tabs.ts). projects.ts registers this getter on
+// module load; the dismiss-reap path reads it at schedule/fire time.
+// Falls back to `null` (treated as "no foreground") when unregistered,
+// e.g. in a vitest unit that never imports projects.ts — tests can
+// register a stub directly.
+let _activeProjectIdRef: (() => string | null) | null = null
+export function registerActiveProjectIdGetter(getter: () => string | null): void {
+  _activeProjectIdRef = getter
+}
+function currentActiveProjectId(): string | null {
+  return _activeProjectIdRef ? _activeProjectIdRef() : null
 }
 
 // ── Daemon-authoritative session events (0.38.0 Commit 4) ────────────────
@@ -573,6 +654,19 @@ interface TabsState {
   restoreWorkspace: (key: string, cwd: string) => void
   serializeAllWorkspaces: (activeKey: string) => Promise<void>
   clearBackgroundWorkspace: (key: string) => void
+  /** #657 — schedule the dismissed workspace's PINNED Chat (agent) PTY
+   *  to be reaped after a 15s grace delay so its memory is freed. The
+   *  saved session lazily re-launches via `claude --resume` on return.
+   *  No-op (never schedules) when `projectId` is currently the
+   *  foreground `activeProjectId`. Ensures the chat session id is
+   *  persisted to the daemon DB before the close fires so `--resume`
+   *  has a target. Cancelled by `cancelWorkspaceChatReap` if the user
+   *  re-opens/re-activates the workspace within the window. */
+  scheduleWorkspaceChatReap: (projectId: string, projectPath: string) => void
+  /** #657 — cancel any pending dismiss-reap timer for this project.
+   *  Wired into the project-activation + re-add-to-Active paths so a
+   *  return within the 15s window keeps the warm chat PTY alive. */
+  cancelWorkspaceChatReap: (projectId: string) => void
   persistActiveWorkspace: () => void
   /** Add a tab to a workspace without switching to it. If the workspace is active,
    *  adds directly. If background/stashed, saves to DB session so it's there when restored.
@@ -3446,6 +3540,69 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     const { [key]: _, ...remaining } = state.backgroundWorkspaces
     set({ backgroundWorkspaces: remaining })
+  },
+
+  scheduleWorkspaceChatReap: (projectId: string, projectPath: string) => {
+    // Rule 2: NEVER reap the workspace currently being viewed. If the
+    // dismissed project IS the foreground project, skip scheduling
+    // entirely — its chat PTY must stay alive.
+    const activeProjectId = currentActiveProjectId()
+    if (projectId === activeProjectId) return
+
+    // Idempotent: replace any existing pending timer so re-dismiss
+    // doesn't stack multiple reaps for the same project.
+    const existing = _pendingChatReaps.get(projectId)
+    if (existing) clearTimeout(existing)
+
+    const handle = setTimeout(() => {
+      _pendingChatReaps.delete(projectId)
+
+      // Re-check foreground at fire time — the user may have navigated
+      // back without going through a path that cancels (defense in
+      // depth on top of cancelWorkspaceChatReap).
+      const fgId = currentActiveProjectId()
+      if (projectId === fgId) return
+
+      // Rule 4: ensure the chat session id is persisted to the daemon
+      // DB BEFORE the close fires so `claude --resume` has a target.
+      // The renderer holds the canonical sessionId on the pinned chat
+      // agent item; stamp it through set-chat-session (idempotent) and
+      // only then reap. If we can't find a sessionId there's nothing
+      // resumable to protect — reap straight away.
+      const sessionId = findChatSessionIdForProject(get(), projectId)
+      const reap = () => {
+        // Reuse the canonical teardown path: the pinned chat's v2
+        // session is registered under the bare projectId agent_name
+        // (AgentChatPane passes `attachAgentName={projectId}`), so
+        // closing that v2 session unregisters + SIGHUP-reaps the PTY
+        // via the daemon's unregister chokepoint (DaemonPtySession::
+        // kill()). That chokepoint also clears the heartbeat row's
+        // active_terminal_id, so the next heartbeat fire resumes
+        // (Branch 3) instead of injecting into a dead PTY.
+        void closeV2Session(projectId)
+      }
+      if (sessionId) {
+        setChatSession(projectPath, sessionId)
+          .then(reap)
+          .catch((e) => {
+            // Persist failed — DO NOT reap. Without a saved session_id
+            // the resume path has no target; keeping the PTY warm is
+            // the safe failure mode (memory is reclaimed next time).
+            console.warn('[tabs] dismiss-reap: set-chat-session failed, keeping chat PTY alive:', e)
+          })
+      } else {
+        reap()
+      }
+    }, DISMISS_REAP_GRACE_MS)
+
+    _pendingChatReaps.set(projectId, handle)
+  },
+
+  cancelWorkspaceChatReap: (projectId: string) => {
+    const handle = _pendingChatReaps.get(projectId)
+    if (!handle) return
+    clearTimeout(handle)
+    _pendingChatReaps.delete(projectId)
   },
 
   persistActiveWorkspace: () => {

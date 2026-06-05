@@ -332,7 +332,10 @@ export default function ActiveBar(): React.JSX.Element | null {
     } else if (clickedId === 'add-active') {
       // "Keep in Active Bar" is an explicit re-add — clears any
       // stale dismiss state so the manual flag wins immediately.
+      // #657 — also cancel any pending dismiss-reap of the chat PTY so
+      // a re-add inside the 15s grace keeps the warm session.
       _dismissedProjects.delete(project.id)
+      useTabsStore.getState().cancelWorkspaceChatReap(project.id)
       await setManuallyActive(project.id, true)
     } else if (clickedId === 'dismiss' && !hasRunningAgent) {
       // Clear from memory, DB, background workspaces, and local state.
@@ -353,6 +356,14 @@ export default function ActiveBar(): React.JSX.Element | null {
           tabsStore.clearBackgroundWorkspace(key)
         }
       }
+      // #657 — schedule the pinned Chat (agent) PTY to be reaped after
+      // a 15s grace delay so its memory is freed. clearBackgroundWorkspace
+      // above only kills terminal items; the chat is an agent item and
+      // survives. The schedule action skips entirely if this project is
+      // still the foreground (rule 2) and re-checks at fire time; a
+      // re-open/re-activate within the window cancels it. On return the
+      // saved session lazily resumes via `claude --resume`.
+      tabsStore.scheduleWorkspaceChatReap(project.id, project.path)
       await useProjectsStore.getState().fetchProjects()
     }
   }, [activeProjectId, agentMap, setManuallyActive])

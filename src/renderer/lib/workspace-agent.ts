@@ -45,6 +45,22 @@ export async function setAgentDisplayName(
   })
 }
 
+/** #657 — persist the pinned chat tab's canonical Claude session id to
+ *  the daemon DB (`workspace_sessions.session_id`). Called on the
+ *  dismiss-reap path BEFORE the chat PTY is closed so `claude --resume`
+ *  has a target when the workspace is re-opened. (GET-with-mutation,
+ *  mirroring `setAgentDisplayName` — the daemon route reads query
+ *  params.) Resolves to the daemon's update result. */
+export async function setChatSession(
+  projectPath: string,
+  sessionId: string,
+): Promise<void> {
+  await daemonCliGet('workspace/set-chat-session', {
+    project: projectPath,
+    session_id: sessionId,
+  })
+}
+
 export interface ResumeChatArgs {
   command: string
   args: string[]
