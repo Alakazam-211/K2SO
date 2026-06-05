@@ -319,6 +319,16 @@ export function ConnectionGate(): React.ReactElement {
         next.kind === 'accept' ? 'connected' : 'connecting',
       )
       if (next.kind === 'accept') {
+        // #638: cache the accepted host's version + protocol so
+        // lib/server-capabilities can gate newer client features against an
+        // older host (and build "update the host to vX" hints). For a
+        // REMOTE host we use the host's own /boot-status `version`; for
+        // LOCAL we use this app's bundled version (the daemon is paired with
+        // the app, but caching the real version keeps gating uniform).
+        useConnectHostStore.getState().setServerInfo({
+          version: status?.version ?? (isRemote ? null : appVersionRef.current ?? null),
+          protocol: status?.protocol ?? null,
+        })
         // Remember this host reached 'accept' at least once → a later
         // drop becomes a SOFT reconnect (overlay) instead of a blank.
         acceptedOnce = true

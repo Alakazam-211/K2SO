@@ -196,6 +196,19 @@ interface ConnectHostState {
   /** Live status of the active host's connection (set by the gate). */
   connectionStatus: ConnectionStatus
   /**
+   * Remote-capability cache (#638): the ACTIVE host's marketing version +
+   * wire protocol, learned from its `/boot-status` when the ConnectionGate
+   * accepts it. `lib/server-capabilities.ts` reads `serverVersion` to gate
+   * newer client features (and to build "update the host to vX" hints).
+   *
+   * null until a boot-status lands, and reset to null on every host switch
+   * / disconnect so a stale version never leaks across hosts. For the
+   * LOCAL host this is left null and treated as "supports everything" by
+   * serverSupports() (local is always paired with this app).
+   */
+  serverVersion: string | null
+  serverProtocol: number | null
+  /**
    * A host the user picked that needs the full-screen sign-in before it
    * can become active — i.e. it has no remembered/in-memory token, or a
    * previously-remembered one was rejected/expired. Null = no sign-in
@@ -216,6 +229,13 @@ interface ConnectHostState {
   removeHost: (id: string) => void
   /** Gate-driven: update the live connection status of the active host. */
   setConnectionStatus: (status: ConnectionStatus) => void
+  /**
+   * Gate-driven (#638): cache the ACTIVE host's version + protocol from its
+   * accepted `/boot-status`. Pass `{version:null, protocol:null}` to clear
+   * (the gate calls this on a host switch before re-polling). Called from
+   * ConnectionGate's accept path.
+   */
+  setServerInfo: (info: { version: string | null; protocol: number | null }) => void
   /** Set a host's in-memory token (e.g. after a successful sign-in) so
    *  daemon-ws.ts can use it for the active connection. Does NOT touch
    *  the keychain — call `rememberToken`/`forgetToken` for that. When the
@@ -506,6 +526,8 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
   hosts: loadHosts(),
   connectionStatus: 'connecting',
   pendingSignIn: null,
+  serverVersion: null,
+  serverProtocol: null,
 
   selectHost: (hostOrLocal) => {
     // Enter 'connecting' + clear any pending sign-in, then flip
@@ -513,7 +535,17 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     // accepts. Daemon-data flows through host-aware `daemonCli*` calls
     // that read `activeHost` from this store at call time, so the flip is
     // synchronous — there is no Rust-side proxy override to await.
-    set({ connectionStatus: 'connecting', pendingSignIn: null, activeHost: hostOrLocal })
+    //
+    // #638: a host switch invalidates the cached remote version/protocol —
+    // null them so server-capabilities never reports the OLD host's
+    // capabilities for the NEW one. The gate re-caches on the next accept.
+    set({
+      connectionStatus: 'connecting',
+      pendingSignIn: null,
+      activeHost: hostOrLocal,
+      serverVersion: null,
+      serverProtocol: null,
+    })
   },
 
   requestSignIn: (host) => {
@@ -535,7 +567,16 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     // synchronously. Host-aware `daemonCli*` calls read `activeHost.token`
     // at call time, so a tokenless active host simply can't fire authed
     // remote requests until the user re-signs-in.
-    set({ hosts: cleared, pendingSignIn: clearedActive, connectionStatus: 'connecting', activeHost: clearedActive })
+    set({
+      hosts: cleared,
+      pendingSignIn: clearedActive,
+      connectionStatus: 'connecting',
+      activeHost: clearedActive,
+      // #638: session expired → drop the cached capability info until the
+      // re-authed host re-accepts and the gate re-caches it.
+      serverVersion: null,
+      serverProtocol: null,
+    })
   },
 
   cancelSignIn: () => {
@@ -581,6 +622,10 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     set({ connectionStatus: status })
   },
 
+  setServerInfo: ({ version, protocol }) => {
+    set({ serverVersion: version, serverProtocol: protocol })
+  },
+
   addHost: (host) => {
     const existing = get().hosts
     // Replace-by-id so re-adding/editing an existing entry updates in
@@ -600,9 +645,15 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
     void forgetToken(id)
     void forgetPassword(id)
     // If we removed the currently-active host, fall back to local.
-    const nextActive: ActiveHost =
-      activeHost !== 'local' && activeHost.id === id ? 'local' : activeHost
-    set({ hosts: next, activeHost: nextActive })
+    const removedActive = activeHost !== 'local' && activeHost.id === id
+    const nextActive: ActiveHost = removedActive ? 'local' : activeHost
+    // #638: if the removed host was active, we fell back to 'local' — drop
+    // the removed host's cached capability info.
+    set(
+      removedActive
+        ? { hosts: next, activeHost: nextActive, serverVersion: null, serverProtocol: null }
+        : { hosts: next, activeHost: nextActive },
+    )
   },
 
   setHostToken: (id, token) => {
@@ -658,7 +709,7 @@ export const useConnectHostStore = create<ConnectHostState>((set, get) => ({
 export function __resetConnectHostStoreForTests(): void {
   const storage = getStorage()
   storage?.removeItem(STORAGE_KEY)
-  useConnectHostStore.setState({ activeHost: 'local', hosts: [], connectionStatus: 'connecting', pendingSignIn: null })
+  useConnectHostStore.setState({ activeHost: 'local', hosts: [], connectionStatus: 'connecting', pendingSignIn: null, serverVersion: null, serverProtocol: null })
 }
 
 /** The localStorage key, exported for tests. */
