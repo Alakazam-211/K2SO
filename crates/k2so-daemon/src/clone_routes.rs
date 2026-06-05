@@ -77,6 +77,13 @@ pub fn handle_clone_bundle(body: &[u8]) -> CliResponse {
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
         return CliResponse::internal_error(format!("create clone-tmp dir: {e}"));
     }
+
+    // Self-heal accumulated clone bundles (task #655): prune any stale
+    // `*.tar.gz` in this exact dir before writing the fresh one. This
+    // reclaims the SOURCE machine's own previous bundle on the next clone,
+    // and any DESTINATION bundle whose immediate post-unpack delete failed.
+    // Best-effort: errors are logged, never fatal.
+    prune_stale_bundles(&tmp_dir, STALE_BUNDLE_AGE);
     let name = std::path::Path::new(&inv.project_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -159,6 +166,12 @@ pub fn unpack_and_register(
     let (result, manifest) = clone::unpack_bundle(bundle_path, dest_parent, home)?;
     let dest_path = result.dest_path.to_string_lossy().to_string();
 
+    // Best-effort: the uploaded bundle has now been fully extracted, so
+    // delete it to avoid leaking `~/.k2so/clone-tmp/*.tar.gz` on the
+    // DESTINATION machine (task #655). Failures here are non-fatal — the
+    // source-side stale-prune in `handle_clone_bundle` is the backstop.
+    remove_unpacked_bundle(bundle_path);
+
     // 2. Register the folder as a project. Prefer the git-aware path
     //    (`add-from-path`); a cloned workspace whose ROOT isn't a git repo
     //    falls back to the git-free registration rather than erroring with
@@ -203,6 +216,82 @@ pub fn unpack_and_register(
     }
 
     Ok((project, dest_path))
+}
+
+/// How old a `clone-tmp/*.tar.gz` must be before the stale-prune deletes it.
+/// Conservative: an in-flight clone (bundle → upload → unpack) completes in
+/// well under an hour, so anything older is leaked leftovers (task #655).
+const STALE_BUNDLE_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Best-effort delete of a fully-extracted clone bundle on the DESTINATION.
+/// Errors are logged, never propagated — the source-side stale-prune is the
+/// backstop if this fails (e.g. the path is on a read-only mount).
+fn remove_unpacked_bundle(bundle_path: &std::path::Path) {
+    if let Err(e) = std::fs::remove_file(bundle_path) {
+        eprintln!(
+            "[daemon/clone] could not remove unpacked bundle {}: {e}",
+            bundle_path.display()
+        );
+    }
+}
+
+/// Prune leaked clone bundles: delete every `*.tar.gz` DIRECTLY inside
+/// `tmp_dir` whose mtime is older than `max_age`. Self-heals the leak from
+/// task #655 on the next clone.
+///
+/// SAFETY: only the immediate children of `tmp_dir` are considered (no
+/// recursion), and only regular files whose name ends in `.tar.gz` are
+/// touched — anything else in the dir is left alone. All errors are
+/// best-effort/logged so a clone never fails because cleanup couldn't run.
+fn prune_stale_bundles(tmp_dir: &std::path::Path, max_age: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    let entries = match std::fs::read_dir(tmp_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "[daemon/clone] stale-prune skipped, read_dir {} failed: {e}",
+                tmp_dir.display()
+            );
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only regular files named `*.tar.gz` directly in this dir.
+        let is_bundle = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with(".tar.gz"))
+            .unwrap_or(false);
+        if !is_bundle {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let modified = match meta.modified() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let age = match now.duration_since(modified) {
+            Ok(a) => a,
+            // mtime in the future (clock skew) — treat as fresh, leave it.
+            Err(_) => continue,
+        };
+        if age >= max_age {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!(
+                    "[daemon/clone] stale-prune could not remove {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
