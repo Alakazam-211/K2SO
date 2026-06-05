@@ -3,6 +3,27 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.27 — Clone a workspace to another machine + rock-solid remote tunnels
+
+- **"Clone to" — move a whole workspace to a remote machine.** Right-click a
+  workspace and pick **Clone to → <host>** to copy it onto a machine you're
+  connected to over K2 Connect. It bundles the workspace — its files, the
+  agent's memory, and session history — pushes it over your existing
+  encrypted connection, unpacks it on the host, and registers it there with
+  its K2 settings, ready to resume. A quick pre-flight lets you **decide
+  whether to bring secrets** (`.env`, `.auth/`, in-workspace tokens): on by
+  default since it travels over your encrypted link, or off if you'd rather
+  re-add them on the host. (Your Claude login is never copied — the host
+  signs in as itself.)
+- **Remote tunnels now survive updates and restarts.** Fixed a bug where a
+  K2 Connect host could go unreachable at `<you>.k2.dev` after a software
+  update or daemon restart: the tunnel could pin a stale internal port, and
+  leftover tunnel processes could pile up and fight over your subdomain. The
+  host now always tracks its live port and clears out old tunnel processes
+  on start, so remote access self-heals on the next launch.
+- **CLI polish.** `k2so tunnel` and `k2so daemon companion` no longer print
+  an error on their status output under newer Python versions.
+
 ## 0.39.26 — K2 Connect: drag files straight onto the remote machine
 
 When you're connected to another machine, dragging a file in from your
