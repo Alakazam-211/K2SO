@@ -36,6 +36,7 @@ mod bundle;
 mod inventory;
 mod scrub;
 mod settings;
+mod unpack;
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +44,7 @@ mod tests;
 pub use bundle::{build_bundle, read_manifest_from_bundle};
 pub use inventory::inventory;
 pub use settings::{capture_settings, WorkspaceSettings};
+pub use unpack::{unpack_bundle, UnpackResult};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
