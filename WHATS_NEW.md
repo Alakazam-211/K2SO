@@ -3,6 +3,18 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.25 — Remote folder picker everywhere + agent slash-commands
+
+- **Open a remote folder from anywhere.** The 0.39.24 remote folder
+  browser now backs **every** "add workspace" entry point — the main
+  navbar **+**, the sidebar, the File menu, and ⌘O — not just Settings. So
+  while you're connected to another machine, adding a workspace always
+  browses **that** machine, never your local disk.
+- **Agents can trigger slash-commands over messages.** `k2so msg` gains a
+  `--command` flag that prepends a slash-command (like `/loop` or `/goal`)
+  to the front of a delivered message — so one agent can kick off a
+  command in another. Omitted, messages deliver exactly as before.
+
 ## 0.39.24 — K2 Connect: open a workspace on the remote machine
 
 - **Open folders that live on the host.** When you're connected to another

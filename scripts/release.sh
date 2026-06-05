@@ -280,15 +280,25 @@ ASSETS=(
 ASSETS+=("/tmp/latest.json")
 
 if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
-    gh release create "$TAG" "${ASSETS[@]}" \
-        --title "$TAG" \
-        --notes-file "$NOTES_FILE"
+    NOTES_SRC="$NOTES_FILE"
 else
-    gh release create "$TAG" "${ASSETS[@]}" \
-        --title "$TAG" \
-        --notes "K2SO ${TAG} — release notes pending."
-    echo "  NOTE: No notes file provided. Edit release notes on GitHub."
+    # No explicit notes file → auto-extract this version's WHATS_NEW.md
+    # section (the same `## <version>` block Step 1.5 already verified
+    # exists) and use it as the GitHub release body. The public
+    # "What's New" site mirrors the GH release body, so leaving a
+    # placeholder here silently empties the site — this makes the notes
+    # impossible to forget.
+    NOTES_SRC="$(mktemp -t k2so-relnotes)"
+    awk -v ver="$VERSION" '
+        $0 ~ "^## " ver " " { inblock = 1; print; next }
+        inblock && /^## / { exit }
+        inblock { print }
+    ' WHATS_NEW.md > "$NOTES_SRC"
+    echo "  Using WHATS_NEW.md '## ${VERSION}' section as the release body."
 fi
+gh release create "$TAG" "${ASSETS[@]}" \
+    --title "$TAG" \
+    --notes-file "$NOTES_SRC"
 
 echo ""
 echo "═══════════════════════════════════════════════════"
