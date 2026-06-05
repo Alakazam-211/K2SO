@@ -3,6 +3,19 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.31 — K2 Connect: the whole remote surface is host-aware
+
+- **What you do on a remote machine now actually happens on *that* machine.**
+  A batch of actions were quietly running against your *local* machine even
+  while you were connected to a remote — now they target the host you're
+  connected to: approving / rejecting / requesting-changes on agent reviews,
+  creating & deleting agents, editing heartbeats (add / edit / archive /
+  enable / rename), the agent presence locks, scheduler ticks, managing
+  skills, saving an agent's `AGENT.md`, regenerating the workspace skill,
+  workspace connections, and more.
+- **Format-on-save no longer misfires on a remote** — it skips rather than
+  running a local formatter against a file that lives on the host.
+
 ## 0.39.30 — Fix: pinned-chat dropdown works on a remote machine
 
 - **The pinned chat tab's chat-picker now switches chats on the machine
