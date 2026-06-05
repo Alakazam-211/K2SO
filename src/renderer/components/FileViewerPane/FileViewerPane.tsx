@@ -54,15 +54,17 @@ interface FileViewerPaneProps {
   onDirtyChange?: (isDirty: boolean) => void
 }
 
-type FileCategory = 'markdown' | 'image' | 'pdf' | 'docx' | 'text'
-type ViewMode = 'rendered' | 'raw'
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-
-const MARKDOWN_EXTS = ['.md', '.markdown', '.mdx']
-const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico']
-const PDF_EXTS = ['.pdf']
-const DOCX_EXTS = ['.docx', '.doc']
+// Pure classification helpers live in fileCategory.ts (no React/Tauri
+// deps) so they're unit-testable in isolation. Re-exported here so
+// existing import sites (and the #587 tests) keep working.
+import {
+  getFileCategory,
+  getDefaultViewMode,
+  type FileCategory,
+  type ViewMode,
+} from './fileCategory'
+export { getFileCategory, getDefaultViewMode } from './fileCategory'
+export type { FileCategory, ViewMode } from './fileCategory'
 
 /** True if the current document selection overlaps `container` and
  *  has non-empty text. Used to suppress the markdown-preview
@@ -131,20 +133,6 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
     </Markdown>
   )
 })
-
-function getFileCategory(filePath: string): FileCategory {
-  const ext = filePath.toLowerCase().replace(/^.*(\.[^.]+)$/, '$1')
-  if (MARKDOWN_EXTS.includes(ext)) return 'markdown'
-  if (IMAGE_EXTS.includes(ext)) return 'image'
-  if (PDF_EXTS.includes(ext)) return 'pdf'
-  if (DOCX_EXTS.includes(ext)) return 'docx'
-  return 'text'
-}
-
-function getDefaultViewMode(category: FileCategory): ViewMode {
-  if (category === 'markdown' || category === 'image') return 'rendered'
-  return 'raw'
-}
 
 function getFileName(filePath: string): string {
   return filePath.split('/').pop() || filePath
@@ -239,6 +227,21 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
   })
   const pinPane = useTabsStore((s) => s.pinPane)
   const unpinPane = useTabsStore((s) => s.unpinPane)
+
+  // #587 — HTML files get a *top-level tab* pin (next to the Inbox)
+  // instead of the within-pane preview pin. `filePin` reflects whether
+  // this file is currently in the workspace's pinned-HTML tab list;
+  // the toolbar pin button toggles it for html files.
+  const filePin = useTabsStore((s) =>
+    s.tabs.some((t) => {
+      if (!t.isPinnedFile) return false
+      const item = Array.from(t.paneGroups.values())[0]?.items[0]
+      if (item?.type !== 'file-viewer') return false
+      return (item.data as { filePath?: string }).filePath === filePath
+    }),
+  )
+  const pinFileAsTab = useTabsStore((s) => s.pinFileAsTab)
+  const unpinFileTab = useTabsStore((s) => s.unpinFileTab)
 
   const [searchQuery, setSearchQuery] = useState('')
   const [searchVisible, setSearchVisible] = useState(false)
@@ -486,15 +489,29 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
   }, [searchQuery, content, viewMode])
 
   const handleTogglePin = useCallback(() => {
+    // #587 — HTML files pin to a TOP-LEVEL tab (next to the Inbox), not
+    // the within-pane preview pin. Toggling here adds/removes the file
+    // from the workspace's pinned-HTML tab list.
+    if (category === 'html') {
+      if (filePin) {
+        unpinFileTab(filePath)
+      } else {
+        pinFileAsTab(filePath)
+      }
+      return
+    }
     if (pinned) {
       unpinPane(tabId, paneId)
     } else {
       pinPane(tabId, paneId)
     }
-  }, [pinned, tabId, paneId, pinPane, unpinPane])
+  }, [category, filePin, filePath, pinFileAsTab, unpinFileTab, pinned, tabId, paneId, pinPane, unpinPane])
 
-  // Show toggle only for markdown and image files (not PDF)
-  const showViewToggle = category === 'markdown' || category === 'image'
+  // Show toggle only for markdown, html, and image files (not PDF).
+  // HTML renders the same Preview / Edit toggle in the top bar as
+  // markdown — Preview shows the sandboxed iframe, Edit shows the raw
+  // source in CodeEditor.
+  const showViewToggle = category === 'markdown' || category === 'html' || category === 'image'
 
   if (loading) {
     return (
@@ -611,7 +628,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
         )}
 
         {/* Word wrap toggle (only for text/code files) */}
-        {category === 'text' || (category === 'markdown' && viewMode === 'raw') ? (
+        {category === 'text' || ((category === 'markdown' || category === 'html') && viewMode === 'raw') ? (
           <button
             className={`p-1 transition-colors ${
               useSettingsStore.getState().editor.wordWrap
@@ -647,15 +664,20 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
           </svg>
         </button>
 
-        {/* Pin/Unpin */}
+        {/* Pin/Unpin — for HTML this is the top-level tab pin (next to
+            the Inbox); for other files it's the within-pane preview pin. */}
         <button
           className={`p-1 transition-colors ${
-            pinned
+            (category === 'html' ? filePin : pinned)
               ? 'text-[var(--color-accent)]'
               : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'
           }`}
           onClick={handleTogglePin}
-          title={pinned ? 'Unpin (preview mode)' : 'Pin (keep open)'}
+          title={
+            category === 'html'
+              ? (filePin ? 'Unpin tab' : 'Pin as tab (next to Inbox)')
+              : (pinned ? 'Unpin (preview mode)' : 'Pin (keep open)')
+          }
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
             <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707l-.71-.71-3.18 3.18a3.5 3.5 0 0 1-.4.3L11 11.106V14.5a.5.5 0 0 1-.854.354L7.5 12.207 4.854 14.854a.5.5 0 0 1-.708-.708L6.793 11.5 4.146 8.854A.5.5 0 0 1 4.5 8h3.394a3.5 3.5 0 0 0 .3-.4l3.18-3.18-.71-.71a.5.5 0 0 1 .354-.854z" />
@@ -744,6 +766,23 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
           <div className="markdown-content p-4" style={{ userSelect: 'text', WebkitUserSelect: 'text' }}>
             <MemoizedMarkdown content={content} />
           </div>
+        </div>
+      ) : category === 'html' && viewMode === 'rendered' ? (
+        // Render HTML in a sandboxed <iframe> — NOT via
+        // dangerouslySetInnerHTML. `srcDoc` puts the document in a
+        // null-origin sandbox: with `allow-scripts` (and crucially
+        // WITHOUT `allow-same-origin`) the page's scripts can run so a
+        // dashboard stays interactive, but they cannot reach the K2SO
+        // app, its cookies/localStorage, or the filesystem. White
+        // background so dark-themed app chrome doesn't bleed into
+        // light HTML documents.
+        <div className="flex-1 overflow-hidden bg-white" ref={contentRef}>
+          <iframe
+            title={fileName}
+            srcDoc={content}
+            sandbox="allow-scripts"
+            className="w-full h-full border-0 bg-white"
+          />
         </div>
       ) : (
         <>
