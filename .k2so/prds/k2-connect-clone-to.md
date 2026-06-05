@@ -136,17 +136,37 @@ transfers files directly, so it doesn't apply. Apply the same bulk-excludes
 ## UX
 
 Right-click a workspace in the navbar → **"Clone to ▸ \<server\>"** →
-RemoteFolderPicker to pick the **parent** folder on the host → a **preview**
-(the resulting full `DEST_PATH`, what transfers, what's scrubbed, total
-size, session-history scope) → **Clone** → progress → **done** screen with
-the re-supply checklist + "resume on the host" note.
+RemoteFolderPicker to pick the **parent** folder on the host → **Clone** →
+progress → **done** screen with the re-supply checklist + "resume on the
+host" note. **No path preview** — just pick the parent and go.
+
+**The migrated workspace auto-registers itself in K2 on the remote.** When
+the unpack finishes, the remote daemon REGISTERS the new folder as a project
+(like `projects/add-from-path`) AND applies the source workspace's K2
+settings — `agentMode` (Off / Custom Agent / Workspace Manager / …),
+`agentEnabled`, `heartbeatEnabled`, name, color, worktreeMode, etc. — so it
+appears in the remote's project list **fully configured and ready to
+resume**, with no manual "add workspace" or re-setup step. (Machine-specific
+fields — the local `id`, absolute `path`, focus-group membership — are NOT
+copied; the remote gets a fresh id + its own path.)
 
 ## New surfaces
 
-- **Daemon:** `POST /cli/clone/unpack { bundle_path, dest_path }` — extract
-  bundle per manifest, recompute slug locally (`claude_project_hash`),
-  place memory/sessions under `~/.claude/projects/<slug>/`. Gated `token_ok`
-  (same isolated-gate pattern as `fs/upload-binary`).
+- **Daemon:** `POST /cli/clone/unpack { bundle_path, dest_parent }` —
+  extract the bundle into `<dest_parent>/<source-name>` (collision-safe),
+  recompute slug locally (`claude_project_hash` of the final path), place
+  memory/sessions under `~/.claude/projects/<slug>/`, then **register the
+  folder as a project** (the `projects/add-from-path` path) AND **apply the
+  manifest's K2 settings** (agentMode/agentEnabled/heartbeatEnabled/name/
+  color/worktreeMode) so it shows up configured in the remote's project
+  list. Returns the new project + final path. Gated `token_ok` (same
+  isolated-gate pattern as `fs/upload-binary`).
+- **Manifest carries the K2 settings.** The inventory reads the source
+  project's row from the local projects DB and records its USER-meaningful
+  settings (agentMode, agentEnabled, heartbeatEnabled, name, color,
+  worktreeMode) in the manifest — EXCLUDING machine-specific fields (local
+  `id`, absolute `path`, focusGroupId). Unpack applies them to the freshly
+  registered remote project.
 - **Core (k2so-core):** the **inventory + scrub + manifest + tar/gz engine**
   (`clone/` module) — pure + unit-testable; reused by both the high-bar push
   and the fallback bundle. Add `tar`/`flate2` to Cargo.
