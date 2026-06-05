@@ -314,6 +314,104 @@ fn map_io_err(e: std::io::Error) -> String {
     }
 }
 
+// ── upload (binary drop onto the daemon's disk) ───────────────────────
+
+/// 100MB cap for an uploaded file's decoded bytes — the server-side
+/// limit for `/cli/fs/upload-binary`. The renderer enforces a parallel
+/// cap before it base64-encodes (Tauri `read_local_file_base64`), but
+/// this is the authoritative gate: a remote client could call the route
+/// directly. Larger transfers belong on a streaming endpoint (future
+/// work), not a single base64 JSON body.
+pub const MAX_UPLOAD_SIZE: u64 = 100 * 1024 * 1024;
+
+/// Ensure `<workspace_path>/.k2so/downloads/` exists and return its path.
+/// Mirrors the `.k2so/` creation pattern used by `inbox` /
+/// `workspace::onboarding` — `create_dir_all` is idempotent, so repeated
+/// calls are cheap and safe.
+pub fn ensure_downloads_dir(workspace_path: &str) -> Result<PathBuf, String> {
+    if workspace_path.is_empty() {
+        return Err("Workspace path is empty".to_string());
+    }
+    let dir = Path::new(workspace_path).join(".k2so").join("downloads");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create downloads dir: {e}"))?;
+    Ok(dir)
+}
+
+/// Reduce an arbitrary client-supplied `filename` to a safe basename so
+/// it can never escape its destination directory. Strips any path
+/// components (`../`, `/`, `\\`, drive prefixes) and NUL bytes, keeping
+/// only the final path segment. Returns a fallback when the result would
+/// be empty or a relative marker (`.` / `..`).
+fn sanitize_filename(filename: &str) -> String {
+    // Split on BOTH separators so a Windows-style `..\\x` path supplied
+    // to a unix daemon is still reduced to its last segment.
+    let last = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(filename);
+    let cleaned: String = last.chars().filter(|c| *c != '\0').collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        "upload".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// Build a non-colliding target path inside `dir` for `filename`. If
+/// `dir/filename` is free it's used as-is; otherwise appends
+/// ` (1)`, ` (2)`, … before the extension: `name (1).ext`.
+fn collision_free_path(dir: &Path, filename: &str) -> PathBuf {
+    let initial = dir.join(filename);
+    if !initial.exists() {
+        return initial;
+    }
+    let name_path = Path::new(filename);
+    let stem = name_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| filename.to_string());
+    let ext = name_path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for i in 1..10_000 {
+        let candidate = dir.join(format!("{stem} ({i}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Pathological fallback — 10k collisions. Return the initial path;
+    // the caller's write will overwrite, but this is effectively
+    // unreachable.
+    initial
+}
+
+/// Write `bytes` into `dir` under a sanitized, collision-free name.
+/// `dir` must already exist and be a directory; `filename` is reduced to
+/// a basename so it can't escape `dir`. On a name collision the file is
+/// written as `name (1).ext`, `name (2).ext`, … (non-destructive).
+/// Returns the final absolute path written.
+///
+/// Sandbox/auth note: this function does NOT itself enforce who may
+/// write where — the destination `dir` is the caller's choice and the
+/// HTTP route gates the call. Keep size/sanitize/collision logic here so
+/// it's unit-testable without HTTP.
+pub fn write_upload(dir: &str, filename: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    if bytes.len() as u64 > MAX_UPLOAD_SIZE {
+        return Err("File too large (>100MB)".to_string());
+    }
+    let dir_path = validate_path(dir)?;
+    if !dir_path.is_dir() {
+        return Err(format!("Destination is not a directory: {dir}"));
+    }
+    let safe_name = sanitize_filename(filename);
+    let target = collision_free_path(&dir_path, &safe_name);
+    fs::write(&target, bytes).map_err(map_io_err)?;
+    Ok(target)
+}
+
 // ── move / copy / delete / rename / create / duplicate ────────────────
 
 fn disambiguate_path(target: &Path) -> PathBuf {
@@ -996,5 +1094,111 @@ mod tests {
         // rejection path is what we're pinning down.
         let err = open_external("\0\0\n\r\t").expect_err("must reject empty");
         assert!(err.contains("empty"), "got: {err}");
+    }
+
+    // ── ensure_downloads_dir / write_upload (Phase 2 upload substrate) ──
+
+    #[test]
+    fn ensure_downloads_dir_creates_nested_path() {
+        let tmp = TempDir::new("downloads");
+        let dir = ensure_downloads_dir(&tmp.s()).expect("ensure downloads");
+        assert!(dir.exists() && dir.is_dir());
+        assert!(dir.ends_with(".k2so/downloads"), "got: {}", dir.display());
+        // Idempotent — second call must not error.
+        let dir2 = ensure_downloads_dir(&tmp.s()).expect("ensure downloads idempotent");
+        assert_eq!(dir, dir2);
+    }
+
+    #[test]
+    fn ensure_downloads_dir_rejects_empty_workspace() {
+        assert!(ensure_downloads_dir("").is_err());
+    }
+
+    #[test]
+    fn write_upload_writes_bytes_and_returns_path() {
+        let tmp = TempDir::new("upload-basic");
+        // write_upload canonicalizes the dir (via validate_path); compare
+        // against the canonical form so the /tmp→/private/tmp symlink on
+        // macOS doesn't trip the equality.
+        let canon = tmp.path().canonicalize().unwrap();
+        let path = write_upload(&tmp.s(), "hello.txt", b"hi there").expect("write_upload");
+        assert_eq!(path, canon.join("hello.txt"));
+        assert_eq!(fs::read(&path).unwrap(), b"hi there");
+    }
+
+    #[test]
+    fn write_upload_collision_produces_numbered_suffix() {
+        let tmp = TempDir::new("upload-collide");
+        let p1 = write_upload(&tmp.s(), "doc.pdf", b"a").expect("first");
+        let p2 = write_upload(&tmp.s(), "doc.pdf", b"b").expect("second");
+        let p3 = write_upload(&tmp.s(), "doc.pdf", b"c").expect("third");
+        assert!(p1.ends_with("doc.pdf"), "got: {}", p1.display());
+        assert!(p2.ends_with("doc (1).pdf"), "got: {}", p2.display());
+        assert!(p3.ends_with("doc (2).pdf"), "got: {}", p3.display());
+        // Each write is non-destructive — all three coexist with their bytes.
+        assert_eq!(fs::read(&p1).unwrap(), b"a");
+        assert_eq!(fs::read(&p2).unwrap(), b"b");
+        assert_eq!(fs::read(&p3).unwrap(), b"c");
+    }
+
+    #[test]
+    fn write_upload_strips_path_traversal_to_basename() {
+        let tmp = TempDir::new("upload-traversal");
+        let dest = tmp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let dest_canon = dest.canonicalize().unwrap();
+        // A filename trying to escape via `../` must be reduced to its
+        // basename and land INSIDE `dest`, never in the parent.
+        let path = write_upload(
+            dest.to_str().unwrap(),
+            "../../../etc/evil.conf",
+            b"x",
+        )
+        .expect("write_upload traversal");
+        assert_eq!(path, dest_canon.join("evil.conf"));
+        assert!(path.starts_with(&dest_canon), "must stay inside dest: {}", path.display());
+        // The escaped sibling location must NOT have been written.
+        assert!(!tmp.path().join("evil.conf").exists());
+    }
+
+    #[test]
+    fn write_upload_strips_bare_separators_from_filename() {
+        let tmp = TempDir::new("upload-sep");
+        let canon = tmp.path().canonicalize().unwrap();
+        // Both unix and windows-style separators reduce to the last segment.
+        let p1 = write_upload(&tmp.s(), "sub/dir/file.txt", b"u").expect("unix sep");
+        assert_eq!(p1, canon.join("file.txt"));
+        let p2 = write_upload(&tmp.s(), "win\\dir\\other.txt", b"w").expect("win sep");
+        assert_eq!(p2, canon.join("other.txt"));
+    }
+
+    #[test]
+    fn write_upload_rejects_oversize() {
+        let tmp = TempDir::new("upload-oversize");
+        let big = vec![0u8; (MAX_UPLOAD_SIZE + 1) as usize];
+        let err = write_upload(&tmp.s(), "huge.bin", &big).expect_err("over 100MB must reject");
+        assert!(err.contains("too large"), "got: {err}");
+        // Nothing was written.
+        assert!(!tmp.path().join("huge.bin").exists());
+    }
+
+    #[test]
+    fn write_upload_rejects_nonexistent_dir() {
+        let tmp = TempDir::new("upload-nodir");
+        let missing = tmp.path().join("does-not-exist");
+        let err = write_upload(missing.to_str().unwrap(), "f.txt", b"x")
+            .expect_err("missing dir must fail");
+        // validate_path surfaces a parent/exists error for the missing dir.
+        assert!(!err.is_empty(), "got: {err}");
+    }
+
+    #[test]
+    fn write_upload_rejects_when_dir_is_a_file() {
+        let tmp = TempDir::new("upload-isfile");
+        let f = tmp.path().join("not-a-dir.txt");
+        fs::write(&f, "x").unwrap();
+        let err = write_upload(f.to_str().unwrap(), "g.txt", b"y")
+            .expect_err("dir-is-file must fail");
+        assert!(err.contains("not a directory"), "got: {err}");
     }
 }
