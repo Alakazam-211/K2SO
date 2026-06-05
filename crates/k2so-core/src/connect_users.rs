@@ -1384,4 +1384,115 @@ mod tests {
             );
         });
     }
+
+    // ── K2SO #631 (P1) — connect-users store security ───────────────────
+
+    /// The credential store holds argon2 password hashes; it MUST land on
+    /// disk owner-only (0600). Locks the `restrict_mode` chmod on both the
+    /// initial write (add_user) AND a subsequent rewrite (set_policy), since
+    /// the tmp+rename path re-chmods the final file each time.
+    #[cfg(unix)]
+    #[test]
+    fn store_file_is_written_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        with_temp_home(|| {
+            add_user("permu", "password").expect("add");
+            let mode = fs::metadata(store_path())
+                .expect("stat store")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "credential store must be owner-only 0600, got {mode:o}"
+            );
+            // A second write (different mutation, same tmp+rename path) must
+            // also leave it 0600 — rename replaces the inode, so perms are
+            // re-applied, not inherited.
+            set_policy(PasswordPolicy {
+                min_length: 10,
+                ..Default::default()
+            })
+            .expect("set policy");
+            let mode2 = fs::metadata(store_path())
+                .expect("stat store after rewrite")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode2, 0o600,
+                "store must stay 0600 after a rewrite, got {mode2:o}"
+            );
+        });
+    }
+
+    /// The lockout counter is keyed by username and shared by BOTH credential
+    /// surfaces — interactive login (`check_and_record`) and self-service
+    /// change-password (`change_password`, which routes its current-password
+    /// check through the SAME gate). An attacker must not be able to dodge the
+    /// 3-strike lockout by alternating between the two endpoints.
+    #[test]
+    fn lockout_counter_shared_across_login_and_change_password() {
+        with_temp_home(|| {
+            add_user("mixlock", "rightpass").expect("add");
+            // Two failed LOGINs — counter at 2, not yet locked.
+            assert_eq!(check_and_record("mixlock", "x"), LoginOutcome::BadCreds);
+            assert_eq!(check_and_record("mixlock", "x"), LoginOutcome::BadCreds);
+            assert!(!is_locked("mixlock"), "two fails must not lock yet");
+            // A failed CHANGE-PASSWORD (wrong current) trips the SAME counter
+            // to the threshold → locked. Proves one shared lockout key.
+            assert_eq!(
+                change_password("mixlock", "WRONG", "newpassword"),
+                ChangePasswordOutcome::BadCurrent
+            );
+            assert!(
+                is_locked("mixlock"),
+                "3rd fail (via change-password) must lock the shared counter"
+            );
+            // And the lock applies back on the LOGIN surface: the correct
+            // password is rejected without being checked.
+            assert_eq!(
+                check_and_record("mixlock", "rightpass"),
+                LoginOutcome::LockedOut,
+                "a lockout earned via change-password also blocks login"
+            );
+        });
+    }
+
+    /// Pre-#620 stores have no top-level `policy` field. They must load
+    /// (the `#[serde(default)]` on `Store::policy` yields the permissive
+    /// default) and remain fully usable — the serde-migration sibling of
+    /// `legacy_json_without_role_migrates_to_member`.
+    #[test]
+    fn legacy_json_without_policy_loads_default_policy() {
+        with_temp_home(|| {
+            let dir = config_dir();
+            fs::create_dir_all(&dir).unwrap();
+            // A store with a user row but NO `policy` field and NO `role`.
+            let legacy = r#"{
+                "users": [
+                    {
+                        "username": "oldtimer",
+                        "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "disabled": false
+                    }
+                ]
+            }"#;
+            fs::write(store_path(), legacy).unwrap();
+            // Missing policy → permissive default.
+            assert_eq!(
+                get_policy(),
+                PasswordPolicy::default(),
+                "absent policy field must yield the default policy"
+            );
+            // And the store is still usable: the legacy user lists, and a new
+            // add succeeds under the default (length-8) policy.
+            let views = list_users().expect("legacy store loads");
+            assert_eq!(views.len(), 1);
+            assert_eq!(views[0].username, "oldtimer");
+            add_user("newcomer", "password").expect("add under default policy");
+            assert_eq!(list_users().unwrap().len(), 2);
+        });
+    }
 }
