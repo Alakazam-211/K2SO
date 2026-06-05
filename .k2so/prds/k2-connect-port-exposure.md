@@ -12,8 +12,12 @@ related: ".k2so/prds/secure-tunnel-monetization-roadmap.md"
 
 Turn "you bought `{user}.k2.dev`" into "**you own `*.{user}.k2.dev`**" — a
 wildcard slice of k2.dev the user can point at any locally-hosted service.
-Effectively **built-in ngrok / Cloudflare-Tunnel**, namespaced to the
-subdomain they already own, gated behind a **Pro tier ($7.99/mo)**.
+Same *capability* as ngrok / Cloudflare-Tunnel, but **self-hosted on K2's
+own tunnel backbone** (our Hetzner `k2-connect-01`: frps + Caddy on-demand
+TLS + control-plane) — **not** ngrok or any third-party tunnel service —
+namespaced to the subdomain they already own, gated behind a **Pro tier
+($7.99/mo)**. Owning the infra is the edge: no per-seat third-party cost,
+full control of routing/TLS/limits.
 
 ## Motivation
 
