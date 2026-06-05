@@ -3,6 +3,30 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.32 — Leaner memory, smoother relaunch
+
+- **Closed a memory leak that piled up background agent processes.** Terminal
+  and agent sessions are now force-reaped when their tab or workspace goes
+  away (or when a remote host-switch tears them down) instead of orphaning a
+  long-running `claude`/agent process (~150 MB each). If your machine felt
+  heavier the longer K2 ran, this was why.
+- **Dismissing a workspace from the Active bar now frees its sessions.** After
+  a short grace period the dismissed workspace's pinned Chat (and any extra
+  terminals) are reaped to reclaim memory; reopening the workspace relaunches
+  the saved session right where you left off.
+- **The workspace you land on at launch starts its Chat on its own.** Fixed a
+  cold-start race where the first workspace's pinned Chat tab wouldn't spawn
+  until you clicked refresh.
+- **Connected Workspaces works on a remote machine** — the related-workspaces
+  list now reads from the host you're connected to.
+- **"Connection dropped" stays out of your way.** A brief tunnel blip now
+  shows a small, non-blocking indicator instead of a full overlay — the top
+  bar stays usable and the screen keeps updating; it only flags a real drop
+  after repeated failures.
+- **Clone-to cleans up after itself** — temporary transfer bundles are removed
+  once a clone finishes, and stale ones are pruned, on both source and
+  destination machines.
+
 ## 0.39.31 — K2 Connect: the whole remote surface is host-aware
 
 - **What you do on a remote machine now actually happens on *that* machine.**
