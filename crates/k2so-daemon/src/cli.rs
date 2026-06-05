@@ -1370,6 +1370,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         // POST routes (mutations) live in main.rs's dispatcher;
         // these GETs use the query-string interface common to the
         // rest of /cli/*.
+        "/cli/fs/info" => crate::fs_routes::handle_info(params),
         "/cli/fs/read-dir" => crate::fs_routes::handle_read_dir(params),
         "/cli/fs/read-file" => crate::fs_routes::handle_read_file(params),
         "/cli/fs/read-binary" => crate::fs_routes::handle_read_binary(params),

@@ -67,6 +67,26 @@ pub fn handle_read_binary(params: &HashMap<String, String>) -> CliResponse {
     }
 }
 
+/// Report the daemon machine's filesystem basics so a remote client can
+/// seed a folder browser at the host's home dir (instead of a hardcoded
+/// `/`) and render paths with the host's separator. No path input — purely
+/// describes the host. Gated like the other `fs/*` reads (`token_ok`).
+pub fn handle_info(_params: &HashMap<String, String>) -> CliResponse {
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    let os = std::env::consts::OS.to_string();
+    CliResponse::ok_json(
+        serde_json::json!({
+            "home": home,
+            "separator": separator,
+            "os": os,
+        })
+        .to_string(),
+    )
+}
+
 pub fn handle_clipboard_paths(_params: &HashMap<String, String>) -> CliResponse {
     match fsc::clipboard_read_file_paths() {
         Ok(paths) => CliResponse::ok_json(
@@ -247,5 +267,39 @@ pub fn handle_open_external(body: &[u8]) -> CliResponse {
             serde_json::json!({ "success": true, "message": msg }).to_string(),
         ),
         Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_returns_home_separator_and_os() {
+        let resp = handle_info(&HashMap::new());
+        assert_eq!(resp.status, "200 OK", "fs/info must succeed");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&resp.body).expect("fs/info body must be JSON");
+
+        // separator is exactly the host's MAIN_SEPARATOR.
+        assert_eq!(
+            v["separator"].as_str().expect("separator must be a string"),
+            std::path::MAIN_SEPARATOR.to_string(),
+        );
+
+        // os is the compile-target OS string.
+        assert_eq!(
+            v["os"].as_str().expect("os must be a string"),
+            std::env::consts::OS,
+        );
+
+        // home is present as a string (may be empty if unavailable, but the
+        // key must exist and be string-typed — not null/missing).
+        assert!(
+            v["home"].is_string(),
+            "home must be a string, got {:?}",
+            v["home"],
+        );
     }
 }
