@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { useToastStore } from '@/stores/toast'
 import type { SettingEntry } from '../searchManifest'
@@ -758,11 +757,11 @@ export function HeartbeatsPanel({
 
   const handleAdd = async (name: string, spec: ScheduleSpec): Promise<void> => {
     if (!project) return
-    await invoke('k2so_heartbeat_add', {
-      projectPath: project.path,
+    await daemonCliGet('heartbeat/add', {
+      project: project.path,
       name,
       frequency: spec.frequency,
-      specJson: JSON.stringify(spec),
+      spec: JSON.stringify(spec),
     })
     toast.addToast(`Added heartbeat "${name}"`, 'success', 3000)
     setShowAdd(false)
@@ -771,11 +770,11 @@ export function HeartbeatsPanel({
 
   const handleEdit = async (name: string, spec: ScheduleSpec): Promise<void> => {
     if (!project) return
-    await invoke('k2so_heartbeat_edit', {
-      projectPath: project.path,
+    await daemonCliGet('heartbeat/edit', {
+      project: project.path,
       name,
       frequency: spec.frequency,
-      specJson: JSON.stringify(spec),
+      spec: JSON.stringify(spec),
     })
     toast.addToast(`Updated heartbeat "${name}"`, 'success', 3000)
     setEditing(null)
@@ -789,15 +788,15 @@ export function HeartbeatsPanel({
       `It will stop firing on its schedule and disappear from this list.\n` +
       `The chat history stays available in the sidebar's Archived section.`
     )) return
-    await invoke('k2so_heartbeat_archive', { projectPath: project.path, name })
+    await daemonCliGet('heartbeat/archive', { project: project.path, name })
     toast.addToast(`Archived heartbeat "${name}"`, 'info', 3000)
     await refresh()
   }
 
   const handleToggle = async (row: HeartbeatRow): Promise<void> => {
     if (!project) return
-    await invoke('k2so_heartbeat_set_enabled', {
-      projectPath: project.path,
+    await daemonCliGet('heartbeat/enable', {
+      project: project.path,
       name: row.name,
       enabled: !row.enabled,
     })
@@ -810,8 +809,8 @@ export function HeartbeatsPanel({
   // no longer targeted on new fires.
   const handleToggleUseWorkspaceSession = async (row: HeartbeatRow): Promise<void> => {
     if (!project) return
-    await invoke('k2so_heartbeat_set_use_workspace_session', {
-      projectPath: project.path,
+    await daemonCliGet('heartbeat/set-use-workspace-session', {
+      project: project.path,
       name: row.name,
       enabled: !row.useWorkspaceSession,
     })
@@ -841,10 +840,10 @@ export function HeartbeatsPanel({
       return
     }
     try {
-      await invoke('k2so_heartbeat_rename', {
-        projectPath: project.path,
-        oldName: row.name,
-        newName,
+      await daemonCliGet('heartbeat/rename', {
+        project: project.path,
+        from: row.name,
+        to: newName,
       })
       toast.addToast(`Renamed "${row.name}" → "${newName}"`, 'success', 3000)
       cancelRename()

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { useToastStore } from '@/stores/toast'
 // Phase 2 Unit 7a — settings live in the daemon.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
@@ -260,8 +260,8 @@ export function WakeSchedulerSection(): React.JSX.Element {
         rows.map((r) => (r.id === row.id ? { ...r, enabled: next } : r)),
       )
       try {
-        await invoke('k2so_heartbeat_set_enabled', {
-          projectPath: row.projectPath,
+        await daemonCliGet('heartbeat/enable', {
+          project: row.projectPath,
           name: row.name,
           enabled: next,
         })
@@ -283,10 +283,10 @@ export function WakeSchedulerSection(): React.JSX.Element {
         ),
       )
       try {
-        await invoke('k2so_heartbeat_set_use_workspace_session', {
-          projectPath: row.projectPath,
+        await daemonCliGet('heartbeat/set-use-workspace-session', {
+          project: row.projectPath,
           name: row.name,
-          useWorkspaceSession: next,
+          enabled: next,
         })
       } catch (err) {
         toast(`Pinned-chat toggle failed: ${String(err)}`, 'error')
