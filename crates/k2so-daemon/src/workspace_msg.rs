@@ -210,19 +210,29 @@ pub fn resolve_workspace(token: &str) -> Option<String> {
 /// line 1 only, subsequent lines flow unprefixed.
 ///
 /// Examples:
-/// - `format_message("scout_v3", "hello")` → `"[from scout_v3] hello"`
-/// - `format_message("scout_v3", "line1\nline2")` →
+/// - `format_message("scout_v3", "hello", "")` → `"[from scout_v3] hello"`
+/// - `format_message("scout_v3", "line1\nline2", "")` →
 ///   `"[from scout_v3] line1\nline2"`
+/// - `format_message("scout_v3", "hi", "/loop")` →
+///   `"/loop [from scout_v3] hi"` — `command` (trimmed) is prepended at
+///   the VERY FRONT, before the `[from <name>]` prefix. Used to deliver
+///   slash-commands (e.g. `/loop`, `/goal`) to the recipient's TUI.
+/// - Empty `command` (the default) leaves the message unchanged.
 /// - Empty `from` defaults to `external` (defense in depth; CLI should
 ///   already do this auto-derive, but we never let an empty prefix
 ///   reach the recipient).
-pub fn format_message(from: &str, text: &str) -> String {
+pub fn format_message(from: &str, text: &str, command: &str) -> String {
     let sender = if from.trim().is_empty() {
         "external"
     } else {
         from
     };
-    format!("[from {sender}] {text}")
+    let command = command.trim();
+    if command.is_empty() {
+        format!("[from {sender}] {text}")
+    } else {
+        format!("{command} [from {sender}] {text}")
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -258,7 +268,16 @@ const BACKOFF_MS: [u64; 2] = [200, 400];
 /// prefix. The CLI is expected to auto-derive this from the sender's
 /// workspace (CWD / `K2SO_PROJECT_PATH`); when empty, the daemon
 /// substitutes `external` so the recipient always sees a sender ID.
-pub fn deliver_live(workspace_token: &str, text: &str, from: &str) -> MsgResponse {
+///
+/// `command` (when non-empty) is a slash-command (e.g. `/loop`) that is
+/// prepended at the VERY FRONT of the payload, before the `[from ...]`
+/// prefix. Empty = unchanged delivery (the default).
+pub fn deliver_live(
+    workspace_token: &str,
+    text: &str,
+    from: &str,
+    command: &str,
+) -> MsgResponse {
     // Resolve workspace once. WorkspaceNotFound is permanent; surface
     // immediately without entering the retry loop.
     let project_path = match resolve_workspace(workspace_token) {
@@ -268,7 +287,7 @@ pub fn deliver_live(workspace_token: &str, text: &str, from: &str) -> MsgRespons
 
     let mut last: Option<MsgResponse> = None;
     for attempt in 1..=MAX_ATTEMPTS {
-        let mut result = attempt_delivery(&project_path, text, from);
+        let mut result = attempt_delivery(&project_path, text, from, command);
         result.attempts = attempt;
 
         if result.success {
@@ -300,7 +319,7 @@ pub fn deliver_live(workspace_token: &str, text: &str, from: &str) -> MsgRespons
 
 /// One delivery attempt. Returns `MsgResponse` with `attempts: 1`;
 /// the [`deliver_live`] retry wrapper rewrites it on retry.
-fn attempt_delivery(project_path: &str, text: &str, from: &str) -> MsgResponse {
+fn attempt_delivery(project_path: &str, text: &str, from: &str, command: &str) -> MsgResponse {
     let project_id = {
         let db = k2so_core::db::shared();
         let conn = db.lock();
@@ -330,7 +349,7 @@ fn attempt_delivery(project_path: &str, text: &str, from: &str) -> MsgResponse {
     if let Some(active_tid) = saved_terminal.as_deref() {
         if let Some(sid) = SessionId::parse(active_tid) {
             if let Some(live) = session_lookup::lookup_by_session_id(&sid) {
-                return inject_live(&live, text, from, "active_terminal_id", &project_id);
+                return inject_live(&live, text, from, command, "active_terminal_id", &project_id);
             }
         }
         // Stale stamp — clear so downstream branches don't re-trip on it.
@@ -356,32 +375,34 @@ fn attempt_delivery(project_path: &str, text: &str, from: &str) -> MsgResponse {
                 i += 1;
             }
             if found {
-                return inject_live(&live, text, from, "argv_scan", &project_id);
+                return inject_live(&live, text, from, command, "argv_scan", &project_id);
             }
         }
     }
 
     // Branch 2: saved session, no live PTY → resume + fire.
     if let Some(claude_sid) = saved_session.as_deref() {
-        return resume_and_fire(project_path, &project_id, claude_sid, text, from);
+        return resume_and_fire(project_path, &project_id, claude_sid, text, from, command);
     }
 
     // Branch 3: fresh fire — no saved session at all.
-    fresh_fire(project_path, &project_id, text, from)
+    fresh_fire(project_path, &project_id, text, from, command)
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Branch implementations
 // ─────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn inject_live(
     live: &session_lookup::LiveSession,
     text: &str,
     from: &str,
+    command: &str,
     branch: &str,
     project_id: &str,
 ) -> MsgResponse {
-    let payload = format_message(from, text);
+    let payload = format_message(from, text, command);
     if let Err(e) = live.write(payload.as_bytes()) {
         log_debug!("[msg/inject_live] write failed: {e}");
         return MsgResponse::fail(MsgReason::PtyDied);
@@ -412,12 +433,14 @@ fn inject_live(
     MsgResponse::ok(target_id, branch)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resume_and_fire(
     project_path: &str,
     project_id: &str,
     claude_sid: &str,
     text: &str,
     from: &str,
+    command: &str,
 ) -> MsgResponse {
     let agent_name = match k2so_core::workspace::agent_identity::find_primary_agent(project_path) {
         Some(n) => n,
@@ -435,12 +458,19 @@ fn resume_and_fire(
         args,
         text,
         from,
+        command,
         "resume_and_fire",
         Some(claude_sid),
     )
 }
 
-fn fresh_fire(project_path: &str, project_id: &str, text: &str, from: &str) -> MsgResponse {
+fn fresh_fire(
+    project_path: &str,
+    project_id: &str,
+    text: &str,
+    from: &str,
+    command: &str,
+) -> MsgResponse {
     let agent_name = match k2so_core::workspace::agent_identity::find_primary_agent(project_path) {
         Some(n) => n,
         None => return MsgResponse::fail(MsgReason::NoAgentMode),
@@ -458,6 +488,7 @@ fn fresh_fire(project_path: &str, project_id: &str, text: &str, from: &str) -> M
         args,
         text,
         from,
+        command,
         "fresh_fire",
         Some(&new_sid),
     )
@@ -471,6 +502,7 @@ fn spawn_and_inject(
     args: Vec<String>,
     text: &str,
     from: &str,
+    command: &str,
     branch: &str,
     claude_session_id: Option<&str>,
 ) -> MsgResponse {
@@ -524,7 +556,7 @@ fn spawn_and_inject(
     // recipient's PTY receives.
     let session = session_lookup::lookup_by_session_id(&outcome.session_id);
     if let Some(live) = session {
-        let payload = format_message(from, text);
+        let payload = format_message(from, text, command);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(1500));
             let _ = live.write(payload.as_bytes());
@@ -555,28 +587,76 @@ mod tests {
     #[test]
     fn format_message_compact_prefix() {
         assert_eq!(
-            format_message("scout_v3", "hello world"),
+            format_message("scout_v3", "hello world", ""),
             "[from scout_v3] hello world"
         );
     }
 
     #[test]
     fn format_message_multiline_first_line_only() {
-        let out = format_message("scout_v3", "First line\nSecond line\nThird");
+        let out = format_message("scout_v3", "First line\nSecond line\nThird", "");
         assert_eq!(out, "[from scout_v3] First line\nSecond line\nThird");
     }
 
     #[test]
     fn format_message_empty_from_falls_back_to_external() {
-        assert_eq!(format_message("", "hello"), "[from external] hello");
-        assert_eq!(format_message("   ", "hello"), "[from external] hello");
+        assert_eq!(format_message("", "hello", ""), "[from external] hello");
+        assert_eq!(format_message("   ", "hello", ""), "[from external] hello");
     }
 
     #[test]
     fn format_message_custom_sender_passes_through() {
         assert_eq!(
-            format_message("sms-bridge", "ping"),
+            format_message("sms-bridge", "ping", ""),
             "[from sms-bridge] ping"
+        );
+    }
+
+    // ── Command prefix (0.39.25 `--command`) ─────────────────────────
+
+    #[test]
+    fn format_message_command_prepends_before_from_prefix() {
+        // The slash-command lands at the VERY FRONT, before `[from ...]`.
+        assert_eq!(
+            format_message("scout_v3", "hi", "/loop"),
+            "/loop [from scout_v3] hi"
+        );
+    }
+
+    #[test]
+    fn format_message_empty_command_is_unchanged() {
+        // Empty command → behavior identical to the pre-0.39.25 path.
+        assert_eq!(
+            format_message("scout_v3", "hi", ""),
+            "[from scout_v3] hi"
+        );
+    }
+
+    #[test]
+    fn format_message_command_is_trimmed() {
+        // Surrounding whitespace on the command is stripped; the body
+        // and `[from ...]` prefix are untouched.
+        assert_eq!(
+            format_message("scout_v3", "hi", "  /loop  "),
+            "/loop [from scout_v3] hi"
+        );
+    }
+
+    #[test]
+    fn format_message_whitespace_only_command_falls_back_to_unchanged() {
+        // A command that trims to empty must NOT inject a stray space.
+        assert_eq!(
+            format_message("scout_v3", "hi", "   "),
+            "[from scout_v3] hi"
+        );
+    }
+
+    #[test]
+    fn format_message_command_with_empty_from_uses_external() {
+        // command + empty from → command still leads, sender = external.
+        assert_eq!(
+            format_message("", "hi", "/goal"),
+            "/goal [from external] hi"
         );
     }
 
@@ -708,7 +788,7 @@ mod tests {
     fn deliver_live_unknown_workspace_returns_workspace_not_found() {
         // No DB setup, no project rows — resolver misses, we return
         // permanent failure immediately (no retry loop).
-        let r = deliver_live("definitely-not-a-real-workspace-name", "hi", "sender");
+        let r = deliver_live("definitely-not-a-real-workspace-name", "hi", "sender", "");
         assert!(!r.success);
         assert_eq!(r.reason.as_deref(), Some("workspace_not_found"));
         // Permanent reasons short-circuit — no retries.
@@ -724,7 +804,7 @@ mod tests {
     fn deliver_live_empty_workspace_token_returns_workspace_not_found() {
         // Empty token must not match every row (resolve_workspace
         // short-circuits to None).
-        let r = deliver_live("", "hi", "sender");
+        let r = deliver_live("", "hi", "sender", "");
         assert_eq!(r.reason.as_deref(), Some("workspace_not_found"));
         assert_eq!(r.attempts, 1);
     }

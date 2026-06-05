@@ -317,8 +317,9 @@ fn run_workspace_session_delivery(
     // so the wake prompt arrives in the recipient PTY tagged with a
     // clear origin. The workspace token can be the project path
     // directly (it's already a registered project).
+    // Heartbeat wake prompts carry no slash-command (empty `command`).
     let result =
-        crate::workspace_msg::deliver_live(project_path, &prompt, "heartbeat");
+        crate::workspace_msg::deliver_live(project_path, &prompt, "heartbeat", "");
 
     if result.success {
         let branch = result

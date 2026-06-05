@@ -725,13 +725,18 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             let workspace = str_param(params, "workspace");
             let text = str_param(params, "text");
             let from = opt_param(params, "from").unwrap_or_default();
+            // 0.39.25: optional slash-command prepended at the very front
+            // of the delivered payload (before the `[from <name>]`
+            // prefix). Empty/absent → unchanged delivery. An older CLI
+            // simply never sends this param.
+            let command = opt_param(params, "command").unwrap_or_default();
             if workspace.is_empty() {
                 return CliResponse::bad_request("Missing workspace");
             }
             if text.is_empty() {
                 return CliResponse::bad_request("Missing text");
             }
-            let resp = crate::workspace_msg::deliver_live(&workspace, &text, &from);
+            let resp = crate::workspace_msg::deliver_live(&workspace, &text, &from, &command);
             let body = serde_json::to_string(&resp)
                 .unwrap_or_else(|_| "{\"success\":false}".to_string());
             CliResponse::ok_json(body)
