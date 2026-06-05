@@ -19,6 +19,7 @@ import AddWorkspaceDialog from './components/AddWorkspaceDialog/AddWorkspaceDial
 import RemoteFolderPicker from './components/RemoteFolderPicker/RemoteFolderPicker'
 import { pickWorkspaceFolder } from './lib/pick-workspace-folder'
 import RemoveWorkspaceDialog from './components/RemoveWorkspaceDialog/RemoveWorkspaceDialog'
+import CloneToDialog from './components/CloneToDialog/CloneToDialog'
 import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
 import ContextMenu from './components/ContextMenu/ContextMenu'
@@ -198,6 +199,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       <AddWorkspaceDialog />
       <RemoteFolderPicker />
       <RemoveWorkspaceDialog />
+      <CloneToDialog />
       <CommandPalette />
       <ReviewQueueModal />
       <RunningAgentsPanel />
@@ -743,6 +745,7 @@ export default function App(): React.JSX.Element {
       <AddWorkspaceDialog />
       <RemoteFolderPicker />
       <RemoveWorkspaceDialog />
+        <CloneToDialog />
         <CommandPalette />
         <ContextMenu />
         <ConfirmDialog />
@@ -802,6 +805,7 @@ export default function App(): React.JSX.Element {
       <AddWorkspaceDialog />
       <RemoteFolderPicker />
       <RemoveWorkspaceDialog />
+      <CloneToDialog />
       <CommandPalette />
       <ReviewQueueModal />
       <RunningAgentsPanel />
