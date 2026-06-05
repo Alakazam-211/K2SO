@@ -16,6 +16,7 @@ import { TerminalArea } from './components/Terminal/TerminalArea'
 import Settings from './components/Settings/Settings'
 import GitInitDialog from './components/GitInitDialog/GitInitDialog'
 import AddWorkspaceDialog from './components/AddWorkspaceDialog/AddWorkspaceDialog'
+import RemoteFolderPicker from './components/RemoteFolderPicker/RemoteFolderPicker'
 import RemoveWorkspaceDialog from './components/RemoveWorkspaceDialog/RemoveWorkspaceDialog'
 import WorktreeBar from './components/FocusWindow/WorktreeBar'
 import CommandPalette from './components/CommandPalette/CommandPalette'
@@ -192,6 +193,7 @@ function FocusModeContent({ activeProject, cwd }: { activeProject: any; cwd: str
       </FocusLayout>
       <GitInitDialog />
       <AddWorkspaceDialog />
+      <RemoteFolderPicker />
       <RemoveWorkspaceDialog />
       <CommandPalette />
       <ReviewQueueModal />
@@ -694,6 +696,7 @@ export default function App(): React.JSX.Element {
         </div>
         <GitInitDialog />
       <AddWorkspaceDialog />
+      <RemoteFolderPicker />
       <RemoveWorkspaceDialog />
         <CommandPalette />
         <ContextMenu />
@@ -752,6 +755,7 @@ export default function App(): React.JSX.Element {
       </Layout>
       <GitInitDialog />
       <AddWorkspaceDialog />
+      <RemoteFolderPicker />
       <RemoveWorkspaceDialog />
       <CommandPalette />
       <ReviewQueueModal />

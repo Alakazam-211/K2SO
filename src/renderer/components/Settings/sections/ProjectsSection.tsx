@@ -10,6 +10,8 @@ import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
 import { useTabsStore } from '@/stores/tabs'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { useRemoteFolderPickerStore } from '@/stores/remote-folder-picker'
 import IconCropDialog from '../IconCropDialog'
 import ProjectAvatar from '@/components/Sidebar/ProjectAvatar'
 import AgentIcon from '@/components/AgentIcon/AgentIcon'
@@ -757,7 +759,16 @@ export function ProjectsSection(): React.JSX.Element {
           <button
             className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] bg-white/[0.04] hover:bg-white/[0.08] transition-colors no-drag cursor-pointer"
             onClick={async () => {
-              const folderPath = await invoke<string | null>('projects_pick_folder')
+              // When connected to a remote, the local OS dialog returns a
+              // path that is meaningless on the host. Branch on activeHost:
+              // local → native dialog (unchanged); remote → browse the
+              // remote daemon's filesystem via RemoteFolderPicker. Either
+              // way the chosen path flows through addProject unchanged.
+              const activeHost = useConnectHostStore.getState().activeHost
+              const folderPath =
+                activeHost === 'local'
+                  ? await invoke<string | null>('projects_pick_folder')
+                  : await useRemoteFolderPickerStore.getState().open()
               if (folderPath) {
                 await useProjectsStore.getState().addProject(folderPath)
                 await fetchProjects()
