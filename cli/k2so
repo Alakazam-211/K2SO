@@ -1642,10 +1642,12 @@ cmd_msg() {
     local target=""
     local text=""
     local explicit_from=""
+    local explicit_command=""
     local saw_wake="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --from) explicit_from="$2"; shift 2 ;;
+            --command) explicit_command="$2"; shift 2 ;;
             --wake)
                 # Deprecated — msg always tries live now.
                 saw_wake="true"; shift ;;
@@ -1666,13 +1668,13 @@ cmd_msg() {
 
     [[ -z "$target" ]] && {
         echo "Error: workspace required" >&2
-        echo "Usage: k2so msg <workspace> \"text\" [--from <name>]" >&2
+        echo "Usage: k2so msg <workspace> \"text\" [--from <name>] [--command \"<text>\"]" >&2
         echo "       Run 'k2so msg --help' for full reference." >&2
         exit 1
     }
     [[ -z "$text" ]] && {
         echo "Error: message text required" >&2
-        echo "Usage: k2so msg <workspace> \"text\" [--from <name>]" >&2
+        echo "Usage: k2so msg <workspace> \"text\" [--from <name>] [--command \"<text>\"]" >&2
         exit 1
     }
 
@@ -1714,6 +1716,10 @@ except Exception:
     local params="workspace=$(urlencode "$target")"
     params="${params}&text=$(urlencode "$text")"
     params="${params}&from=$(urlencode "$from")"
+    # 0.39.25: optional slash-command, prepended at the very front of the
+    # delivered message (before the [from <name>] prefix). Only sent when
+    # non-empty; an older daemon simply ignores this unknown query param.
+    [[ -n "$explicit_command" ]] && params="${params}&command=$(urlencode "$explicit_command")"
 
     local response
     response=$(cli_request "/cli/workspace/msg" "$params")
@@ -2994,7 +3000,7 @@ cmd_help() {
 
 cmd_help_msg() {
     cat <<'EOF'
-k2so msg <workspace> "text" [--from <name>]
+k2so msg <workspace> "text" [--from <name>] [--command "<text>"]
 
 Deliver a message to a workspace's agent, live. Spawns the agent if
 not already running. Returns success only when the message has landed
@@ -3010,6 +3016,14 @@ OPTIONS
                  the recipient's session. Defaults to the sender's
                  workspace name (auto-derived from K2SO_PROJECT_PATH
                  or CWD). Falls back to `external` if neither resolves.
+  --command "<text>"
+                 Prepend <text> at the VERY FRONT of the delivered
+                 message, BEFORE the [from <name>] prefix. Intended for
+                 slash-commands so the recipient's agent runs them on the
+                 incoming line — e.g. --command "/loop" delivers:
+                     /loop [from <name>] <text>
+                 Omitted (the default) leaves delivery unchanged:
+                     [from <name>] <text>
 
 RESPONSE (JSON)
   {
@@ -3055,6 +3069,7 @@ RELATED VERBS
 EXAMPLES
   k2so msg scout_v3 "ready when you are"
   k2so msg scout_v3 "ping" --from sms-bridge
+  k2so msg scout_v3 "keep going" --command "/loop"
   k2so msg /Users/me/work/MyApp "deploy completed"
 EOF
 }
