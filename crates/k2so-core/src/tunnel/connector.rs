@@ -240,6 +240,21 @@ pub fn start(
     let toml = render_frpc_toml(&cfg, resolved_local_port);
     write_config_file(&toml)?;
 
+    // Reap any STRAY frpc bound to our config before spawning a fresh one.
+    // This is the load-bearing self-heal for the multi-frpc failure mode:
+    // when the daemon exits WITHOUT cleanly killing frpc (SIGKILL, panic,
+    // OS shutdown that races the supervisor — none of which run a Drop or
+    // shutdown hook), the child is orphaned (reparented to init) but keeps
+    // its frps proxy registration alive, still forwarding to the now-dead
+    // OLD daemon port. On the next boot `start()`'s idempotency guard above
+    // is empty (fresh process), so without this reap we'd spawn a SECOND
+    // frpc while the orphan still owns the `k2so-<sub>` proxy name (frps
+    // keeps the first registrant) — the orphan serves EOFs and the new
+    // client is rejected with "proxy already exists", silently breaking
+    // remote access. We reach here only when no live child is tracked
+    // (guard returned early otherwise), so every match is genuinely stale.
+    reap_stray_frpc(&frpc_config_path());
+
     // Spawn + supervise.
     let child = Arc::new(Mutex::new(None));
     let running = Arc::new(AtomicBool::new(true));
@@ -299,6 +314,31 @@ fn status_from(st: &ConnectorState) -> TunnelStatus {
         frpc_installed: resolve_frpc(&FrpcBinary::Auto).is_ok(),
     }
 }
+
+/// The `pkill -f` pattern that matches ONLY frpc processes launched with
+/// our config file (`<frpc> -c <cfg>`), never an unrelated frpc the user
+/// may run for their own tunnels. Kept separate so the match is unit-tested
+/// without spawning real processes.
+fn stray_frpc_pattern(cfg_path: &Path) -> String {
+    format!("frpc -c {}", cfg_path.to_string_lossy())
+}
+
+/// Best-effort kill of stray frpc bound to our config (see call site in
+/// `start()` for why this is required). Narrowly matched so we never touch
+/// another tunnel. Errors are swallowed: a missing `pkill` or no-match is
+/// the normal, healthy case.
+#[cfg(unix)]
+fn reap_stray_frpc(cfg_path: &Path) {
+    let _ = Command::new("pkill")
+        .arg("-f")
+        .arg(stray_frpc_pattern(cfg_path))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn reap_stray_frpc(_cfg_path: &Path) {}
 
 /// Write the rendered TOML to `~/.k2so/frpc.toml` (0600) via tmp+rename.
 fn write_config_file(toml: &str) -> Result<(), String> {
@@ -460,6 +500,19 @@ fn open_log() -> Result<std::fs::File, String> {
 mod tests {
     use super::*;
     use crate::tunnel::test_support::with_temp_home;
+
+    #[test]
+    fn stray_frpc_pattern_matches_only_our_config() {
+        // The reap must target frpc launched with OUR config path and
+        // nothing else — a bare `frpc` pattern would nuke an unrelated
+        // tunnel the user runs. Pin the exact `pkill -f` string.
+        let pat = stray_frpc_pattern(Path::new("/Users/x/.k2so/frpc.toml"));
+        assert_eq!(pat, "frpc -c /Users/x/.k2so/frpc.toml");
+        // Must carry the config path (so it can't match an arbitrary frpc).
+        assert!(pat.contains("/.k2so/frpc.toml"));
+        // Must be scoped by `-c <cfg>`, not a bare process name.
+        assert!(pat.starts_with("frpc -c "));
+    }
 
     #[test]
     fn resolve_frpc_explicit_missing_errors_clearly() {
