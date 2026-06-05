@@ -53,12 +53,22 @@ if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
     fi
 fi
 
-if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
+# DAEMON_INSTALL_EARLY_BYPASS — `k2so daemon install` provisions the
+# standalone daemon on a FRESH headless box where no daemon is running
+# yet, so it cannot satisfy the PORT/TOKEN connection gate below (and
+# doesn't need to: it talks only to GitHub + the filesystem). Skip the
+# connection gate for it; the normal router dispatches it to
+# cmd_daemon_install (which is defined before the router runs).
+_skip_conn_gate=0
+[ "${1:-}" = "daemon" ] && [ "${2:-}" = "install" ] && _skip_conn_gate=1
+
+if [ "$_skip_conn_gate" != "1" ] && { [ -z "$PORT" ] || [ -z "$TOKEN" ]; }; then
     echo "Error: Cannot connect to K2SO." >&2
     echo "Either run this from a K2SO terminal, or ensure K2SO is running." >&2
     echo "(Connection details: ~/.k2so/heartbeat.port and ~/.k2so/heartbeat.token)" >&2
     exit 1
 fi
+unset _skip_conn_gate
 
 BASE_URL="http://127.0.0.1:${PORT}"
 
@@ -1030,6 +1040,312 @@ cmd_daemon_uninstall() {
     fi
     rm -f "$_daemon_port_file" "$_daemon_token_file"
     echo "Daemon uninstalled."
+}
+
+# ── P2: headless standalone-daemon installer ─────────────────────────
+#
+# `k2so daemon install` fetches the per-OS standalone daemon binary
+# published by the release pipeline (P1), minisign-verifies it against
+# the SAME pubkey the Tauri updater uses (embedded literal below), and
+# drops it into a bin dir + writes a supervisor unit so a crash/restart
+# respawns the process.
+#
+# This command MUST run on a fresh box with NO daemon running, so the
+# top-level router intercepts it BEFORE the connection gate (search for
+# DAEMON_INSTALL_EARLY_BYPASS). It uses no cli_request()/HTTP-to-daemon.
+#
+# Minisign verify pubkey — literal string from
+# plugins.updater.pubkey in src-tauri/tauri.conf.json. If you rotate
+# the updater key, rotate this too (and scripts/install-daemon.sh).
+_DAEMON_MINISIGN_PUBKEY="dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU5MTExNDQ2RjY1RUJCMDUKUldRRnUxNzJSaFFSNlFCcXptaWoyRTlidERHaERXbXBkSCthaDEvTTRQbXVIUElOVVd2S0xmNm8K"
+
+_DAEMON_DEFAULT_LATEST_URL="https://github.com/Alakazam-211/K2SO/releases/latest/download/daemon-latest.json"
+_DAEMON_VERSION_URL_TMPL="https://github.com/Alakazam-211/K2SO/releases/download/v%s/daemon-latest.json"
+
+# Map uname → manifest artifact key (e.g. "macos-aarch64"). Echoes the
+# key on stdout; on an unknown platform prints an error and returns 1.
+_daemon_platform_key() {
+    local os arch
+    case "$(uname -s)" in
+        Darwin) os="macos" ;;
+        Linux)  os="linux" ;;
+        *) echo "Unsupported OS for standalone daemon: $(uname -s) (expected Darwin or Linux)" >&2; return 1 ;;
+    esac
+    case "$(uname -m)" in
+        arm64|aarch64) arch="aarch64" ;;
+        x86_64|amd64)  arch="x86_64" ;;
+        *) echo "Unsupported CPU arch for standalone daemon: $(uname -m) (expected arm64/aarch64 or x86_64)" >&2; return 1 ;;
+    esac
+    printf '%s-%s\n' "$os" "$arch"
+    return 0
+}
+
+# Extract one field for a platform key from a daemon-latest.json blob.
+# Args: <json> <platform-key> <field>  (field ∈ url|sig|sha256)
+# Pure sed/grep — no python. Isolates the platform object first so a
+# field from a sibling platform can't bleed in.
+_daemon_manifest_field() {
+    local json="$1" key="$2" field="$3"
+    # Collapse newlines so the object lives on a single logical line,
+    # then carve out from "<key>": { ... } up to the closing brace.
+    local obj
+    obj=$(printf '%s' "$json" | tr '\n' ' ' \
+        | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p")
+    [ -n "$obj" ] || return 1
+    printf '%s' "$obj" \
+        | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+# Top-level "version" field from the manifest (informational).
+_daemon_manifest_version() {
+    printf '%s' "$1" | tr '\n' ' ' \
+        | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# Compute sha256 hex of a file using whichever tool is present.
+_daemon_sha256() {
+    local f="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$f" | awk '{print $1}'
+    else
+        echo "Neither sha256sum nor shasum found — cannot verify checksum." >&2
+        return 1
+    fi
+}
+
+cmd_daemon_install() {
+    local version="" bin_dir="" manifest_url="" no_service=0 dry_run=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --version)      version="${2:-}"; shift 2 ;;
+            --bin-dir)      bin_dir="${2:-}"; shift 2 ;;
+            --manifest-url) manifest_url="${2:-}"; shift 2 ;;
+            --no-service)   no_service=1; shift ;;
+            --dry-run)      dry_run=1; shift ;;
+            -h|--help)
+                echo "Usage: k2so daemon install [--version <x.y.z>] [--bin-dir <dir>]"
+                echo "                           [--manifest-url <url>] [--no-service] [--dry-run]"
+                echo ""
+                echo "  Install the STANDALONE (headless, no-GUI) K2SO daemon binary"
+                echo "  from a signed GitHub release. Minisign-verifies the binary"
+                echo "  against the embedded updater pubkey before installing."
+                echo ""
+                echo "  --version       install a specific release tag (default: latest)."
+                echo "  --bin-dir       install dir (default: ~/.local/bin)."
+                echo "  --manifest-url  override the daemon-latest.json URL"
+                echo "                  (supports file:// for local testing)."
+                echo "  --no-service    skip writing the systemd/launchd supervisor unit."
+                echo "  --dry-run       print resolved platform/artifact/commands; no download."
+                return 0
+                ;;
+            *) echo "k2so daemon install: unknown argument: $1" >&2; return 2 ;;
+        esac
+    done
+
+    [ -n "$bin_dir" ] || bin_dir="$HOME/.local/bin"
+
+    # Resolve manifest URL: explicit override > version tag > latest.
+    local resolved_manifest_url
+    if [ -n "$manifest_url" ]; then
+        resolved_manifest_url="$manifest_url"
+    elif [ -n "$version" ]; then
+        resolved_manifest_url=$(printf "$_DAEMON_VERSION_URL_TMPL" "$version")
+    else
+        resolved_manifest_url="$_DAEMON_DEFAULT_LATEST_URL"
+    fi
+
+    # Platform detect.
+    local platform
+    platform=$(_daemon_platform_key) || return 1
+
+    # Fetch manifest. file:// is read directly; http(s) via curl.
+    local manifest
+    case "$resolved_manifest_url" in
+        file://*)
+            local mpath="${resolved_manifest_url#file://}"
+            if [ ! -f "$mpath" ]; then
+                echo "Manifest not found: $mpath" >&2
+                return 1
+            fi
+            manifest=$(cat "$mpath")
+            ;;
+        *)
+            if ! command -v curl >/dev/null 2>&1; then
+                echo "curl is required to fetch the daemon manifest." >&2
+                return 1
+            fi
+            manifest=$(curl -fsSL "$resolved_manifest_url") || {
+                echo "Failed to fetch daemon manifest: $resolved_manifest_url" >&2
+                return 1
+            }
+            ;;
+    esac
+
+    local mver url sig sha256
+    mver=$(_daemon_manifest_version "$manifest")
+    url=$(_daemon_manifest_field "$manifest" "$platform" "url") || true
+    sig=$(_daemon_manifest_field "$manifest" "$platform" "sig") || true
+    sha256=$(_daemon_manifest_field "$manifest" "$platform" "sha256") || true
+
+    if [ -z "$url" ] || [ -z "$sig" ] || [ -z "$sha256" ]; then
+        echo "Manifest has no complete artifact for platform '$platform'." >&2
+        echo "  url=${url:-<missing>} sig=${sig:+<present>}${sig:-<missing>} sha256=${sha256:-<missing>}" >&2
+        echo "  (manifest version: ${mver:-<unknown>})" >&2
+        return 1
+    fi
+
+    local bin_path="$bin_dir/k2so-daemon"
+
+    # Service unit targets (computed for dry-run + real install).
+    local svc_kind svc_path
+    if [ "$(uname -s)" = "Darwin" ]; then
+        svc_kind="launchd"
+        svc_path="$HOME/Library/LaunchAgents/${_daemon_label}.plist"
+    else
+        svc_kind="systemd"
+        svc_path="$HOME/.config/systemd/user/k2so-daemon.service"
+    fi
+
+    if [ "$dry_run" = "1" ]; then
+        echo "k2so daemon install — DRY RUN (nothing downloaded or written)"
+        echo "  platform key:   $platform"
+        echo "  manifest url:   $resolved_manifest_url"
+        echo "  manifest ver:   ${mver:-<unknown>}"
+        echo "  requested ver:  ${version:-<latest>}"
+        echo "  binary url:     $url"
+        echo "  sha256:         $sha256"
+        echo "  sig (minisign): ${sig%% *}..."
+        echo "  install path:   $bin_path"
+        echo "  minisign verify: minisign -Vm <downloaded-bin> -P <embedded-pubkey>"
+        if [ "$no_service" = "1" ]; then
+            echo "  service:        (skipped — --no-service)"
+        else
+            echo "  service unit:   $svc_kind → $svc_path"
+            if [ "$svc_kind" = "systemd" ]; then
+                echo "  enable cmds:    systemctl --user daemon-reload && systemctl --user enable --now k2so-daemon"
+            else
+                echo "  enable cmds:    launchctl bootstrap gui/\$(id -u) $svc_path"
+            fi
+        fi
+        return 0
+    fi
+
+    # ── Real install ─────────────────────────────────────────────────
+    # Minisign is MANDATORY. Never install an unverified binary.
+    if ! command -v minisign >/dev/null 2>&1; then
+        echo "minisign is required to verify the daemon binary, but it was not found." >&2
+        echo "Install it and re-run:" >&2
+        echo "  macOS:  brew install minisign" >&2
+        echo "  Debian: sudo apt-get install minisign" >&2
+        echo "  Other:  https://jedisct1.github.io/minisign/" >&2
+        echo "Refusing to install an unverified binary." >&2
+        return 1
+    fi
+
+    local tmp
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/k2so-daemon-install.XXXXXX") || {
+        echo "Failed to create temp dir." >&2; return 1
+    }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" EXIT
+
+    local dl_bin="$tmp/k2so-daemon" dl_sig="$tmp/k2so-daemon.minisig"
+
+    echo "Downloading daemon binary ($platform, manifest ver ${mver:-?})..."
+    case "$url" in
+        file://*) cp "${url#file://}" "$dl_bin" ;;
+        *) curl -fsSL "$url" -o "$dl_bin" ;;
+    esac || { echo "Failed to download binary: $url" >&2; return 1; }
+
+    # The .sig string is embedded in the manifest; write it to a file
+    # for minisign. (We trust the manifest only insofar as minisign then
+    # cryptographically verifies the binary against the embedded pubkey.)
+    printf '%s\n' "$sig" > "$dl_sig"
+
+    echo "Verifying minisign signature..."
+    if ! minisign -Vm "$dl_bin" -P "$_DAEMON_MINISIGN_PUBKEY" -x "$dl_sig" >/dev/null 2>&1; then
+        echo "MINISIGN VERIFICATION FAILED for $url" >&2
+        echo "Refusing to install. The binary may be corrupt or tampered with." >&2
+        return 1
+    fi
+
+    echo "Verifying sha256..."
+    local got_sha
+    got_sha=$(_daemon_sha256 "$dl_bin") || return 1
+    if [ "$got_sha" != "$sha256" ]; then
+        echo "SHA256 MISMATCH for $url" >&2
+        echo "  expected: $sha256" >&2
+        echo "  got:      $got_sha" >&2
+        echo "Refusing to install." >&2
+        return 1
+    fi
+
+    echo "Verified. Installing to $bin_path ..."
+    mkdir -p "$bin_dir"
+    cp "$dl_bin" "$bin_path"
+    chmod +x "$bin_path"
+
+    if [ "$no_service" != "1" ]; then
+        if [ "$svc_kind" = "systemd" ]; then
+            mkdir -p "$(dirname "$svc_path")"
+            cat > "$svc_path" <<EOF
+[Unit]
+Description=K2SO standalone daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$bin_path
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+            echo "Wrote systemd user unit: $svc_path"
+            echo "Enable + start it with:"
+            echo "  systemctl --user daemon-reload && systemctl --user enable --now k2so-daemon"
+        else
+            mkdir -p "$(dirname "$svc_path")"
+            cat > "$svc_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${_daemon_label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$bin_path</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/.k2so/daemon.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/.k2so/daemon.stderr.log</string>
+</dict>
+</plist>
+EOF
+            echo "Wrote launchd plist: $svc_path"
+            echo "Bootstrap + start it with:"
+            echo "  launchctl bootstrap gui/\$(id -u) $svc_path"
+        fi
+    fi
+
+    echo ""
+    echo "Standalone K2SO daemon installed: $bin_path"
+    echo "NOTE: pairing this headless box to a K2 Connect account from the"
+    echo "      CLI is a follow-up — token bootstrap is still an open PRD"
+    echo "      question, so this installer does NOT pair the daemon. Once"
+    echo "      the daemon is running, pair it via the documented K2 Connect"
+    echo "      flow."
+    return 0
 }
 
 # 0.39.0f Phase 2.1c: `k2so daemon companion <start|stop|status>` —
@@ -4708,10 +5024,19 @@ EOF
             stop)      shift 2; cmd_daemon_stop "$@" ;;
             restart)   shift 2; cmd_daemon_restart "$@" ;;
             log|logs)  shift 2; cmd_daemon_log "$@" ;;
+            install)   shift 2; cmd_daemon_install "$@" ;;
             uninstall) shift 2; cmd_daemon_uninstall "$@" ;;
             companion) shift 2; cmd_daemon_companion "$@" ;;
             *)
-                echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall|companion>" >&2
+                echo "Usage: k2so daemon <status|start|stop|restart|log|install|uninstall|companion>" >&2
+                echo "" >&2
+                echo "  install [--version <x.y.z>] [--bin-dir <dir>] [--manifest-url <url>]" >&2
+                echo "          [--no-service] [--dry-run]" >&2
+                echo "    Install the STANDALONE (headless, no-GUI) daemon binary from a" >&2
+                echo "    signed GitHub release. Minisign-verifies the binary against the" >&2
+                echo "    embedded updater pubkey, installs to ~/.local/bin by default, and" >&2
+                echo "    writes a systemd (Linux) / launchd (macOS) supervisor unit so a" >&2
+                echo "    crash respawns it. --dry-run prints the plan without downloading." >&2
                 echo "" >&2
                 echo "  restart [--host <base-url>] [--token <token>] [--wait]" >&2
                 echo "    Default: restart the LOCAL daemon (launchctl kickstart)." >&2
