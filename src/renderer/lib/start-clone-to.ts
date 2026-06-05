@@ -16,6 +16,7 @@ import {
   type CloneDeps,
 } from './clone-to'
 import { useCloneToDialogStore } from '@/stores/clone-to-dialog'
+import { useProjectsStore } from '@/stores/projects'
 import type { ConnectHost } from '@/stores/connect-host'
 
 /**
@@ -62,6 +63,18 @@ async function runClone(
       },
       carrySecrets,
     )
+    // The clone unpacked + registered the workspace on the remote daemon, but
+    // the renderer's project list (already pointed at that host) won't reflect
+    // it until something re-fetches — otherwise the cloned workspace stays
+    // invisible until a manual window reload (#18). The active host is the
+    // destination here, so this lists the freshly-cloned workspace. Best-
+    // effort: the clone already succeeded, so a refresh hiccup must NOT be
+    // surfaced as a clone failure.
+    try {
+      await useProjectsStore.getState().fetchProjects()
+    } catch (e) {
+      console.warn('[clone-to] post-clone project refresh failed:', e)
+    }
   } catch {
     // The modal already reflects the failure via onError → setError; the
     // user closes it manually. Nothing more to do here.

@@ -39,6 +39,7 @@ export default function CloneToDialog(): React.JSX.Element | null {
   const result = useCloneToDialogStore((s) => s.result)
   const error = useCloneToDialogStore((s) => s.error)
   const close = useCloneToDialogStore((s) => s.close)
+  const openResult = useCloneToDialogStore((s) => s.openResult)
 
   const isOptions = phase === 'options'
   const isTerminal = stage === 'done' || stage === 'error'
@@ -256,13 +257,25 @@ export default function CloneToDialog(): React.JSX.Element | null {
               </button>
             </>
           ) : (
-            <button
-              className="px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)] disabled:opacity-40"
-              onClick={close}
-              disabled={!isTerminal}
-            >
-              {isTerminal ? 'Close' : 'Working…'}
-            </button>
+            <>
+              {/* On success, offer to jump straight into the freshly-cloned
+                  workspace on the (still-active) destination host. */}
+              {stage === 'done' && result?.project?.id && host && (
+                <button
+                  className="px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)]"
+                  onClick={() => void openResult()}
+                >
+                  Open on {host.label}
+                </button>
+              )}
+              <button
+                className="px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)] disabled:opacity-40"
+                onClick={close}
+                disabled={!isTerminal}
+              >
+                {isTerminal ? 'Close' : 'Working…'}
+              </button>
+            </>
           )}
         </div>
       </div>

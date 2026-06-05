@@ -6,6 +6,7 @@ import type {
   CloneUnpackResult,
 } from '@/lib/clone-to'
 import type { ConnectHost } from '@/stores/connect-host'
+import { useProjectsStore } from '@/stores/projects'
 
 // Store for the "Clone to" modal. Mirrors the open/close idiom of
 // add-workspace-dialog / remote-folder-picker. The modal subscribes to this
@@ -66,6 +67,14 @@ interface CloneToDialogState {
   setSummary: (summary: CloneManifestSummary) => void
   setDone: (result: CloneUnpackResult) => void
   setError: (error: string) => void
+  /** Open the freshly-cloned workspace on the (already-active) destination
+   *  host, then dismiss the modal. The active host is still the destination
+   *  at this point, so selecting the project opens it there. Ensures the
+   *  project is loaded first — the post-clone refresh in `runClone` usually
+   *  already listed it, but if that's still in flight we fetch before
+   *  selecting so `setActiveProject` can resolve the id. No-op if the result
+   *  has no project id. */
+  openResult: () => Promise<void>
   /** Dismiss + reset. */
   close: () => void
 }
@@ -112,6 +121,24 @@ export const useCloneToDialogStore = create<CloneToDialogState>((set, get) => ({
   setSummary: (summary) => set({ summary }),
   setDone: (result) => set({ stage: 'done', result }),
   setError: (error) => set({ stage: 'error', error }),
+
+  openResult: async () => {
+    const id = get().result?.project?.id
+    if (id) {
+      const projects = useProjectsStore.getState()
+      // Usually already present (runClone refreshed on success); fetch only
+      // if the refresh hasn't landed yet so setActiveProject can resolve it.
+      if (!projects.projects.some((p) => p.id === id)) {
+        try {
+          await useProjectsStore.getState().fetchProjects()
+        } catch (e) {
+          console.warn('[clone-to] refresh before open failed:', e)
+        }
+      }
+      useProjectsStore.getState().setActiveProject(id)
+    }
+    set({ ...RESET })
+  },
 
   close: () => set({ ...RESET }),
 }))
