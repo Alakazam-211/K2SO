@@ -246,6 +246,12 @@ async fn handle_one_request(
             // aren't URL-encoded in proxy logs.
             | "/cli/fs/search-tree"
             | "/cli/fs/write-file"
+            // K2 Connect remote-files Phase 2 — base64 upload of a local
+            // file's bytes onto the daemon's disk. Gated below by its own
+            // isolated arm (one-line auth swap) ahead of the shared
+            // `/cli/fs/` POST arm. Body carries the bytes so they're never
+            // URL-logged.
+            | "/cli/fs/upload-binary"
             | "/cli/fs/move"
             | "/cli/fs/copy"
             | "/cli/fs/delete"
@@ -1642,6 +1648,36 @@ async fn handle_one_request(
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
             let result = crate::db_routes::dispatch_unit4_post(p, &body_bytes);
             super::http::send_response(&mut *stream, result.status, result.content_type, &result.body)
+                .await;
+        }
+        // K2 Connect remote-files Phase 2 — POST /cli/fs/upload-binary.
+        // Writes an uploaded file's bytes onto the daemon's disk
+        // (`<workspace>/.k2so/downloads` for the terminal-drop case).
+        //
+        // SANDBOX/AUTH DECISION: gated by `token_ok` (any authed user —
+        // owner token OR a connect-user session), matching every other
+        // `/cli/fs/*` data route. This arm is split out from the shared
+        // `/cli/fs/` arm below SO THE GATE IS ISOLATED: tightening upload
+        // to `require_manage`/`require_owner` later is a ONE-LINE swap
+        // here, with no effect on the read/edit fs routes. `post_allowed`
+        // + this explicit arm form the method gate (a GET falls through to
+        // the catchall → 404).
+        p if is_post && post_allowed && p == "/cli/fs/upload-binary" => {
+            // ── isolated upload auth gate (swap this one line) ──
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let result = crate::fs_routes::handle_upload_binary(&body_bytes);
+            super::http::send_response(&mut *stream, result.status, "application/json", &result.body)
                 .await;
         }
         // Phase 2 Unit 6 — POST routes for filesystem / chat /

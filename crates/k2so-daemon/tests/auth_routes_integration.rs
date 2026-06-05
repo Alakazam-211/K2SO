@@ -836,6 +836,144 @@ async fn whoami_session_reports_its_role() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Group 8 — K2 Connect remote-files Phase 2: POST /cli/fs/upload-binary
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_binary_writes_file_and_returns_path() {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let _g = lock();
+    with_temp_home(|| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        // A fresh destination dir under the temp HOME so the write is
+        // isolated. `$HOME` was redirected by with_temp_home.
+        let home = std::env::var("HOME").expect("HOME set by harness");
+        let dest = std::path::Path::new(&home).join("up-dest");
+        std::fs::create_dir_all(&dest).expect("create dest dir");
+        // The handler canonicalizes `dir` (validate_path); on macOS the
+        // tempdir under $TMPDIR is symlinked (/var → /private/var), so
+        // compare the response against the canonical destination.
+        let dest_canon = dest.canonicalize().expect("canonicalize dest");
+
+        let payload = b"upload-test-bytes";
+        let body = format!(
+            r#"{{"dir":{dir},"filename":"hello.txt","base64":"{b64}"}}"#,
+            dir = serde_json::to_string(dest.to_str().unwrap()).unwrap(),
+            b64 = B64.encode(payload),
+        );
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/fs/upload-binary?token={OWNER_TOKEN}"),
+            Some(&body),
+        );
+        assert_eq!(r.status, 200, "owner upload must 200; body={}", r.body);
+        let v: serde_json::Value = serde_json::from_str(&r.body).expect("upload json");
+        let written = v["path"].as_str().expect("path in response");
+        assert_eq!(written, dest_canon.join("hello.txt").to_str().unwrap());
+        assert_eq!(
+            std::fs::read(&written).expect("read written file"),
+            payload,
+            "uploaded bytes must round-trip"
+        );
+
+        // A connect-user SESSION (any authed user) is also accepted — the
+        // isolated gate is `token_ok`.
+        let member = seed_user_session("upmember", "password123", Role::Member);
+        let body2 = format!(
+            r#"{{"dir":{dir},"filename":"member.txt","base64":"{b64}"}}"#,
+            dir = serde_json::to_string(dest.to_str().unwrap()).unwrap(),
+            b64 = B64.encode(b"member-bytes"),
+        );
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/fs/upload-binary?token={member}"),
+            Some(&body2),
+        );
+        assert_eq!(r.status, 200, "member session upload must 200; body={}", r.body);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_binary_rejects_missing_and_garbage_token() {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let _g = lock();
+    with_temp_home(|| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        let home = std::env::var("HOME").expect("HOME set");
+        let dest = std::path::Path::new(&home).join("up-dest-noauth");
+        std::fs::create_dir_all(&dest).expect("create dest dir");
+        let body = format!(
+            r#"{{"dir":{dir},"filename":"x.txt","base64":"{b64}"}}"#,
+            dir = serde_json::to_string(dest.to_str().unwrap()).unwrap(),
+            b64 = B64.encode(b"nope"),
+        );
+        // No token → 403.
+        let r = http(d.port, "POST", "/cli/fs/upload-binary", Some(&body));
+        assert_eq!(r.status, 403, "no token must 403; body={}", r.body);
+        // Garbage token → 403.
+        let r = http(
+            d.port,
+            "POST",
+            "/cli/fs/upload-binary?token=not-real",
+            Some(&body),
+        );
+        assert_eq!(r.status, 403, "garbage token must 403; body={}", r.body);
+        // Nothing was written by the rejected requests.
+        assert!(!dest.join("x.txt").exists(), "rejected upload must not write");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_binary_get_does_not_mutate() {
+    let _g = lock();
+    with_temp_home(|| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        // A GET can NOT write a file. Because upload-binary is in the
+        // `post_allowed` set, a GET isn't 405'd at the top-level gate; it
+        // falls through the POST-only arms to the `/cli/` catchall, which
+        // has no GET handler for it → 404 "route not found". This is the
+        // SAME no-silent-mutation contract as the other Unit 6 fs POST
+        // routes (see the dispatcher's Unit-6 arm comment): the status
+        // differs from a literal 405 but no write is possible.
+        let r = http(
+            d.port,
+            "GET",
+            &format!("/cli/fs/upload-binary?token={OWNER_TOKEN}"),
+            None,
+        );
+        assert_eq!(
+            r.status, 404,
+            "GET upload-binary must not mutate (404 via catchall); body={}",
+            r.body
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_binary_bad_base64_is_400() {
+    let _g = lock();
+    with_temp_home(|| {
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+        let home = std::env::var("HOME").expect("HOME set");
+        let dest = std::path::Path::new(&home).join("up-dest-bad");
+        std::fs::create_dir_all(&dest).expect("create dest dir");
+        let body = format!(
+            r#"{{"dir":{dir},"filename":"y.txt","base64":"!!!not-base64!!!"}}"#,
+            dir = serde_json::to_string(dest.to_str().unwrap()).unwrap(),
+        );
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/fs/upload-binary?token={OWNER_TOKEN}"),
+            Some(&body),
+        );
+        assert_eq!(r.status, 400, "garbage base64 must 400; body={}", r.body);
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 

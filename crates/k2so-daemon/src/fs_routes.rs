@@ -223,6 +223,40 @@ pub fn handle_create(body: &[u8]) -> CliResponse {
 }
 
 #[derive(Deserialize)]
+struct UploadBinaryBody {
+    dir: String,
+    filename: String,
+    base64: String,
+}
+
+/// Decode a base64 payload and write it into `dir` under a sanitized,
+/// collision-free name. The renderer (or any remote client) chooses the
+/// destination `dir` — for the terminal-drop case it's
+/// `<workspace>/.k2so/downloads`. Mirrors `handle_read_binary`'s base64
+/// transport in reverse: there we encode bytes OUT, here we decode bytes IN.
+///
+/// Size cap (`MAX_UPLOAD_SIZE`, 100MB) and path-traversal / sanitize /
+/// collision logic all live in `fsc::write_upload` so they're testable
+/// without HTTP. We reject the oversize case on the DECODED length before
+/// touching the disk.
+pub fn handle_upload_binary(body: &[u8]) -> CliResponse {
+    let parsed: UploadBinaryBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+    let bytes = match B64.decode(parsed.base64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return CliResponse::bad_request(format!("invalid base64: {e}")),
+    };
+    match fsc::write_upload(&parsed.dir, &parsed.filename, &bytes) {
+        Ok(path) => CliResponse::ok_json(
+            serde_json::json!({ "path": path.to_string_lossy() }).to_string(),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[derive(Deserialize)]
 struct DuplicateBody {
     path: String,
 }
