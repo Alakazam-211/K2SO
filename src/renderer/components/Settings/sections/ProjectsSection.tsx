@@ -1900,7 +1900,7 @@ function AdaptiveHeartbeatConfig({ projectPath }: { projectPath: string }): Reac
       })
       setConfig(result)
       // Trigger immediate triage
-      await invoke('k2so_agents_scheduler_tick', { projectPath })
+      await daemonCliGet('scheduler-tick', { project: projectPath })
     } catch (err) {
       console.error('[heartbeat] Force wake failed:', err)
     }
@@ -2398,11 +2398,11 @@ function CustomAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { 
     // already exists, k2so_agents_create returns the existing agent's
     // info without overwriting (post-0.37.0 unification behavior).
     try {
-      await invoke('k2so_agents_create', {
-        projectPath,
+      await daemonCliGet('agents/create', {
+        project: projectPath,
         name: techName,
         role: 'Custom agent — customize via the persona editor',
-        agentType: 'custom',
+        agent_type: 'custom',
       })
     } catch (e) {
       console.warn('[custom-agent] create returned error (may be benign if already exists):', e)
@@ -2440,11 +2440,11 @@ function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { pr
         if (existing) {
           setAgentName(existing.name)
         } else {
-          await invoke('k2so_agents_create', {
-            projectPath,
+          await daemonCliGet('agents/create', {
+            project: projectPath,
             name: 'k2so-agent',
             role: 'K2SO planner — builds PRDs, milestones, and technical plans',
-            agentType: 'k2so',
+            agent_type: 'k2so',
           })
         }
         setReady(true)
