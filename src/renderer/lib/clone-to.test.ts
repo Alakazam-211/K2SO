@@ -143,9 +143,10 @@ describe('cloneWorkspaceTo — happy path', () => {
       'post:clone/unpack',
     ])
 
-    // Right args at each step.
+    // Right args at each step. carry_secrets defaults to true (include).
     expect(spies.daemonCliPost).toHaveBeenNthCalledWith(1, 'clone/bundle', {
       project_path: '/Users/rosson/myworkspace',
+      carry_secrets: true,
     })
     expect(spies.readLocalFileBase64).toHaveBeenCalledWith(BUNDLE.bundle_path)
     expect(spies.pickHost).toHaveBeenCalledWith(DEST)
@@ -200,6 +201,38 @@ describe('cloneWorkspaceTo — happy path', () => {
       dir: '/home/rosson/work',
       filename: 'myworkspace.tar.gz',
       base64: 'BASE64BYTES',
+    })
+  })
+})
+
+describe('cloneWorkspaceTo — carry_secrets toggle', () => {
+  it('passes carry_secrets: true to clone/bundle by default (include)', async () => {
+    const order: string[] = []
+    const { deps, spies } = makeDeps(order)
+    await cloneWorkspaceTo('/Users/rosson/myworkspace', DEST, deps)
+    expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
+      project_path: '/Users/rosson/myworkspace',
+      carry_secrets: true,
+    })
+  })
+
+  it('passes carry_secrets: true when explicitly opted in', async () => {
+    const order: string[] = []
+    const { deps, spies } = makeDeps(order)
+    await cloneWorkspaceTo('/Users/rosson/myworkspace', DEST, deps, {}, true)
+    expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
+      project_path: '/Users/rosson/myworkspace',
+      carry_secrets: true,
+    })
+  })
+
+  it('passes carry_secrets: false to clone/bundle when the toggle is unchecked', async () => {
+    const order: string[] = []
+    const { deps, spies } = makeDeps(order)
+    await cloneWorkspaceTo('/Users/rosson/myworkspace', DEST, deps, {}, false)
+    expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
+      project_path: '/Users/rosson/myworkspace',
+      carry_secrets: false,
     })
   })
 })
