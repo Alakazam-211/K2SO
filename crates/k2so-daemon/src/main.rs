@@ -69,6 +69,7 @@ mod sessions_ws;
 mod settings_routes;
 mod signal_format;
 mod skill_layers_routes;
+mod skills_routes;
 mod spawn;
 mod terminal_event_sink;
 mod terminal_lifecycle_routes;

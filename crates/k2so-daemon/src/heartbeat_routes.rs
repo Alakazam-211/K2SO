@@ -136,6 +136,65 @@ pub fn handle_apply_wake_scheduler(body: &[u8]) -> CliResponse {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// POST: workspace heartbeat-sessions visibility flag (K2 Connect GAP)
+// ──────────────────────────────────────────────────────────────────────
+//
+// The renderer previously flipped this via the LOCAL
+// `k2so_workspace_set_show_heartbeat_sessions` Tauri command — which
+// misfires when driving a REMOTE host (K2 Connect). This route wraps the
+// SAME core fn so the write always lands on the daemon the renderer is
+// talking to. Workspace-scoped (a `project_path` in the body), NOT
+// owner-only. The dispatcher provides the POST method gate + token gate.
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct SetShowHeartbeatSessionsBody {
+    project_path: String,
+    enabled: bool,
+}
+
+/// Handler for `POST /cli/heartbeat/set-show-sessions`.
+///
+/// Wraps `k2so_core::heartbeats::k2so_workspace_set_show_heartbeat_sessions`.
+/// Mirrors the `k2so_workspace_set_show_heartbeat_sessions` Tauri command.
+pub fn handle_set_show_heartbeat_sessions(body: &[u8]) -> CliResponse {
+    let parsed: SetShowHeartbeatSessionsBody = if body.is_empty() {
+        SetShowHeartbeatSessionsBody::default()
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(b) => b,
+            Err(e) => return CliResponse::bad_request(format!("invalid body: {e}")),
+        }
+    };
+    if parsed.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    match hb::k2so_workspace_set_show_heartbeat_sessions(parsed.project_path, parsed.enabled) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[cfg(test)]
+mod gap_route_tests {
+    use super::*;
+
+    #[test]
+    fn set_show_heartbeat_sessions_rejects_missing_project_path() {
+        let r = handle_set_show_heartbeat_sessions(b"{}");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("project_path"), "body={}", r.body);
+    }
+
+    #[test]
+    fn set_show_heartbeat_sessions_rejects_garbage_body() {
+        let r = handle_set_show_heartbeat_sessions(b"not json");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("invalid body"), "body={}", r.body);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // GET: heartbeat CRUD / fires / active-session
 // ──────────────────────────────────────────────────────────────────────
 

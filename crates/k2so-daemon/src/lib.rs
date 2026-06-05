@@ -58,6 +58,7 @@ pub mod sessions_ws;
 pub mod settings_routes;
 pub mod signal_format;
 pub mod skill_layers_routes;
+pub mod skills_routes;
 pub mod spawn;
 pub mod terminal_event_sink;
 pub mod terminal_lifecycle_routes;

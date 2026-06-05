@@ -29,6 +29,8 @@
 
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
 use k2so_core::agent_hooks::{emit, HookEvent};
 
 use crate::cli_response::CliResponse;
@@ -338,4 +340,387 @@ pub fn handle_agents_delegate(
         obj.insert("success".into(), serde_json::Value::Bool(true));
     }
     CliResponse::ok_json(serde_json::to_string(&out).unwrap_or_else(|_| "{}".into()))
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// K2 Connect host-awareness GAP — POST routes
+// ══════════════════════════════════════════════════════════════════════
+//
+// The renderer previously called the matching `k2so_agents_*` /
+// `workspace_relations_*` / `k2so_session_set_surfaced` Tauri commands
+// via LOCAL `invoke()`. Those run in-process against the LOCAL daemon's
+// filesystem/DB, so when the renderer is driving a REMOTE host (K2
+// Connect) the call misfires (wrong machine, or no Tauri backend). These
+// POST routes give the renderer a host-aware HTTP surface that always
+// targets the daemon it's actually talking to. Each wraps the SAME
+// `k2so_core` fn the Tauri command called, so local + remote stay
+// identical.
+//
+// All are workspace-scoped (a `project_path` / `project_id` in the body),
+// NOT owner-only — they're the same writes any logged-in user performs
+// from the workspace UI, so they take the same auth as every other
+// `/cli/*` data route (owner token OR connect-user session via
+// `token_ok`). The dispatcher provides the POST method gate + token gate
+// before this module sees the call.
+
+/// Deserialize a JSON body, returning a `400` `CliResponse` on parse
+/// failure. Empty bodies fall back to `Default` so a missing required
+/// field surfaces as the handler's own "missing X" error rather than a
+/// serde error.
+fn parse_body<T: serde::de::DeserializeOwned + Default>(
+    body: &[u8],
+) -> Result<T, CliResponse> {
+    if body.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body)
+        .map_err(|e| CliResponse::bad_request(format!("invalid body: {e}")))
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ProjectPathBody {
+    project_path: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct SaveAgentMdBody {
+    project_path: String,
+    agent_name: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct SaveSessionIdBody {
+    project_path: String,
+    agent_name: String,
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct SetSurfacedBody {
+    project_path: String,
+    agent_name: String,
+    surfaced: bool,
+    terminal_id: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    heartbeat_name: Option<String>,
+    attach_agent_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct RelationCreateBody {
+    source_project_id: String,
+    target_project_id: String,
+    relation_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct RelationDeleteBody {
+    id: String,
+}
+
+/// Handler for `POST /cli/agents/regenerate-workspace-skill`.
+///
+/// Wraps `k2so_core::workspace::skill_regen::regenerate_workspace_skill`.
+/// Returns the regenerated SKILL.md text as JSON. Mirrors the
+/// `k2so_agents_regenerate_workspace_skill` Tauri command (4 renderer
+/// callers).
+pub fn handle_regenerate_workspace_skill(body: &[u8]) -> CliResponse {
+    let b: ProjectPathBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    match k2so_core::workspace::skill_regen::regenerate_workspace_skill(b.project_path) {
+        Ok(skill) => {
+            CliResponse::ok_json(serde_json::json!({ "skill": skill }).to_string())
+        }
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/agents/save-agent-md`.
+///
+/// Wraps `k2so_core::workspace::agent_editor::k2so_agents_save_agent_md`.
+/// Mirrors the `k2so_agents_save_agent_md` Tauri command.
+///
+/// DESIGN NOTE: a dedicated route (rather than reusing the generic
+/// `/cli/fs/write-file`) is the correct choice — `k2so_agents_save_agent_md`
+/// is NOT a plain byte write. The core fn resolves the canonical
+/// `.k2so/agent/<agent>/AGENT.md` path from `(project_path, agent_name)`,
+/// applies the same backup/validation the editor pipeline owns, and keeps
+/// the harness mirror in sync. `/cli/fs/write-file` would require the
+/// renderer to know + recompute that path itself (re-implementing core
+/// logic on the client), which is exactly the host-awareness coupling we
+/// are removing. So: dedicated route.
+pub fn handle_save_agent_md(body: &[u8]) -> CliResponse {
+    let b: SaveAgentMdBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    if b.agent_name.is_empty() {
+        return CliResponse::bad_request("missing agent_name");
+    }
+    match k2so_core::workspace::agent_editor::k2so_agents_save_agent_md(
+        b.project_path,
+        b.agent_name,
+        b.content,
+    ) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/agents/disable-workspace-claude-md`.
+///
+/// Wraps `k2so_core::workspace::harness::disable_workspace_claude_md`.
+/// Removes/disables the workspace SKILL.md + CLAUDE.md symlink. Mirrors
+/// the `k2so_agents_disable_workspace_claude_md` Tauri command.
+pub fn handle_disable_workspace_claude_md(body: &[u8]) -> CliResponse {
+    let b: ProjectPathBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    match k2so_core::workspace::harness::disable_workspace_claude_md(b.project_path) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/agents/run-workspace-ingest`.
+///
+/// Wraps `k2so_core::workspace::harness::k2so_agents_run_workspace_ingest`.
+/// Mirrors the `k2so_agents_run_workspace_ingest` Tauri command.
+pub fn handle_run_workspace_ingest(body: &[u8]) -> CliResponse {
+    let b: ProjectPathBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    match k2so_core::workspace::harness::k2so_agents_run_workspace_ingest(b.project_path) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/agents/save-session-id`.
+///
+/// Wraps `k2so_core::workspace::session::k2so_agents_save_session_id`.
+/// Mirrors the `k2so_agents_save_session_id` Tauri command.
+pub fn handle_save_session_id(body: &[u8]) -> CliResponse {
+    let b: SaveSessionIdBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    if b.agent_name.is_empty() {
+        return CliResponse::bad_request("missing agent_name");
+    }
+    match k2so_core::workspace::session::k2so_agents_save_session_id(
+        b.project_path,
+        b.agent_name,
+        b.session_id,
+    ) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/session/set-surfaced`.
+///
+/// Wraps `k2so_core::workspace::session::k2so_session_set_surfaced` (the
+/// multi-arg surfaced-toggle; each arg is a body field). Mirrors the
+/// `k2so_session_set_surfaced` Tauri command.
+pub fn handle_session_set_surfaced(body: &[u8]) -> CliResponse {
+    let b: SetSurfacedBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.project_path.is_empty() {
+        return CliResponse::bad_request("missing project_path");
+    }
+    if b.agent_name.is_empty() {
+        return CliResponse::bad_request("missing agent_name");
+    }
+    match k2so_core::workspace::session::k2so_session_set_surfaced(
+        b.project_path,
+        b.agent_name,
+        b.surfaced,
+        b.terminal_id,
+        b.command,
+        b.args,
+        b.heartbeat_name,
+        b.attach_agent_name,
+    ) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/relations/create`.
+///
+/// Wraps `k2so_core::workspace::relations::workspace_relations_create`.
+/// Returns the created `WorkspaceRelation` as JSON. Mirrors the
+/// `workspace_relations_create(sourceProjectId, targetProjectId,
+/// relationType)` Tauri command.
+///
+/// DESIGN NOTE (FLAGGED): the existing `/cli/connections` route is
+/// project-PATH + action-based (`?project=<path>&action=add&target=…`),
+/// whereas the renderer's `workspace_relations_create` is project-ID
+/// based and returns the full created row. Rather than reshape the
+/// renderer onto the path/action API (higher-risk: different identity
+/// model + different return shape), this adds an ID-based route that
+/// directly mirrors the Tauri command 1:1 — the lower-risk option. The
+/// path/action `/cli/connections` GET route is left untouched.
+pub fn handle_relations_create(body: &[u8]) -> CliResponse {
+    let b: RelationCreateBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.source_project_id.is_empty() {
+        return CliResponse::bad_request("missing source_project_id");
+    }
+    if b.target_project_id.is_empty() {
+        return CliResponse::bad_request("missing target_project_id");
+    }
+    match k2so_core::workspace::relations::workspace_relations_create(
+        b.source_project_id,
+        b.target_project_id,
+        b.relation_type,
+    ) {
+        Ok(rel) => CliResponse::ok_json(
+            serde_json::to_string(&rel).unwrap_or_else(|_| "{}".to_string()),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Handler for `POST /cli/relations/delete`.
+///
+/// Wraps `k2so_core::workspace::relations::workspace_relations_delete`.
+/// Mirrors the `workspace_relations_delete(id)` Tauri command. See the
+/// FLAGGED design note on [`handle_relations_create`].
+pub fn handle_relations_delete(body: &[u8]) -> CliResponse {
+    let b: RelationDeleteBody = match parse_body(body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    if b.id.is_empty() {
+        return CliResponse::bad_request("missing id");
+    }
+    match k2so_core::workspace::relations::workspace_relations_delete(b.id) {
+        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+#[cfg(test)]
+mod gap_route_tests {
+    use super::*;
+
+    #[test]
+    fn regenerate_rejects_missing_project_path() {
+        let r = handle_regenerate_workspace_skill(b"{}");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("project_path"), "body={}", r.body);
+    }
+
+    #[test]
+    fn save_agent_md_rejects_missing_agent_name() {
+        let r = handle_save_agent_md(br#"{"project_path":"/tmp/x","content":"hi"}"#);
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("agent_name"), "body={}", r.body);
+    }
+
+    #[test]
+    fn save_agent_md_rejects_garbage_body() {
+        let r = handle_save_agent_md(b"not json");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("invalid body"), "body={}", r.body);
+    }
+
+    #[test]
+    fn disable_workspace_claude_md_rejects_missing_project_path() {
+        let r = handle_disable_workspace_claude_md(b"{}");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("project_path"), "body={}", r.body);
+    }
+
+    #[test]
+    fn run_workspace_ingest_rejects_missing_project_path() {
+        let r = handle_run_workspace_ingest(b"{}");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("project_path"), "body={}", r.body);
+    }
+
+    #[test]
+    fn save_session_id_rejects_missing_agent_name() {
+        let r = handle_save_session_id(br#"{"project_path":"/tmp/x","session_id":"s"}"#);
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("agent_name"), "body={}", r.body);
+    }
+
+    #[test]
+    fn set_surfaced_rejects_missing_agent_name() {
+        let r = handle_session_set_surfaced(br#"{"project_path":"/tmp/x","surfaced":true}"#);
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("agent_name"), "body={}", r.body);
+    }
+
+    #[test]
+    fn set_surfaced_parses_full_multiarg_body() {
+        // Garbage project_path so the core call fails fast, but the body
+        // (all 8 fields) must deserialize without a serde error first.
+        let body = serde_json::json!({
+            "project_path": "/nonexistent/k2so-set-surfaced-test",
+            "agent_name": "agentX",
+            "surfaced": true,
+            "terminal_id": "tid-1",
+            "command": "claude",
+            "args": ["--print", "hi"],
+            "heartbeat_name": "hb1",
+            "attach_agent_name": "tab-1"
+        })
+        .to_string();
+        let r = handle_session_set_surfaced(body.as_bytes());
+        // Must NOT be the serde "invalid body" 400 — the body parsed.
+        assert!(
+            !r.body.contains("invalid body"),
+            "multi-arg body should deserialize cleanly; body={}",
+            r.body
+        );
+    }
+
+    #[test]
+    fn relations_create_rejects_missing_target() {
+        let r = handle_relations_create(br#"{"source_project_id":"a"}"#);
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("target_project_id"), "body={}", r.body);
+    }
+
+    #[test]
+    fn relations_delete_rejects_missing_id() {
+        let r = handle_relations_delete(b"{}");
+        assert_eq!(r.status, "400 Bad Request");
+        assert!(r.body.contains("id"), "body={}", r.body);
+    }
 }
