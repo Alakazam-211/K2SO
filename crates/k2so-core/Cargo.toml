@@ -87,6 +87,12 @@ ignore = "0.4"
 # UTF-8 / UTF-16 / Latin-1.
 encoding_rs = "0.8"
 
+# Clone-to bundle engine (clone/) — tar+gz the scrubbed workspace +
+# memory + session bundle for one-click migration to a remote K2 Connect
+# host. Pure archive primitives; the manifest is JSON via serde_json.
+tar = "0.4"
+flate2 = "1"
+
 # Terminal backend — VT-compliant parser + PTY management + reflow.
 alacritty_terminal = "0.26.0-rc1"
 portable-pty = "0.8"

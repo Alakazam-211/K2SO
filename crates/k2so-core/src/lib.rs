@@ -37,6 +37,11 @@ pub mod agent_hooks;
 // the canonical post-relocation paths directly.
 pub mod app_settings;
 pub mod chat_history;
+// K2 Connect "Clone to" — the pure bundle engine (inventory the three
+// state locations, scrub secrets, exclude bulk, tar/gz a manifest-driven
+// bundle). Powers both the high-bar push (P2) and the README fallback
+// (P3). HTTP/Tauri-free; see module docs + PRD k2-connect-clone-to.md.
+pub mod clone;
 pub mod companion;
 // Phase 2.5e: workspace-to-workspace connections registry (relocated
 // from `agents/connections.rs`). Powers `k2so connections list/add/
