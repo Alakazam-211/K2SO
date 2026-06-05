@@ -17,12 +17,14 @@
 //!      biases toward duplicate delivery over dropped delivery).
 //!   5. Send a `session:ack` text envelope:
 //!
-//!          {"event":"session:ack","payload":{
-//!             "sessionId":"…",
-//!             "fromOffset": <the offset the caller asked for>,
-//!             "currentFrontOffset": <earliest byte still in ring>,
-//!             "currentBackOffset": <next byte to be written>
-//!          }}
+//!      ```text
+//!      {"event":"session:ack","payload":{
+//!         "sessionId":"…",
+//!         "fromOffset": <the offset the caller asked for>,
+//!         "currentFrontOffset": <earliest byte still in ring>,
+//!         "currentBackOffset": <next byte to be written>
+//!      }}
+//!      ```
 //!
 //!      Clients use this to tell whether the ring covered their
 //!      request or whether they need to read the on-disk archive
