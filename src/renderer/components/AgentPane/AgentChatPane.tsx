@@ -266,9 +266,17 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     }
     setHistoryOpen(false)
     try {
-      await invoke('workspace_session_set_session_id', {
-        projectPath,
-        sessionId: newSessionId,
+      // HOST-AWARE: write the pinned session to the ACTIVE host's
+      // workspace_sessions DB (local or remote) via the daemon, not the
+      // local Tauri command — `invoke('workspace_session_set_session_id')`
+      // only ever hit the LOCAL daemon, so on a remote the dropdown silently
+      // failed to switch (the project path isn't registered locally). The
+      // `/cli/workspace/set-chat-session` route reads QUERY params and isn't
+      // POST-allowlisted, so it's a GET (same pattern as
+      // `workspace/set-agent-display-name`).
+      await daemonCliGet('workspace/set-chat-session', {
+        project: projectPath,
+        session_id: newSessionId,
       })
     } catch (err) {
       console.error('[AgentChatPane] switchToSession DB update failed:', err)
