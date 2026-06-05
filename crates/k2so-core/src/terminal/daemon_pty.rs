@@ -208,6 +208,29 @@ pub struct DaemonPtySession {
     pub session_id: SessionId,
     pub cwd: Option<PathBuf>,
     pub program: Option<String>,
+    /// PID of the direct child process this PTY spawned. Captured at
+    /// spawn time via alacritty's `Pty::child().id()` before the Pty
+    /// is consumed by `EventLoop::new`. `None` only if capture is
+    /// unavailable on a given platform.
+    ///
+    /// The child is launched with `setsid()` by alacritty
+    /// (`tty/unix.rs`), so it is its own session/process-group leader:
+    /// `getpgid(pid) == pid`, a group distinct from the daemon's. That
+    /// makes `killpg(pgid, …)` in `kill()` SAFE — it can only reach the
+    /// child + its descendants, never the daemon.
+    ///
+    /// Used by `kill()` to forcefully terminate + reap the child on
+    /// teardown. Without this, dropping `pty_notifier` only delivers a
+    /// single SIGHUP to the direct child via alacritty's `Pty::Drop`
+    /// (no killpg, no SIGKILL, no waitpid) — agent CLIs (claude/codex)
+    /// that ignore or outlive SIGHUP orphan and accumulate (~200MB
+    /// each → multi-GB leak). v1 reaped correctly; v2 dropped it.
+    pid: Option<i32>,
+    /// Guards `kill()` idempotency. Flipped to `true` the first time
+    /// `kill()` actually runs its kill+reap sequence so a second call
+    /// (e.g. explicit unregister + then Drop) is a cheap no-op and we
+    /// never `waitpid` a PID that may have been recycled.
+    killed: std::sync::atomic::AtomicBool,
     /// Args the child was spawned with. Persisted on the session so
     /// post-spawn callers (e.g. heartbeat smart-launch's "is there a
     /// live PTY running --resume <session_id>?" check) can match by
@@ -380,6 +403,19 @@ impl DaemonPtySession {
         // semantics. The daemon has no window, so we pass 0.
         let __t_pty = std::time::Instant::now();
         let pty = tty::new(&pty_options, window_size, 0)?;
+
+        // Capture the direct child PID NOW, while we still own the Pty
+        // — `EventLoop::new` consumes it below. alacritty's `Pty`
+        // exposes `child() -> &std::process::Child`; `.id()` is the
+        // PID as a u32. This PID is what `kill()` forcefully reaps on
+        // teardown so agent-CLI children don't orphan. The child is a
+        // setsid() session leader (its own process group), so killpg
+        // on its pgid is daemon-safe.
+        #[cfg(unix)]
+        let child_pid: Option<i32> = Some(pty.child().id() as i32);
+        #[cfg(not(unix))]
+        let child_pid: Option<i32> = None;
+
         let pty_ms = __t_pty.elapsed().as_secs_f64() * 1000.0;
         log_debug!(
             "[v2-perf] side=daemon stage=pty_open ms={:.3} session={}",
@@ -460,6 +496,8 @@ impl DaemonPtySession {
             session_id: cfg.session_id,
             cwd: cfg.cwd,
             program: cfg.program,
+            pid: child_pid,
+            killed: std::sync::atomic::AtomicBool::new(false),
             args: spawn_args,
             term,
             pty_notifier: Mutex::new(Notifier(pty_sender)),
@@ -652,11 +690,128 @@ impl DaemonPtySession {
     pub fn subscribe_events(&self) -> broadcast::Receiver<AlacEvent> {
         self.events_tx.subscribe()
     }
+
+    /// Forcefully terminate AND reap the child process.
+    ///
+    /// **Why this exists.** Dropping the last `Arc<Self>` only closes
+    /// the event-loop channel; alacritty's `Pty::Drop` then delivers a
+    /// SINGLE SIGHUP to the direct child PID — no killpg, no SIGKILL,
+    /// no waitpid. Agent CLIs (claude/codex/…) that ignore or outlive
+    /// SIGHUP therefore orphan and accumulate (~200MB each → multi-GB
+    /// leak + lag). This mirrors the v1 backend's correct two-phase
+    /// kill + reap (`alacritty_backend::kill`).
+    ///
+    /// **Safety / blast radius.** The child was spawned with
+    /// `setsid()` (alacritty `tty/unix.rs`), so it is its own
+    /// session/process-group leader: `getpgid(pid) == pid`, a group
+    /// DISTINCT from the daemon's. `killpg(pgid, …)` therefore reaches
+    /// only the child and its descendants, never the daemon. We
+    /// re-derive the pgid from the live PID (rather than trusting a
+    /// cached value) and only `killpg` when `pgid == pid` confirms the
+    /// child is still its own group leader; otherwise we fall back to a
+    /// direct `kill(pid, …)` so we can never signal an unrelated group.
+    ///
+    /// **Idempotent + best-effort.** The first call runs the sequence
+    /// and flips `killed`; subsequent calls are no-ops (so an explicit
+    /// `kill()` followed by `Drop` doesn't `waitpid` a possibly-recycled
+    /// PID). Every syscall failure is ignored (ESRCH = "already gone" is
+    /// the normal, expected outcome once the child has exited).
+    pub fn kill(&self) {
+        use std::sync::atomic::Ordering;
+
+        // Idempotency gate. compare_exchange so exactly one caller runs
+        // the reap; others return immediately.
+        if self
+            .killed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        // Close the event-loop channel first so alacritty's IO thread
+        // begins shutting down (its own Pty::Drop SIGHUPs the child as
+        // a bonus). We don't rely on it for the kill — the explicit
+        // sequence below is authoritative.
+        // (pty_notifier is dropped when `self` drops; nothing to do
+        // here — the kill sequence stands on its own.)
+
+        let pid = match self.pid {
+            Some(p) if p > 0 => p,
+            _ => return,
+        };
+
+        #[cfg(unix)]
+        unsafe {
+            // Phase 1: SIGHUP to the child's own process group
+            // (graceful). Re-derive the pgid from the live PID; only
+            // killpg when the child is confirmed to still be its own
+            // group leader (setsid invariant), else direct-kill.
+            let pgid = libc::getpgid(pid);
+            if pgid == pid {
+                // Child is its own session/group leader — safe to
+                // killpg the whole group (catches grandchildren too).
+                if libc::killpg(pgid, libc::SIGHUP) != 0 {
+                    libc::kill(pid, libc::SIGHUP);
+                }
+            } else {
+                // pgid couldn't be read (ESRCH: already reaped) or the
+                // child isn't a lone group leader — never killpg a
+                // group we don't own; signal the PID directly.
+                libc::kill(pid, libc::SIGHUP);
+            }
+
+            // Brief grace for cooperative shutdown before the hammer.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Phase 2: SIGKILL (forceful). Prefer the group again when
+            // the child is still its own leader so any descendants that
+            // survived SIGHUP also die; otherwise direct SIGKILL.
+            let pgid2 = libc::getpgid(pid);
+            if pgid2 == pid {
+                if libc::killpg(pgid2, libc::SIGKILL) != 0 {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            } else {
+                libc::kill(pid, libc::SIGKILL);
+            }
+
+            // Reap to prevent a zombie. SIGKILL is async — the child
+            // may not have been torn down by the kernel on the first
+            // WNOHANG poll, so retry a few times. A return of >0 means
+            // reaped; -1 means error (commonly ECHILD: already reaped
+            // by alacritty's IO thread or never our child to wait on) —
+            // either way we're done.
+            let mut status: i32 = 0;
+            for _ in 0..5 {
+                let r = libc::waitpid(pid, &mut status, libc::WNOHANG);
+                if r > 0 || r == -1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        log_debug!("[v2-kill] session={} reaped child pid={}", self.session_id, pid);
+    }
+
+    /// PID of the direct child process, if captured. Exposed for
+    /// tests that assert the child is actually gone after `kill()`.
+    pub fn child_pid(&self) -> Option<i32> {
+        self.pid
+    }
 }
 
-// No explicit `Drop` impl: dropping `pty_notifier` closes the
-// event-loop channel, the IO thread sees that and exits, and the
-// OS reaps the thread. We don't need to join synchronously.
+// Explicit `Drop`: forcefully kill + reap the child so agent-CLI
+// children never orphan when the last `Arc<Self>` is dropped without
+// an explicit `kill()` (e.g. a stray WS handler holding the final
+// clone). `kill()` is idempotent, so this is a safe no-op when the
+// session was already killed via an unregister/watchdog chokepoint.
+impl Drop for DaemonPtySession {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -820,5 +975,132 @@ mod tests {
         assert_eq!(s.label_source(), LabelSource::Seed);
         let r = s.try_set_label_from_pty("vim".to_string());
         assert_eq!(r.as_deref(), Some("vim"));
+    }
+
+    /// Regression test for the v2 process/memory leak: `kill()` MUST
+    /// forcefully terminate AND reap the child so no orphan + no zombie
+    /// remains. We spawn a long-lived `sleep 600` (a process that will
+    /// NOT exit on its own within the test), capture its PID, call
+    /// `kill()`, and then prove via `kill(pid, 0)` that the PID is gone
+    /// (ESRCH). The child was setsid()'d by alacritty so it's its own
+    /// group leader — exactly the case `kill()`'s killpg targets.
+    #[cfg(unix)]
+    #[test]
+    fn kill_terminates_and_reaps_child() {
+        use std::path::PathBuf;
+
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            // A 600s sleep: will not self-exit during the test, so if
+            // the PID is gone afterwards it's because kill() killed it.
+            program: Some("sleep".to_string()),
+            args: vec!["600".to_string()],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: String::new(),
+            label_source: LabelSource::Pty,
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn sleep");
+
+        let pid = s
+            .child_pid()
+            .expect("child PID must be captured on unix");
+        assert!(pid > 0, "captured PID must be positive, got {pid}");
+
+        // Sanity: the child is alive right now (kill(pid, 0) → 0).
+        let alive_before = unsafe { libc::kill(pid, 0) };
+        assert_eq!(
+            alive_before, 0,
+            "freshly-spawned child pid={pid} must be alive before kill()"
+        );
+
+        // The fix under test.
+        s.kill();
+
+        // Poll for the PID to disappear. SIGKILL + our waitpid reap are
+        // synchronous-ish, but allow a short window for the kernel to
+        // finish teardown. We assert it IS gone — not "best effort".
+        let mut gone = false;
+        let mut last_errno = 0;
+        for _ in 0..50 {
+            let r = unsafe { libc::kill(pid, 0) };
+            if r == -1 {
+                last_errno = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(0);
+                if last_errno == libc::ESRCH {
+                    gone = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            gone,
+            "child pid={pid} must be gone after kill() (kill(pid,0) → ESRCH); \
+             last kill(pid,0) errno was {last_errno} (0 = still alive). \
+             A surviving PID means the leak fix did not terminate the child."
+        );
+
+        // Reap guarantee: the child must NOT be a zombie. We already
+        // waitpid'd inside kill(); a second WNOHANG must therefore
+        // return -1/ECHILD (no such child to wait on) rather than the
+        // PID again (which would mean a zombie is still reapable here).
+        let mut status: i32 = 0;
+        let wr = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert!(
+            wr <= 0,
+            "no zombie may remain: waitpid(pid={pid}) returned {wr} \
+             (>0 means an unreaped zombie child is still present)"
+        );
+    }
+
+    /// `kill()` is idempotent: calling it twice must not panic, must
+    /// not waitpid a (possibly-recycled) PID a second time, and the
+    /// second call is a cheap no-op. Drop then runs kill() a third
+    /// time implicitly — also a no-op.
+    #[cfg(unix)]
+    #[test]
+    fn kill_is_idempotent() {
+        use std::path::PathBuf;
+
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(PathBuf::from("/tmp")),
+            program: Some("sleep".to_string()),
+            args: vec!["600".to_string()],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: String::new(),
+            label_source: LabelSource::Pty,
+        };
+        let s = DaemonPtySession::spawn(cfg).expect("spawn sleep");
+        let pid = s.child_pid().expect("pid captured");
+
+        s.kill();
+        // Second call must be a no-op (returns early on the `killed`
+        // gate) — and must not blow up.
+        s.kill();
+
+        // Confirm the child is gone exactly once (no double-reap havoc).
+        let mut gone = false;
+        for _ in 0..50 {
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error()
+                    == Some(libc::ESRCH)
+            {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone, "child pid={pid} gone after idempotent kills");
+        // Drop fires kill() a third time — no panic, no double free.
+        drop(s);
     }
 }

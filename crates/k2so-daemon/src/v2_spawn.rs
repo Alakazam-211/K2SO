@@ -140,6 +140,28 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     let existing = v2_session_map::lookup_by_agent_name(&req.agent_name);
     let lookup_ms = __t_lookup.elapsed().as_secs_f64() * 1000.0;
 
+    // A stale map entry whose child already exited must NOT be reused —
+    // doing so would hand the caller a dead PTY. Evict + reap it (the
+    // reap is belt-and-suspenders: a child that exited on its own is
+    // usually already gone, but a half-dead process group or an
+    // unobserved exit could leave a straggler) and fall through to spawn
+    // a fresh replacement below.
+    if let Some(existing) = existing.as_ref() {
+        if !existing.is_child_alive() {
+            log_debug!(
+                "[v2-spawn] existing session for agent={} has a dead child; evicting + killing before respawn",
+                req.agent_name
+            );
+            // unregister runs the DB/active-session cleanup chokepoint
+            // and itself calls kill(); the explicit kill() here is
+            // idempotent and guarantees teardown even if the key was
+            // already removed by a racing unregister.
+            v2_session_map::unregister(&req.agent_name);
+            existing.kill();
+        }
+    }
+    let existing = existing.filter(|s| s.is_child_alive());
+
     if let Some(existing) = existing {
         let (cols, rows) = current_dims(&existing);
         let session_id_str = existing.session_id.to_string();

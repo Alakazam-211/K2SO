@@ -219,13 +219,19 @@ fn execute(
             session.write(&[0x03])?;
         }
         Escalation::Kill => {
-            // DaemonPtySession (v2) doesn't expose an explicit kill();
-            // dropping the registry Arc closes the PTY channel which
-            // SIGHUPs the child. Unregistering from v2_session_map
-            // releases the daemon's copy of the Arc; once any in-flight
-            // WS handler also drops its clone, the IO thread exits and
-            // the child dies.
-            let _ = session;
+            // Force-kill + reap the child directly — do NOT rely on the
+            // Arc-drop → channel-close → single-SIGHUP path. Agent CLIs
+            // (claude/codex/…) ignore/outlive that SIGHUP, so a
+            // watchdog "kill" that only unregistered would leave the
+            // runaway child alive (the very thing the watchdog exists to
+            // stop). `DaemonPtySession::kill()` does the two-phase
+            // killpg+SIGKILL+waitpid reap. `LiveSession` is a thin
+            // newtype over `Arc<DaemonPtySession>`, so reach the inner
+            // session via `.0`. Kill first (authoritative termination),
+            // then unregister to run the DB/active-session cleanup
+            // chokepoint (its own kill() call is then an idempotent
+            // no-op).
+            session.0.kill();
             v2_session_map::unregister(agent);
         }
         Escalation::None => unreachable!(),

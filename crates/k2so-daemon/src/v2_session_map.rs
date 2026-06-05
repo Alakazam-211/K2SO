@@ -43,9 +43,22 @@ fn shared() -> AgentMap {
 pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
     let key = agent_name.into();
     let map_arc = shared();
-    {
+    let displaced = {
         let mut map = map_arc.lock().unwrap();
-        map.insert(key.clone(), Arc::clone(&session));
+        map.insert(key.clone(), Arc::clone(&session))
+    };
+    // If an existing session was overwritten under this key, its child
+    // would otherwise leak: nothing else holds a chokepoint reference
+    // to it once it's out of the map. Force-kill + reap it now. `kill()`
+    // is idempotent and best-effort, so a session that already exited is
+    // a cheap no-op. Done OUTSIDE the map lock (kill() sleeps ~100ms).
+    if let Some(old) = displaced {
+        if !Arc::ptr_eq(&old, &session) {
+            log_debug!(
+                "[v2-map] register displaced existing session under key={key}; killing old child"
+            );
+            old.kill();
+        }
     }
     // 0.38.0 Commit 4 — fan out to `/cli/sessions/events` subscribers
     // so connected renderers + the mobile companion learn about new
@@ -190,6 +203,18 @@ pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
              WHERE terminal_id = ?1 OR active_terminal_id = ?1",
             rusqlite::params![terminal_id],
         );
+        drop(conn);
+
+        // Force-kill + reap the child. This is the single "v2 session
+        // goes away" chokepoint (deliberate close, child-exit observer,
+        // watchdog escalation all route here), so killing here is what
+        // stops agent-CLI children orphaning. Pre-fix we relied on the
+        // Arc drop → channel close → single SIGHUP, which agent CLIs
+        // ignore/outlive (the multi-GB leak). `kill()` is idempotent;
+        // if the child already exited it's a no-op. Note we still hold
+        // `removed` (the returned Arc) so the session object outlives
+        // this call — Drop will call kill() again later as a no-op.
+        session.kill();
     }
     removed
 }
