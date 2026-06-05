@@ -12,6 +12,8 @@ import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
 import { showContextMenu } from '../../lib/context-menu'
 import { pickWorkspaceFolder } from '../../lib/pick-workspace-folder'
+import { useConnectHostStore } from '../../stores/connect-host'
+import { startCloneTo } from '../../lib/start-clone-to'
 import ProjectAvatar from './ProjectAvatar'
 
 const RAIL_WIDTH = 48
@@ -212,6 +214,17 @@ export default function IconRail(): React.JSX.Element {
         }
       }
 
+      // "Clone to <host>" — migrate this LOCAL workspace onto a connected K2
+      // Connect host. Only offered when we're currently on the local daemon
+      // (the orchestration bundles + reads from the local machine first).
+      const { activeHost, hosts } = useConnectHostStore.getState()
+      if (activeHost === 'local' && hosts.length > 0) {
+        menuItems.push({ id: 'separator-clone', label: '', type: 'separator' })
+        for (const host of hosts) {
+          menuItems.push({ id: `clone-to:${host.id}`, label: `Clone to ${host.label}` })
+        }
+      }
+
       menuItems.push(
         { id: 'separator2', label: '', type: 'separator' },
         { id: 'remove', label: 'Remove Workspace' }
@@ -221,6 +234,10 @@ export default function IconRail(): React.JSX.Element {
 
       if (clickedId === 'settings') {
         useSettingsStore.getState().openSettings('projects', projectId)
+      } else if (clickedId?.startsWith('clone-to:')) {
+        const hostId = clickedId.replace('clone-to:', '')
+        const host = useConnectHostStore.getState().hosts.find((h) => h.id === hostId)
+        if (host) void startCloneTo(project.path, project.name, host)
       } else if (clickedId === 'expand') {
         expand()
       } else if (clickedId === 'open-finder') {

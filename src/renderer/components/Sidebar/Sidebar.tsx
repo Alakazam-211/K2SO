@@ -19,6 +19,8 @@ import { emit } from '@tauri-apps/api/event'
 import { daemonCliPost } from '@/lib/daemon-cli'
 import { pickWorkspaceFolder } from '@/lib/pick-workspace-folder'
 import { showContextMenu } from '@/lib/context-menu'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { startCloneTo } from '@/lib/start-clone-to'
 import { useGitInfo, useGitChanges } from '@/hooks/useGit'
 import ResizeHandle from './ResizeHandle'
 import WorktreeDialog from './WorktreeDialog'
@@ -994,6 +996,17 @@ export default function Sidebar(): React.JSX.Element {
         ...(!project.manuallyActive ? [{ id: 'active-24h', label: 'Active for 24hrs' }] : [])
       )
 
+      // "Clone to <host>" — migrate this LOCAL workspace onto a connected K2
+      // Connect host. Only offered when we're on the local daemon (the
+      // orchestration bundles + reads from the local machine first).
+      const { activeHost, hosts } = useConnectHostStore.getState()
+      if (activeHost === 'local' && hosts.length > 0) {
+        menuItems.push({ id: 'separator-clone', label: '', type: 'separator' })
+        for (const host of hosts) {
+          menuItems.push({ id: `clone-to:${host.id}`, label: `Clone to ${host.label}` })
+        }
+      }
+
       menuItems.push(
         { id: 'separator', label: '', type: 'separator' },
         { id: 'remove', label: 'Remove Workspace' }
@@ -1003,6 +1016,10 @@ export default function Sidebar(): React.JSX.Element {
 
       if (clickedId === 'settings') {
         useSettingsStore.getState().openSettings('projects', project.id)
+      } else if (clickedId?.startsWith('clone-to:')) {
+        const hostId = clickedId.replace('clone-to:', '')
+        const host = useConnectHostStore.getState().hosts.find((h) => h.id === hostId)
+        if (host) void startCloneTo(project.path, project.name, host)
       } else if (clickedId === 'rename') {
         const newName = window.prompt('Rename workspace:', project.name)
         if (newName && newName.trim() && newName !== project.name) {
