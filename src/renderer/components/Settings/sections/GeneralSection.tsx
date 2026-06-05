@@ -1,7 +1,12 @@
 import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { useServerSupports, featureMinVersion } from '@/lib/server-capabilities'
+import { useConfirmDialogStore } from '@/stores/confirm-dialog'
+import { useToastStore } from '@/stores/toast'
+import { restartHostVisibility, restartHostConfirmCopy, type RestartRole } from './restart-host'
 // Plan B — the keep-daemon-on-quit flag lives in the daemon's settings
 // store. The old `get/set_keep_daemon_on_quit` Tauri commands proxied
 // `/cli/settings/{get,update}`; route them through the host-aware
@@ -22,6 +27,7 @@ export const GENERAL_MANIFEST: SettingEntry[] = [
   { id: 'general.claude-auth-refresh', section: 'general', label: 'Auto-refresh Claude credentials', description: 'Background scheduler that keeps your Claude session alive', keywords: ['claude', 'auth', 'token', 'login', 'credentials', 'scheduler'] },
   { id: 'general.daemon', section: 'general', label: 'K2SO Server', description: 'Background service that keeps agents running when the app is closed', keywords: ['server', 'daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
   { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep server running when the window is closed', description: 'When on, clicking the red close button hides the window and keeps the Agent & Companion server running. When off, the red button stops everything. Cmd+Q always closes everything.', keywords: ['daemon', 'server', 'agent', 'companion', 'close', 'red button', 'window', 'hide', 'background', 'persistent'] },
+  { id: 'general.restart-host', section: 'general', label: 'Restart connected host', description: 'Restart the REMOTE machine you are connected to over K2 Connect', keywords: ['restart', 'reboot', 'remote', 'host', 'connect', 'server', 'daemon', 'bounce'] },
   { id: 'general.ai-assistant', section: 'general', label: 'AI Workspace Assistant', description: 'Local LLM for natural-language workspace operations (⌘L)', keywords: ['ai', 'assistant', 'llm', 'cmd+l', 'qwen', 'model', 'local', 'gguf'] },
   { id: 'general.model-status', section: 'general', label: 'Model Status', description: 'Current local LLM load state', keywords: ['model', 'llm', 'loaded', 'download'] },
   { id: 'general.download-model', section: 'general', label: 'Download Default Model', description: 'Fetch Qwen2.5-1.5B locally (~1.1GB)', keywords: ['download', 'model', 'qwen', 'local llm'] },
@@ -182,6 +188,12 @@ export function GeneralSection(): React.JSX.Element {
             menubar's Quit K2SO item. Default ON pairs with the menubar
             icon so users always have visibility into what's running. */}
         <KeepDaemonOnQuitRow />
+
+        {/* Restart the REMOTE host you're connected to over K2 Connect
+            (#661). Renders ONLY when the active host is a remote so it can
+            never be mistaken for "restart my Mac" — the local-Mac restart
+            lives in the K2SO Server (DaemonRow) above. */}
+        <RestartHostRow />
 
         {/* AI Workspace Assistant (Cmd+L) — core feature, belongs in General */}
         <LocalLLMSettings />
@@ -642,6 +654,159 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
           }}
         />
       </button>
+    </div>
+  )
+}
+
+// ── Restart connected host (#661) ──────────────────────────────────────
+// Lets a user restart the REMOTE machine they're connected to over K2
+// Connect — NOT their local Mac. The #1 design goal is that it is
+// UNMISTAKABLE which machine this acts on (the original update bug was
+// "it restarted my laptop instead of the remote"):
+//
+//   * The row renders ONLY when the active host is a REMOTE ConnectHost.
+//     For the local Mac it renders NOTHING — the local-Mac restart lives
+//     in the K2SO Server (DaemonRow) above. No ambiguity, no shared button.
+//   * A prominent REMOTE badge + the host's display name + hostname sit on
+//     the row, and the confirm dialog NAMES the host explicitly:
+//     "This will restart <host> (the machine you're connected to)…".
+//   * It posts host-aware `daemonCliPost('daemon/restart', {})`, which
+//     getDaemonWs() routes to the ACTIVE host — never the local daemon.
+//
+// Reconnect is NOT our job: the ConnectionGate's soft-reconnect already
+// covers the gap and returns when the host is back. We just fire the
+// POST and show "Restarting <host>…".
+//
+// Gating:
+//   * serverSupports('daemon-restart') (min 0.39.32) — an OLDER remote
+//     that lacks the route hides the control instead of dead-ending on a
+//     404.
+//   * Owner/Admin on the active host, resolved from the host-aware
+//     `auth/whoami` role. The route itself is owner-token-gated, so a
+//     non-owner session 403s; we surface that 403 as a clear toast rather
+//     than a silent no-op.
+function RestartHostRow(): React.JSX.Element | null {
+  const activeHost = useConnectHostStore((s) => s.activeHost)
+  const supportsRestart = useServerSupports('daemon-restart')
+  const confirm = useConfirmDialogStore((s) => s.confirm)
+  const addToast = useToastStore((s) => s.addToast)
+
+  const [role, setRole] = useState<RestartRole | null>(null)
+  const [restarting, setRestarting] = useState(false)
+
+  const isRemote = activeHost !== 'local'
+  // A stable label for copy: the user-facing name, falling back to the
+  // hostname so the dialog is never blank.
+  const hostLabel = isRemote ? (activeHost.label?.trim() || activeHost.hostname) : ''
+  const hostname = isRemote ? activeHost.hostname : ''
+  const hostId = isRemote ? activeHost.id : ''
+
+  // Resolve the viewer's role on the ACTIVE remote host (host-aware
+  // whoami). Owner/Admin may restart; a Member can't (the route 403s).
+  // Re-runs whenever the active remote changes.
+  useEffect(() => {
+    if (!isRemote) {
+      setRole(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const data = await daemonCliGet<{ role?: string; owner?: boolean }>('auth/whoami')
+        if (cancelled) return
+        const resolved: RestartRole | null =
+          data.role === 'owner' || data.role === 'admin' || data.role === 'member'
+            ? data.role
+            : data.owner
+              ? 'owner'
+              : null
+        setRole(resolved)
+      } catch {
+        if (!cancelled) setRole(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [isRemote, hostId])
+
+  // UNMISTAKABLE: never render for the local Mac (DaemonRow owns that),
+  // hide for an older remote without the route, and hide for Members who
+  // can't restart. Pure decision lives in restartHostVisibility() so it's
+  // unit-tested without rendering.
+  const { show, canRestart } = restartHostVisibility({ isRemote, supportsRestart, role })
+  if (!show) return null
+
+  const handleRestart = async (): Promise<void> => {
+    const copy = restartHostConfirmCopy(hostLabel, hostname)
+    const ok = await confirm({
+      title: copy.title,
+      message: copy.message,
+      confirmLabel: copy.confirmLabel,
+      destructive: true,
+    })
+    if (!ok) return
+    setRestarting(true)
+    try {
+      await daemonCliPost('daemon/restart', {})
+      addToast(`Restarting ${hostLabel}… it'll reconnect automatically.`, 'info', 8000)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // The route is owner-token-gated: a non-owner session 403s. Surface
+      // a clear, host-named error rather than a silent failure.
+      if (/403|forbidden|invalid or missing token/i.test(msg)) {
+        addToast(
+          `You don't have permission to restart ${hostLabel}. Only the host owner can restart it.`,
+          'error',
+          8000,
+        )
+      } else {
+        addToast(`Couldn't restart ${hostLabel}: ${msg}`, 'error', 8000)
+      }
+      setRestarting(false)
+    }
+    // On success we deliberately leave `restarting` true: the host is
+    // going down and the ConnectionGate's soft-reconnect takes over.
+  }
+
+  return (
+    <div
+      className="py-2.5 px-3 border border-amber-500/40 bg-amber-500/5"
+      data-settings-id="general.restart-host"
+    >
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col min-w-0 flex-1">
+          <span className="flex items-center gap-2 min-w-0">
+            <span className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 flex-shrink-0">
+              Remote host
+            </span>
+            <span className="text-xs text-[var(--color-text-primary)] font-medium truncate">
+              {hostLabel}
+            </span>
+            <span className="text-[10px] text-[var(--color-text-muted)] font-mono truncate">
+              {hostname}
+            </span>
+          </span>
+          <span className="text-[10px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
+            Restart the machine you&apos;re connected to — <strong className="text-amber-300">not this Mac</strong>.
+            Active sessions briefly disconnect, then reconnect automatically.
+          </span>
+        </div>
+        <div className="flex-shrink-0">
+          {restarting ? (
+            <span className="text-[11px] text-amber-300">Restarting {hostLabel}…</span>
+          ) : (
+            <button
+              onClick={() => void handleRestart()}
+              disabled={!canRestart}
+              title={canRestart ? undefined : 'Only the host owner or an admin can restart this host'}
+              className="px-3 py-1 text-[11px] font-medium text-amber-200 bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 transition-colors no-drag cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Restart {hostLabel}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

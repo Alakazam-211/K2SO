@@ -33,6 +33,10 @@ export const FEATURES = {
   'fs-info': '0.39.24',
   /** GET /cli/auth/whoami role + /cli/users/* role management (#629). */
   roles: '0.39.23',
+  /** POST /cli/daemon/restart — supervisor-agnostic remote daemon restart
+   *  (#651/#661). Gates the "Restart host" control so an OLDER remote (no
+   *  route) hides the button instead of showing a dead one that 404s. */
+  'daemon-restart': '0.39.32',
 } as const
 
 export type FeatureKey = keyof typeof FEATURES

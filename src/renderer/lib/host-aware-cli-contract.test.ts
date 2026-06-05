@@ -122,6 +122,15 @@ function createRelation(sourceProjectId: string, targetProjectId: string) {
 // Mirrors tabs.ts openHeartbeatTab: the 8-field surfaced=true body that
 // hands the existing PTY to the surfaced flow. Every camelCase arg the
 // old Tauri command took maps to a snake_case body field.
+// Mirrors RestartHostRow.handleRestart (#661): the host-aware "Restart
+// connected host" control posts an EMPTY body to `daemon/restart` against
+// the ACTIVE host. The route takes no JSON body (the owner token rides the
+// query string), so the body must stay `{}` — no stray fields that an
+// older/stricter handler could choke on.
+function restartHost() {
+  return cliPost('daemon/restart', {})
+}
+
 function setSurfaced(
   projectPath: string,
   agentName: string,
@@ -160,6 +169,17 @@ describe('host-aware CLI POST swaps — GAP wire contract', () => {
     // so a leftover would 400 (missing source_project_id) on any host.
     expect(body).not.toHaveProperty('sourceProjectId')
     expect(body).not.toHaveProperty('targetProjectId')
+  })
+
+  it('daemon/restart posts an empty body to the active host (#661)', async () => {
+    await restartHost()
+    expect(daemonCliPost).toHaveBeenCalledWith('daemon/restart', {})
+    const [route, body] = daemonCliPost.mock.calls[0] as [string, Record<string, unknown>]
+    // Route is exact (host-aware daemonCliPost prefixes /cli/ + targets the
+    // ACTIVE host); the body carries no fields — the owner token rides the
+    // query string, so any extra key here would be wrong.
+    expect(route).toBe('daemon/restart')
+    expect(Object.keys(body)).toHaveLength(0)
   })
 })
 

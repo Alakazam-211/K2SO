@@ -129,6 +129,25 @@ describe('serverSupports — remote, fs-info gating (min 0.39.24)', () => {
   })
 })
 
+describe('serverSupports — remote, daemon-restart gating (min 0.39.32)', () => {
+  it('false below min (older remote hides the Restart-host button)', () => {
+    setActiveRemote('0.39.31')
+    expect(serverSupports('daemon-restart')).toBe(false)
+  })
+  it('true at exactly min', () => {
+    setActiveRemote('0.39.32')
+    expect(serverSupports('daemon-restart')).toBe(true)
+  })
+  it('true above min', () => {
+    setActiveRemote('0.40.0')
+    expect(serverSupports('daemon-restart')).toBe(true)
+  })
+  it('always true for the local Mac (paired with this app)', () => {
+    useConnectHostStore.setState({ activeHost: 'local', serverVersion: null })
+    expect(serverSupports('daemon-restart')).toBe(true)
+  })
+})
+
 describe('serverSupports — remote, roles gating (min 0.39.23)', () => {
   it('false below min', () => {
     setActiveRemote('0.39.22')
