@@ -229,6 +229,86 @@ describe('host-aware CLI GET swaps — relations LIST wire contract', () => {
   })
 })
 
+// ════════════════════════════════════════════════════════════════════
+// Remote self-update — host-aware wire contract (P4)
+// ════════════════════════════════════════════════════════════════════
+//
+// The "Update host" control (UpdateHostRow) drives the REMOTE machine's
+// self-update over the P3 daemon routes, host-aware so they hit the ACTIVE
+// host (local OR a remote K2 Connect daemon). The wire contract each call
+// must satisfy:
+//
+//   - POST daemon/update/check  → empty body (owner token rides the query
+//     string), returns {current, latest, available, …}.
+//   - POST daemon/update/start  → empty body, returns {job_id}.
+//   - GET  daemon/update/status → reads the `job_id` QUERY param; returns
+//     {phase, progress?, bytes?, error?}.
+//   - POST daemon/update/apply  → body { job_id } (the staged job to apply).
+//
+// A regression that puts job_id in the wrong place (e.g. body for status,
+// or query for apply) would silently no-op against the daemon; the
+// not-toHaveProperty / exact-args guards catch it.
+
+// Mirrors UpdateHostRow.handleCheck: POST with an EMPTY body.
+function updateCheck() {
+  return cliPost('daemon/update/check', {})
+}
+// Mirrors UpdateHostRow.handleDownload: POST with an EMPTY body → {job_id}.
+function updateStart() {
+  return cliPost('daemon/update/start', {})
+}
+// Mirrors the status poll: GET reading the `job_id` query param.
+function updateStatus(jobId: string) {
+  return cli('daemon/update/status', { job_id: jobId })
+}
+// Mirrors UpdateHostRow.handleApply: POST with the staged job in the body.
+function updateApply(jobId: string) {
+  return cliPost('daemon/update/apply', { job_id: jobId })
+}
+
+describe('host-aware CLI — remote self-update wire contract (P4)', () => {
+  beforeEach(() => {
+    daemonCliGet.mockReset()
+    daemonCliGet.mockResolvedValue({ phase: 'downloading' })
+    daemonCliPost.mockReset()
+    daemonCliPost.mockResolvedValue({ job_id: 'job-1' })
+  })
+
+  it('daemon/update/check is a POST with an empty body', async () => {
+    await updateCheck()
+    expect(daemonCliPost).toHaveBeenCalledWith('daemon/update/check', {})
+    const [route, body] = daemonCliPost.mock.calls[0] as [string, Record<string, unknown>]
+    expect(route).toBe('daemon/update/check')
+    expect(Object.keys(body)).toHaveLength(0)
+  })
+
+  it('daemon/update/start is a POST with an empty body', async () => {
+    await updateStart()
+    expect(daemonCliPost).toHaveBeenCalledWith('daemon/update/start', {})
+    const [route, body] = daemonCliPost.mock.calls[0] as [string, Record<string, unknown>]
+    expect(route).toBe('daemon/update/start')
+    expect(Object.keys(body)).toHaveLength(0)
+  })
+
+  it('daemon/update/status is a GET reading the job_id query param', async () => {
+    await updateStatus('job-1')
+    expect(daemonCliGet).toHaveBeenCalledWith('daemon/update/status', { job_id: 'job-1' })
+    const [, params] = daemonCliGet.mock.calls[0] as [string, Record<string, unknown>]
+    // It must be a GET (query param), never a POST — the status route reads
+    // the query string, so posting it would drop the job id.
+    expect(daemonCliPost).not.toHaveBeenCalled()
+    expect(params).not.toHaveProperty('jobId')
+  })
+
+  it('daemon/update/apply is a POST carrying the staged job_id in the body', async () => {
+    await updateApply('job-1')
+    expect(daemonCliPost).toHaveBeenCalledWith('daemon/update/apply', { job_id: 'job-1' })
+    const [, body] = daemonCliPost.mock.calls[0] as [string, Record<string, unknown>]
+    // camelCase must not leak — the route reads snake_case `job_id`.
+    expect(body).not.toHaveProperty('jobId')
+  })
+})
+
 describe('host-aware CLI POST swaps — set-surfaced (cont.)', () => {
   beforeEach(() => {
     daemonCliPost.mockReset()

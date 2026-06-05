@@ -7,6 +7,21 @@ import { useServerSupports, featureMinVersion } from '@/lib/server-capabilities'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
 import { useToastStore } from '@/stores/toast'
 import { restartHostVisibility, restartHostConfirmCopy, type RestartRole } from './restart-host'
+import {
+  updateHostVisibility,
+  updateHostConfirmCopy,
+  updateAvailableCopy,
+  updatePhaseCopy,
+  updateForbiddenCopy,
+  isForbiddenError,
+  isStaged,
+  isTerminalPhase,
+  isFailurePhase,
+  type UpdateRole,
+  type UpdateCheckResult,
+  type UpdateStatusResult,
+  type UpdatePhase,
+} from './update-host'
 // Plan B — the keep-daemon-on-quit flag lives in the daemon's settings
 // store. The old `get/set_keep_daemon_on_quit` Tauri commands proxied
 // `/cli/settings/{get,update}`; route them through the host-aware
@@ -28,6 +43,7 @@ export const GENERAL_MANIFEST: SettingEntry[] = [
   { id: 'general.daemon', section: 'general', label: 'K2SO Server', description: 'Background service that keeps agents running when the app is closed', keywords: ['server', 'daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
   { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep server running when the window is closed', description: 'When on, clicking the red close button hides the window and keeps the Agent & Companion server running. When off, the red button stops everything. Cmd+Q always closes everything.', keywords: ['daemon', 'server', 'agent', 'companion', 'close', 'red button', 'window', 'hide', 'background', 'persistent'] },
   { id: 'general.restart-host', section: 'general', label: 'Restart connected host', description: 'Restart the REMOTE machine you are connected to over K2 Connect', keywords: ['restart', 'reboot', 'remote', 'host', 'connect', 'server', 'daemon', 'bounce'] },
+  { id: 'general.update-host', section: 'general', label: 'Update connected host', description: 'Update the REMOTE machine you are connected to over K2 Connect', keywords: ['update', 'upgrade', 'remote', 'host', 'connect', 'server', 'daemon', 'version'] },
   { id: 'general.ai-assistant', section: 'general', label: 'AI Workspace Assistant', description: 'Local LLM for natural-language workspace operations (⌘L)', keywords: ['ai', 'assistant', 'llm', 'cmd+l', 'qwen', 'model', 'local', 'gguf'] },
   { id: 'general.model-status', section: 'general', label: 'Model Status', description: 'Current local LLM load state', keywords: ['model', 'llm', 'loaded', 'download'] },
   { id: 'general.download-model', section: 'general', label: 'Download Default Model', description: 'Fetch Qwen2.5-1.5B locally (~1.1GB)', keywords: ['download', 'model', 'qwen', 'local llm'] },
@@ -194,6 +210,12 @@ export function GeneralSection(): React.JSX.Element {
             never be mistaken for "restart my Mac" — the local-Mac restart
             lives in the K2SO Server (DaemonRow) above. */}
         <RestartHostRow />
+
+        {/* Update the REMOTE host you're connected to over K2 Connect (P4).
+            Renders ONLY when the active host is a remote so it can never be
+            mistaken for "update my Mac" — the local-Mac update lives in the
+            "App Version" auto-updater area at the top of this section. */}
+        <UpdateHostRow />
 
         {/* AI Workspace Assistant (Cmd+L) — core feature, belongs in General */}
         <LocalLLMSettings />
@@ -807,6 +829,295 @@ function RestartHostRow(): React.JSX.Element | null {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Update connected host (P4) ─────────────────────────────────────────
+// Lets a user UPDATE the REMOTE machine they're connected to over K2
+// Connect — NOT their local Mac. Directly analogous to RestartHostRow,
+// with the same #1 design goal: it is UNMISTAKABLE which machine this
+// acts on.
+//
+//   * The row renders ONLY when the active host is a REMOTE ConnectHost.
+//     For the local Mac it renders NOTHING — the local-Mac update lives in
+//     the "App Version" Tauri auto-updater area at the TOP of this section.
+//   * A prominent REMOTE badge + the host's display name + hostname sit on
+//     the row, and the confirm dialog NAMES the host explicitly.
+//
+// Flow (against the P3 daemon update routes, host-aware):
+//   1. "Check for updates" → POST daemon/update/check → {current, latest,
+//      available, …}. If available, show "Update available — c → l".
+//   2. "Download" → POST daemon/update/start {} → {job_id}, then poll
+//      GET daemon/update/status?job_id every ~1.5s, surfacing phase +
+//      download progress.
+//   3. phase==staged → "Install & restart <host>" → confirm (NAMES host) →
+//      POST daemon/update/apply {job_id}. The host then restarts on the new
+//      version; the ConnectionGate's soft-reconnect returns us when it's
+//      back. We do NOT manage reconnect.
+//   * failed / rolled-back are surfaced as a host-named message
+//     ("Update rolled back — <host> is still on <current>").
+//
+// Gating (identical to RestartHostRow):
+//   * serverSupports('remote-update') (min 0.39.33) — an OLDER remote that
+//     lacks the routes hides the control instead of 404ing.
+//   * Owner/Admin on the active host (host-aware auth/whoami role). The
+//     routes are owner-token-gated, so a 403 surfaces as a clear toast.
+function UpdateHostRow(): React.JSX.Element | null {
+  const activeHost = useConnectHostStore((s) => s.activeHost)
+  const supportsUpdate = useServerSupports('remote-update')
+  const confirm = useConfirmDialogStore((s) => s.confirm)
+  const addToast = useToastStore((s) => s.addToast)
+
+  const [role, setRole] = useState<UpdateRole | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [check, setCheck] = useState<UpdateCheckResult | null>(null)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [status, setStatus] = useState<UpdateStatusResult | null>(null)
+  const [applying, setApplying] = useState(false)
+
+  const isRemote = activeHost !== 'local'
+  const hostLabel = isRemote ? (activeHost.label?.trim() || activeHost.hostname) : ''
+  const hostname = isRemote ? activeHost.hostname : ''
+  const hostId = isRemote ? activeHost.id : ''
+
+  // Resolve the viewer's role on the ACTIVE remote host (host-aware
+  // whoami). Owner/Admin may update; a Member can't (the route 403s).
+  // Re-runs whenever the active remote changes. Also resets any in-flight
+  // check/job state so a host switch never shows a stale update.
+  useEffect(() => {
+    setCheck(null)
+    setJobId(null)
+    setStatus(null)
+    setApplying(false)
+    if (!isRemote) {
+      setRole(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const data = await daemonCliGet<{ role?: string; owner?: boolean }>('auth/whoami')
+        if (cancelled) return
+        const resolved: UpdateRole | null =
+          data.role === 'owner' || data.role === 'admin' || data.role === 'member'
+            ? data.role
+            : data.owner
+              ? 'owner'
+              : null
+        setRole(resolved)
+      } catch {
+        if (!cancelled) setRole(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [isRemote, hostId])
+
+  // Poll the update job status every ~1.5s while a job is running and not
+  // yet terminal. The ConnectionGate's soft-reconnect handles the host
+  // going away on restart, so we stop polling at any terminal phase.
+  const phase: UpdatePhase | null = status?.phase ?? null
+  useEffect(() => {
+    if (!jobId) return
+    if (isTerminalPhase(phase)) return
+    let cancelled = false
+    const tick = async (): Promise<void> => {
+      try {
+        const s = await daemonCliGet<UpdateStatusResult>('daemon/update/status', { job_id: jobId })
+        if (!cancelled) setStatus(s)
+      } catch (e) {
+        if (cancelled) return
+        const msg = e instanceof Error ? e.message : String(e)
+        // A connection-level error here is expected once the host starts
+        // restarting — let the ConnectionGate handle it; don't spam toasts.
+        // Any other error we surface once, then stop polling.
+        if (isForbiddenError(msg)) {
+          addToast(updateForbiddenCopy(hostLabel), 'error', 8000)
+          setJobId(null)
+        }
+      }
+    }
+    const id = window.setInterval(() => void tick(), 1500)
+    // Fire one immediately so the row updates without a 1.5s lag.
+    void tick()
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [jobId, phase, hostLabel, addToast])
+
+  // Surface a failure phase once, as a host-named toast.
+  useEffect(() => {
+    if (isFailurePhase(phase) && phase) {
+      addToast(updatePhaseCopy(phase, hostLabel, { current: check?.current }), 'error', 10000)
+    }
+  }, [phase, hostLabel, check?.current, addToast])
+
+  const { show, canUpdate } = updateHostVisibility({ isRemote, supportsUpdate, role })
+  if (!show) return null
+
+  const reportError = (e: unknown): void => {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (isForbiddenError(msg)) {
+      addToast(updateForbiddenCopy(hostLabel), 'error', 8000)
+    } else {
+      addToast(`Couldn't update ${hostLabel}: ${msg}`, 'error', 8000)
+    }
+  }
+
+  const handleCheck = async (): Promise<void> => {
+    setChecking(true)
+    setStatus(null)
+    setJobId(null)
+    try {
+      const result = await daemonCliPost<UpdateCheckResult>('daemon/update/check', {})
+      setCheck(result)
+      if (!result.available) {
+        addToast(`${hostLabel} is up to date (${result.current}).`, 'info', 6000)
+      }
+    } catch (e) {
+      reportError(e)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const handleDownload = async (): Promise<void> => {
+    try {
+      const { job_id } = await daemonCliPost<{ job_id: string }>('daemon/update/start', {})
+      setStatus({ phase: 'downloading' })
+      setJobId(job_id)
+    } catch (e) {
+      reportError(e)
+    }
+  }
+
+  const handleApply = async (): Promise<void> => {
+    if (!jobId) return
+    const copy = updateHostConfirmCopy(hostLabel, hostname, check?.latest ?? 'the new version')
+    const ok = await confirm({
+      title: copy.title,
+      message: copy.message,
+      confirmLabel: copy.confirmLabel,
+      destructive: true,
+    })
+    if (!ok) return
+    setApplying(true)
+    try {
+      await daemonCliPost('daemon/update/apply', { job_id: jobId })
+      // The host now installs + restarts; show the restarting line and let
+      // the ConnectionGate's soft-reconnect bring us back on the new version.
+      setStatus({ phase: 'restarting' })
+    } catch (e) {
+      reportError(e)
+      setApplying(false)
+    }
+  }
+
+  // Decide the action-area content from the current state.
+  const inProgress = jobId !== null && phase !== null && !isStaged(phase) && !isFailurePhase(phase)
+  const staged = isStaged(phase)
+
+  return (
+    <div
+      className="py-2.5 px-3 border border-amber-500/40 bg-amber-500/5"
+      data-settings-id="general.update-host"
+    >
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col min-w-0 flex-1">
+          <span className="flex items-center gap-2 min-w-0">
+            <span className="text-[8px] uppercase tracking-wider font-semibold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 flex-shrink-0">
+              Remote host
+            </span>
+            <span className="text-xs text-[var(--color-text-primary)] font-medium truncate">
+              {hostLabel}
+            </span>
+            <span className="text-[10px] text-[var(--color-text-muted)] font-mono truncate">
+              {hostname}
+            </span>
+          </span>
+          <span className="text-[10px] text-[var(--color-text-muted)] mt-1 leading-relaxed">
+            Update the machine you&apos;re connected to — <strong className="text-amber-300">not this Mac</strong>.
+            It briefly disconnects to install, then reconnects automatically.
+          </span>
+        </div>
+        <div className="flex-shrink-0">
+          {/* Idle (no job, not staged): Check / Download / Install button */}
+          {!inProgress && !staged && (
+            check?.available ? (
+              <button
+                onClick={() => void handleDownload()}
+                disabled={!canUpdate}
+                title={canUpdate ? undefined : 'Only the host owner or an admin can update this host'}
+                className="px-3 py-1 text-[11px] font-medium text-amber-200 bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 transition-colors no-drag cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Download
+              </button>
+            ) : (
+              <button
+                onClick={() => void handleCheck()}
+                disabled={!canUpdate || checking}
+                title={canUpdate ? undefined : 'Only the host owner or an admin can update this host'}
+                className="px-3 py-1 text-[11px] font-medium text-amber-200 bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 transition-colors no-drag cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {checking ? 'Checking…' : 'Check for updates'}
+              </button>
+            )
+          )}
+          {/* Staged: ready to install & restart the host */}
+          {staged && (
+            applying ? (
+              <span className="text-[11px] text-amber-300">Installing & restarting {hostLabel}…</span>
+            ) : (
+              <button
+                onClick={() => void handleApply()}
+                disabled={!canUpdate}
+                className="px-3 py-1 text-[11px] font-medium text-amber-200 bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 transition-colors no-drag cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Install & restart {hostLabel}
+              </button>
+            )
+          )}
+        </div>
+      </div>
+
+      {/* Update-available banner once a check reports one (pre-download) */}
+      {check?.available && !inProgress && !staged && (
+        <div className="mt-2 text-[11px] text-amber-200">
+          {updateAvailableCopy(hostLabel, check.current, check.latest)}
+        </div>
+      )}
+
+      {/* In-flight phase + download progress line */}
+      {(inProgress || staged) && phase && (
+        <div className="mt-2">
+          <div className="text-[11px] text-amber-200">
+            {updatePhaseCopy(phase, hostLabel, {
+              progress: status?.progress,
+              current: check?.current,
+            })}
+          </div>
+          {phase === 'downloading' && typeof status?.progress === 'number' && (
+            <div className="h-1.5 mt-1.5 bg-amber-500/20 overflow-hidden">
+              <div
+                className="h-full bg-amber-400 transition-all duration-300"
+                style={{ width: `${Math.max(0, Math.min(100, status.progress))}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Failure surface — host-named, host stays on its current version */}
+      {isFailurePhase(phase) && phase && (
+        <div className="mt-2 p-2 bg-red-500/5 border border-red-500/30">
+          <p className="text-[11px] text-red-400">
+            {updatePhaseCopy(phase, hostLabel, { current: check?.current })}
+          </p>
+        </div>
+      )}
     </div>
   )
 }

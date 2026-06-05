@@ -148,6 +148,25 @@ describe('serverSupports — remote, daemon-restart gating (min 0.39.32)', () =>
   })
 })
 
+describe('serverSupports — remote, remote-update gating (min 0.39.33)', () => {
+  it('false below min (older remote hides the Update-host control)', () => {
+    setActiveRemote('0.39.32')
+    expect(serverSupports('remote-update')).toBe(false)
+  })
+  it('true at exactly min', () => {
+    setActiveRemote('0.39.33')
+    expect(serverSupports('remote-update')).toBe(true)
+  })
+  it('true above min', () => {
+    setActiveRemote('0.40.0')
+    expect(serverSupports('remote-update')).toBe(true)
+  })
+  it('always true for the local Mac (the Tauri auto-updater owns local)', () => {
+    useConnectHostStore.setState({ activeHost: 'local', serverVersion: null })
+    expect(serverSupports('remote-update')).toBe(true)
+  })
+})
+
 describe('serverSupports — remote, roles gating (min 0.39.23)', () => {
   it('false below min', () => {
     setActiveRemote('0.39.22')

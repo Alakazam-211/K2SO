@@ -37,6 +37,11 @@ export const FEATURES = {
    *  (#651/#661). Gates the "Restart host" control so an OLDER remote (no
    *  route) hides the button instead of showing a dead one that 404s. */
   'daemon-restart': '0.39.32',
+  /** POST /cli/daemon/update/{check,start,apply} + GET
+   *  /cli/daemon/update/status — host-aware remote self-update (P3/P4).
+   *  Gates the "Update host" control so an OLDER remote (no routes) hides
+   *  it instead of dead-ending on a 404. */
+  'remote-update': '0.39.33',
 } as const
 
 export type FeatureKey = keyof typeof FEATURES
