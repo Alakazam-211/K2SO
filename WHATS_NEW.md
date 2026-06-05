@@ -3,6 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.24 — K2 Connect: open a workspace on the remote machine
+
+- **Open folders that live on the host.** When you're connected to another
+  machine, "New Workspace" now lets you browse and pick a folder on **that
+  machine** — an in-app folder browser that walks the remote's filesystem —
+  instead of your local file picker (which could only see this computer).
+- **Friendlier with out-of-date machines.** The app stays compatible with
+  hosts running an older K2SO, so you can always connect and sign in to
+  update one. And when a host is too old for a newer feature, the app now
+  tells you which version it needs instead of silently doing nothing.
+
 ## 0.39.23 — K2 Connect: roles + cleaner remote settings
 
 - **User roles for shared servers.** Connect users now have a role:
