@@ -1,0 +1,487 @@
+//! Unit tests for the Clone-to bundle engine.
+//!
+//! Each test builds a synthetic workspace + a synthetic
+//! `<home>/.claude/projects/<slug>/` under a fresh temp dir and points
+//! [`CloneOptions::home_override`] at it, so the real home is NEVER
+//! touched and the `~/.claude/...` resolution is fully hermetic. The slug
+//! is derived from the canonicalized temp PROJECT path, exactly as the
+//! engine computes it.
+
+use super::*;
+use crate::chat_history::claude_project_hash;
+use std::collections::HashSet;
+use std::fs;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+
+// ── temp dir helper (no top-level tempfile dep; mirrors app_settings) ──
+struct TempDir {
+    path: PathBuf,
+}
+impl TempDir {
+    fn new(prefix: &str) -> Self {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // also mix a per-call counter so two temp dirs in one test differ.
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}-{n}"));
+        fs::create_dir_all(&path).expect("create tempdir");
+        Self { path }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn write(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("mkdir -p");
+    }
+    fs::write(path, contents).expect("write file");
+}
+
+/// A fully-wired synthetic agent: a workspace tree + a hermetic
+/// `<home>/.claude/projects/<slug>/`.
+struct Fixture {
+    _root: TempDir,
+    project: PathBuf,
+    home: PathBuf,
+    slug: String,
+}
+
+/// Build the synthetic workspace described in the PRD test plan.
+fn build_fixture() -> Fixture {
+    let root = TempDir::new("k2so-clone-test");
+    let project = root.path().join("workspace");
+    let home = root.path().join("home");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&home).unwrap();
+
+    // ── workspace tree ──────────────────────────────────────────────
+    // a real project file
+    write(&project.join("README.md"), "# My Agent\nproject docs\n");
+    write(&project.join("src/main.rs"), "fn main() {}\n");
+    // .k2so config (benign — must NOT be scrubbed)
+    write(
+        &project.join(".k2so/PROJECT.md"),
+        "# Project\nfocus-group: blue\n",
+    );
+    // a secret env file with a JWT-shaped token
+    write(
+        &project.join(".env.local"),
+        "TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payloadpayloadpayload\n",
+    );
+    // bulk: node_modules at workspace root
+    write(
+        &project.join("node_modules/left-pad/index.js"),
+        "module.exports = () => {};\n",
+    );
+    // .auth/ dir (secret + bulk)
+    write(&project.join(".auth/session.json"), "{\"cookie\":\"abc\"}\n");
+
+    // nested git repo: its own .git, a tracked file, and its own node_modules
+    write(&project.join("nested/.git/HEAD"), "ref: refs/heads/main\n");
+    write(&project.join("nested/.git/config"), "[core]\n");
+    write(&project.join("nested/app.js"), "console.log('hi');\n");
+    write(
+        &project.join("nested/node_modules/dep/index.js"),
+        "module.exports = 1;\n",
+    );
+
+    // ── hermetic ~/.claude/projects/<slug>/ ─────────────────────────
+    // Slug is computed from the CANONICAL project path (the engine
+    // canonicalizes), so canonicalize here too.
+    let canon = fs::canonicalize(&project).unwrap();
+    let slug = claude_project_hash(&canon.to_string_lossy());
+    let slug_dir = home.join(".claude").join("projects").join(&slug);
+    fs::create_dir_all(&slug_dir).unwrap();
+
+    // memory dir (MEMORY.md + every *.md live INSIDE memory/)
+    write(&slug_dir.join("memory/MEMORY.md"), "## Memory Index\n");
+    write(&slug_dir.join("memory/a.md"), "memory a\n");
+    write(&slug_dir.join("memory/b.md"), "memory b\n");
+
+    // two session jsonl with DIFFERENT mtimes
+    let old_session = slug_dir.join("11111111-1111-1111-1111-111111111111.jsonl");
+    let new_session = slug_dir.join("22222222-2222-2222-2222-222222222222.jsonl");
+    write(&old_session, "{\"type\":\"old\"}\n");
+    write(&new_session, "{\"type\":\"new\"}\n");
+    set_mtime(&old_session, 1_000_000);
+    set_mtime(&new_session, 2_000_000); // newer
+
+    // a worktree variant dir with its own session (only picked under
+    // include_all_history)
+    let wt_dir = home
+        .join(".claude")
+        .join("projects")
+        .join(format!("{slug}-feature-x"));
+    fs::create_dir_all(&wt_dir).unwrap();
+    write(
+        &wt_dir.join("33333333-3333-3333-3333-333333333333.jsonl"),
+        "{\"type\":\"worktree\"}\n",
+    );
+
+    // The user-level credentials file — must NEVER be enumerated.
+    write(
+        &home.join(".claude").join(".credentials.json"),
+        "{\"token\":\"super-secret-user-auth\"}\n",
+    );
+
+    Fixture {
+        _root: root,
+        project: canon,
+        home,
+        slug,
+    }
+}
+
+/// Set an mtime (seconds since epoch) on a file so "newest mtime"
+/// selection is deterministic regardless of write order/timing.
+fn set_mtime(path: &Path, secs: u64) {
+    let ft = filetime_secs(secs);
+    set_file_mtime(path, ft);
+}
+
+// Minimal mtime setter via libc utimes (no `filetime` crate dep).
+#[cfg(unix)]
+fn set_file_mtime(path: &Path, secs: u64) {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    let tv = libc::timeval {
+        tv_sec: secs as libc::time_t,
+        tv_usec: 0,
+    };
+    let times = [tv, tv]; // atime, mtime
+    let rc = unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
+    assert_eq!(rc, 0, "utimes failed for {}", path.display());
+}
+#[cfg(unix)]
+fn filetime_secs(secs: u64) -> u64 {
+    secs
+}
+
+fn opts(home: &Path) -> CloneOptions {
+    CloneOptions {
+        home_override: Some(home.to_path_buf()),
+        ..Default::default()
+    }
+}
+
+fn rel_paths(inv: &CloneInventory, class: DestinationClass) -> HashSet<String> {
+    inv.entries
+        .iter()
+        .filter(|e| e.class == class)
+        .map(|e| e.rel_path.clone())
+        .collect()
+}
+
+// ── tests ───────────────────────────────────────────────────────────
+
+#[test]
+fn slug_and_locations_resolve_at_slug_dir() {
+    let fx = build_fixture();
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+
+    // slug computed from the canonical project path
+    assert_eq!(inv.slug, fx.slug, "slug must match claude_project_hash");
+    assert_eq!(inv.project_path, fx.project.to_string_lossy());
+
+    // memory resolved
+    let mem = rel_paths(&inv, DestinationClass::Memory);
+    assert!(mem.contains("MEMORY.md"), "MEMORY.md present, got {mem:?}");
+    assert!(mem.contains("a.md"), "memory/a.md present");
+    assert!(mem.contains("b.md"), "memory/b.md present");
+    assert_eq!(mem.len(), 3, "exactly MEMORY.md + a.md + b.md");
+
+    // sessions resolved under the slug dir (rel includes the slug prefix)
+    let sessions = rel_paths(&inv, DestinationClass::Session);
+    assert_eq!(sessions.len(), 1, "live-only → one session, got {sessions:?}");
+}
+
+#[test]
+fn env_local_scrubbed_by_default_and_listed() {
+    let fx = build_fixture();
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+
+    let ws = rel_paths(&inv, DestinationClass::Workspace);
+    assert!(
+        !ws.contains(".env.local"),
+        ".env.local must be scrubbed, got {ws:?}"
+    );
+    assert!(
+        inv.scrubbed_secrets.contains(&".env.local".to_string()),
+        "scrubbed list must record .env.local by rel path, got {:?}",
+        inv.scrubbed_secrets
+    );
+    // benign .k2so config is NOT scrubbed
+    assert!(
+        ws.contains(".k2so/PROJECT.md"),
+        "benign .k2so config kept, got {ws:?}"
+    );
+}
+
+#[test]
+fn carry_secrets_includes_env_local() {
+    let fx = build_fixture();
+    let mut o = opts(&fx.home);
+    o.carry_secrets = true;
+    let inv = inventory(&fx.project.to_string_lossy(), o).unwrap();
+
+    let ws = rel_paths(&inv, DestinationClass::Workspace);
+    assert!(
+        ws.contains(".env.local"),
+        "carry_secrets must include .env.local, got {ws:?}"
+    );
+    assert!(
+        inv.scrubbed_secrets.is_empty(),
+        "nothing scrubbed when carrying, got {:?}",
+        inv.scrubbed_secrets
+    );
+}
+
+#[test]
+fn node_modules_excluded_workspace_and_nested_but_git_kept() {
+    let fx = build_fixture();
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+    let ws = rel_paths(&inv, DestinationClass::Workspace);
+
+    // node_modules excluded at workspace root
+    assert!(
+        !ws.iter().any(|p| p.starts_with("node_modules/")),
+        "workspace node_modules excluded, got {ws:?}"
+    );
+    // ...and inside the nested repo
+    assert!(
+        !ws.iter().any(|p| p.starts_with("nested/node_modules/")),
+        "nested node_modules excluded, got {ws:?}"
+    );
+    // nested repo working tree IS present
+    assert!(ws.contains("nested/app.js"), "nested tracked file kept");
+    // nested .git IS preserved (direct copy, not a git op)
+    assert!(
+        ws.contains("nested/.git/HEAD"),
+        "nested .git/HEAD must be kept, got {ws:?}"
+    );
+    assert!(
+        ws.contains("nested/.git/config"),
+        "nested .git/config must be kept, got {ws:?}"
+    );
+    // .auth/ excluded (bulk + secret)
+    assert!(
+        !ws.iter().any(|p| p.starts_with(".auth/")),
+        ".auth/ excluded, got {ws:?}"
+    );
+}
+
+#[test]
+fn live_only_picks_newest_session() {
+    let fx = build_fixture();
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+    let sessions = rel_paths(&inv, DestinationClass::Session);
+    assert_eq!(sessions.len(), 1);
+    let only = sessions.iter().next().unwrap();
+    assert!(
+        only.ends_with("22222222-2222-2222-2222-222222222222.jsonl"),
+        "live = newest mtime session, got {only}"
+    );
+    assert!(
+        only.starts_with(&fx.slug),
+        "session rel path keeps the slug-dir prefix, got {only}"
+    );
+}
+
+#[test]
+fn include_all_history_picks_both_and_worktree() {
+    let fx = build_fixture();
+    let mut o = opts(&fx.home);
+    o.include_all_history = true;
+    let inv = inventory(&fx.project.to_string_lossy(), o).unwrap();
+    let sessions = rel_paths(&inv, DestinationClass::Session);
+    assert_eq!(
+        sessions.len(),
+        3,
+        "all-history = 2 slug-dir sessions + 1 worktree, got {sessions:?}"
+    );
+    assert!(sessions
+        .iter()
+        .any(|p| p.ends_with("11111111-1111-1111-1111-111111111111.jsonl")));
+    assert!(sessions
+        .iter()
+        .any(|p| p.ends_with("22222222-2222-2222-2222-222222222222.jsonl")));
+    // worktree variant keeps its `<slug>-<branch>/` prefix
+    assert!(
+        sessions
+            .iter()
+            .any(|p| p.starts_with(&format!("{}-feature-x/", fx.slug))),
+        "worktree session under <slug>-feature-x/, got {sessions:?}"
+    );
+}
+
+#[test]
+fn credentials_json_never_enumerated() {
+    let fx = build_fixture();
+    let mut o = opts(&fx.home);
+    o.carry_secrets = true; // even when carrying, this user-level file is out
+    let inv = inventory(&fx.project.to_string_lossy(), o).unwrap();
+
+    let all_paths: Vec<&String> = inv.entries.iter().map(|e| &e.rel_path).collect();
+    assert!(
+        !all_paths.iter().any(|p| p.contains(".credentials.json")),
+        "~/.claude/.credentials.json must never be enumerated, got {all_paths:?}"
+    );
+    assert!(
+        !inv.scrubbed_secrets
+            .iter()
+            .any(|p| p.contains(".credentials.json")),
+        ".credentials.json must not even appear in the scrubbed list"
+    );
+}
+
+#[test]
+fn manifest_entries_have_correct_classes() {
+    let fx = build_fixture();
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+    let m = inv.manifest(&opts(&fx.home), "2026-06-05T00:00:00Z".to_string());
+
+    assert_eq!(m.source_slug, fx.slug);
+    assert_eq!(m.created_at, "2026-06-05T00:00:00Z");
+    assert!(!m.carry_secrets);
+    assert!(!m.include_all_history);
+
+    // every class present
+    let has = |c: DestinationClass| m.entries.iter().any(|e| e.class == c);
+    assert!(has(DestinationClass::Workspace));
+    assert!(has(DestinationClass::Memory));
+    assert!(has(DestinationClass::Session));
+
+    // re-supply: scrubbed secret recorded + standing re-auth items present
+    assert!(m.reauth.secret_paths.contains(&".env.local".to_string()));
+    assert!(
+        m.reauth.items.iter().any(|i| i.contains("Claude Code auth")),
+        "re-auth checklist includes remote Claude Code auth"
+    );
+    assert!(m.reauth.items.iter().any(|i| i.contains("MCP")));
+}
+
+#[test]
+fn bundle_round_trips_secrets_absent_by_default() {
+    let fx = build_fixture();
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+
+    let out = fx._root.path().join("bundle.tar.gz");
+    let built = build_bundle(
+        &inv,
+        &opts(&fx.home),
+        "2026-06-05T00:00:00Z".to_string(),
+        &out,
+    )
+    .unwrap();
+    assert!(built.exists(), "bundle written");
+
+    // read manifest back
+    let m = read_manifest_from_bundle(&out).unwrap();
+    assert_eq!(m.source_slug, fx.slug);
+
+    // untar into a fresh dir and inspect the layout
+    let extract = fx._root.path().join("extract");
+    fs::create_dir_all(&extract).unwrap();
+    let names = untar(&out, &extract);
+
+    assert!(names.contains("manifest.json"), "manifest at root");
+    assert!(
+        names.iter().any(|n| n == "workspace/README.md"),
+        "workspace file under workspace/, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "memory/MEMORY.md"),
+        "memory under memory/, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("sessions/")),
+        "session under sessions/, got {names:?}"
+    );
+    // nested .git preserved through the bundle
+    assert!(names.iter().any(|n| n == "workspace/nested/.git/HEAD"));
+    // secrets absent by default
+    assert!(
+        !names.iter().any(|n| n.ends_with(".env.local")),
+        ".env.local must be absent from the bundle, got {names:?}"
+    );
+    // node_modules absent
+    assert!(!names.iter().any(|n| n.contains("node_modules")));
+
+    // the extracted README content matches
+    let readme = extract.join("workspace/README.md");
+    let body = fs::read_to_string(readme).unwrap();
+    assert!(body.contains("project docs"));
+}
+
+#[test]
+fn bundle_carries_secrets_when_opted_in() {
+    let fx = build_fixture();
+    let mut o = opts(&fx.home);
+    o.carry_secrets = true;
+    let inv = inventory(&fx.project.to_string_lossy(), o.clone()).unwrap();
+    let out = fx._root.path().join("bundle-carry.tar.gz");
+    build_bundle(&inv, &o, "2026-06-05T00:00:00Z".to_string(), &out).unwrap();
+
+    let extract = fx._root.path().join("extract-carry");
+    fs::create_dir_all(&extract).unwrap();
+    let names = untar(&out, &extract);
+    assert!(
+        names.iter().any(|n| n == "workspace/.env.local"),
+        "carry_secrets bundles .env.local, got {names:?}"
+    );
+}
+
+/// Untar a `.tar.gz` into `dest`, returning the set of archived entry
+/// names (`/`-joined, relative to the archive root).
+fn untar(bundle: &Path, dest: &Path) -> HashSet<String> {
+    let f = fs::File::open(bundle).unwrap();
+    let dec = flate2::read::GzDecoder::new(f);
+    let mut ar = tar::Archive::new(dec);
+    let mut names = HashSet::new();
+    for entry in ar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_path_buf();
+        names.insert(path.to_string_lossy().replace('\\', "/"));
+        let out = dest.join(&path);
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        fs::write(&out, &buf).unwrap();
+    }
+    names
+}
+
+// ── direct credential-scanner unit checks ──────────────────────────
+#[test]
+fn credential_scanner_catches_expected_patterns() {
+    use super::scrub::content_has_credential_str as scan;
+    assert!(scan("x = eyJabcdefghijklmnopqrstuvwxyz0123"), "JWT");
+    assert!(scan("GH=ghp_abcdefghijklmnopqrstuvwxyz12"), "ghp_ token");
+    assert!(scan("key: ghs_ABCDEFGHIJKLMNOPQRSTuvwx9999"), "ghs_ token");
+    assert!(scan("role = service_role"), "service_role");
+    assert!(scan("-----BEGIN PRIVATE KEY-----"), "private key");
+    assert!(scan("password: hunter2"), "password assignment");
+    assert!(scan("secret = topsecret"), "secret assignment");
+    assert!(scan("api_key: abc123"), "api_key assignment");
+    assert!(scan("API-KEY = abc123"), "api-key case/sep variant");
+
+    // negatives
+    assert!(!scan("just some prose about passwords in general"));
+    assert!(!scan("the password field was empty:"), "empty value → no hit");
+    assert!(!scan("gh_short_token"), "gh token below length floor");
+    assert!(!scan("focus-group: blue"), "benign k2so config");
+}
