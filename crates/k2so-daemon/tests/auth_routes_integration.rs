@@ -1015,9 +1015,12 @@ fn futures_block<F: std::future::Future>(fut: F) -> F::Output {
 //   - the route is in `post_allowed` (a POST is dispatched, not top-level
 //     405'd),
 //   - a GET is 405 (require_post),
-//   - a POST without the owner token is 403 (require_owner),
-//   - a POST with a connect-user SESSION token is 403 (owner-only — the
-//     most privileged op rejects session tokens),
+//   - a POST without/with-garbage token is 403 (require_owner_or_admin),
+//   - a POST with a Member connect-user SESSION token is 403 (Member is
+//     barred — restarting needs the owner-or-admin tier),
+//   - a POST with an Owner- OR Admin-role SESSION token is 200 (#660: a
+//     remote user restarting the host OVER K2 Connect authorizes with a
+//     session token, since the on-box owner token never leaves the box),
 //   - a POST with the owner token is 200 with `"restarting":true`
 //     (handler reached; NO real restart fires thanks to the None seam).
 // ─────────────────────────────────────────────────────────────────────
@@ -1071,15 +1074,14 @@ async fn daemon_restart_no_token_is_403() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_restart_rejects_connect_user_session() {
+async fn daemon_restart_rejects_member_session() {
     let _g = lock();
     with_temp_home(|| {
-        // A connect-user (even an Admin) reaches the daemon THROUGH the
-        // tunnel and must NEVER be able to restart the host — restarting is
-        // owner-token-only. require_owner uses token_is_owner, so a session
-        // token (which passes the general token_ok gate) is rejected here.
+        // A Member connect-user reaches the daemon THROUGH the tunnel but is
+        // NOT in the owner-or-admin tier, so it must NOT be able to restart
+        // the host. require_owner_or_admin maps the session token → Member
+        // role → can_manage_users == false → 403.
         let member = seed_user_session("restart_member", "password123", Role::Member);
-        let admin = seed_user_session("restart_admin", "password123", Role::Admin);
         let d = futures_block(test_harness::start(OWNER_TOKEN));
 
         let r = http(
@@ -1090,9 +1092,23 @@ async fn daemon_restart_rejects_connect_user_session() {
         );
         assert_eq!(
             r.status, 403,
-            "member session must NOT restart the daemon (owner-only); body={}",
+            "member session must NOT restart the daemon (owner-or-admin only); body={}",
             r.body
         );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_restart_admin_session_gets_200_would_restart_without_firing() {
+    let _g = lock();
+    with_temp_home(|| {
+        // K2SO #660: an Admin-role connect-user session is the canonical
+        // remote-reboot path — a user restarting the host OVER K2 Connect
+        // authenticates with a session token, never the on-box owner token.
+        // require_owner_or_admin authorizes it; the None shutdown_tx seam
+        // means the 200 ack lands WITHOUT firing a real restart.
+        let admin = seed_user_session("restart_admin", "password123", Role::Admin);
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
 
         let r = http(
             d.port,
@@ -1101,8 +1117,42 @@ async fn daemon_restart_rejects_connect_user_session() {
             Some(""),
         );
         assert_eq!(
-            r.status, 403,
-            "admin session must NOT restart the daemon (owner-token-only); body={}",
+            r.status, 200,
+            "admin session POST /cli/daemon/restart must reach the handler (200); body={}",
+            r.body
+        );
+        assert!(
+            r.body.contains("\"restarting\":true") && r.body.contains("\"ok\":true"),
+            "admin 200 body must be the would-restart ack; body={}",
+            r.body
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_restart_owner_role_session_gets_200_would_restart_without_firing() {
+    let _g = lock();
+    with_temp_home(|| {
+        // An Owner-ROLE connect-user session (distinct from the on-box owner
+        // TOKEN) also authorizes the remote restart. Same None seam → 200 ack
+        // without any real restart.
+        let owner_sess = seed_user_session("restart_owner", "password123", Role::Owner);
+        let d = futures_block(test_harness::start(OWNER_TOKEN));
+
+        let r = http(
+            d.port,
+            "POST",
+            &format!("/cli/daemon/restart?token={owner_sess}"),
+            Some(""),
+        );
+        assert_eq!(
+            r.status, 200,
+            "owner-role session POST /cli/daemon/restart must reach the handler (200); body={}",
+            r.body
+        );
+        assert!(
+            r.body.contains("\"restarting\":true") && r.body.contains("\"ok\":true"),
+            "owner-role 200 body must be the would-restart ack; body={}",
             r.body
         );
     });

@@ -867,6 +867,40 @@ cmd_daemon_stop() {
     echo "Daemon stopped."
 }
 
+# Poll <base>/boot-status until phase=ready (or timeout). On success prints
+# "Daemon back up on <version>" and returns 0; on timeout prints a message
+# and returns 1. boot-status is UNAUTHENTICATED, so no token is needed.
+# Args: $1 = base URL (no trailing slash). Polls every ~2s up to ~60s.
+_daemon_wait_ready() {
+    local base="$1"
+    local attempt=0 max_attempts=30 status_json phase version
+    # Give the supervisor a moment to tear down the old process before the
+    # first poll, so we don't immediately see the OUTGOING daemon as ready.
+    sleep 2
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        status_json=$(curl -s "${base}/boot-status" \
+            --connect-timeout 3 --max-time 5 2>/dev/null) || true
+        case "$status_json" in
+            *'"phase":"ready"'*|*'"phase": "ready"'*)
+                version=$(printf '%s' "$status_json" \
+                    | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                    | head -1 \
+                    | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+                if [ -n "$version" ]; then
+                    echo "Daemon back up on ${version}"
+                else
+                    echo "Daemon back up (version unknown)"
+                fi
+                return 0
+                ;;
+        esac
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    echo "daemon restart --wait: timed out after ~60s waiting for ${base} to report phase=ready" >&2
+    return 1
+}
+
 cmd_daemon_restart() {
     # Two modes:
     #   LOCAL  (default): launchctl kickstart the local launch agent.
@@ -875,13 +909,14 @@ cmd_daemon_restart() {
     #                     no GUI required. The remote route is supervisor-
     #                     agnostic — it triggers graceful shutdown and the
     #                     remote supervisor (launchd/systemd) respawns it.
-    local host="" token=""
+    local host="" token="" wait=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --host)  host="${2:-}";  shift 2 ;;
             --host=*) host="${1#--host=}"; shift ;;
             --token) token="${2:-}"; shift 2 ;;
             --token=*) token="${1#--token=}"; shift ;;
+            --wait) wait=1; shift ;;
             *) echo "daemon restart: unknown argument: $1" >&2; exit 2 ;;
         esac
     done
@@ -915,6 +950,9 @@ cmd_daemon_restart() {
             *'"restarting":true'*)
                 echo "Remote daemon at ${base} is restarting."
                 echo "$resp"
+                if [ "$wait" = "1" ]; then
+                    _daemon_wait_ready "$base" || exit 1
+                fi
                 return 0
                 ;;
             *'"error"'*|*'403'*|*'405'*)
@@ -946,6 +984,10 @@ cmd_daemon_restart() {
         echo "launchctl kickstart: $err" >&2
     fi
     echo "Daemon restarted."
+    if [ "$wait" = "1" ]; then
+        # Local daemon's own base URL (PORT is resolved at CLI startup).
+        _daemon_wait_ready "$BASE_URL" || exit 1
+    fi
 }
 
 cmd_daemon_log() {
@@ -4671,11 +4713,15 @@ EOF
             *)
                 echo "Usage: k2so daemon <status|start|stop|restart|log|uninstall|companion>" >&2
                 echo "" >&2
-                echo "  restart [--host <base-url>] [--token <owner-token>]" >&2
+                echo "  restart [--host <base-url>] [--token <token>] [--wait]" >&2
                 echo "    Default: restart the LOCAL daemon (launchctl kickstart)." >&2
                 echo "    --host:  restart a REMOTE daemon with no GUI by POSTing" >&2
                 echo "             <base-url>/cli/daemon/restart (e.g. --host https://<sub>.k2.dev)." >&2
-                echo "             Owner-only; --token defaults to ~/.k2so/daemon.token when omitted." >&2
+                echo "             Authorizes with the owner token OR an Owner/Admin connect-user" >&2
+                echo "             session token; --token defaults to ~/.k2so/daemon.token." >&2
+                echo "    --wait:  after the restart is accepted, poll <base>/boot-status every" >&2
+                echo "             ~2s up to ~60s until phase=ready, then print the version it" >&2
+                echo "             came back on. Timeout → message + non-zero exit." >&2
                 exit 1
                 ;;
         esac

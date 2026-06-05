@@ -933,17 +933,22 @@ async fn handle_one_request(
         // a GET through on POST-allowlisted routes, and a curl GET must
         // never bounce the daemon (feedback_post_only_route_guards).
         //
-        // Auth: strict `require_owner` (OWNER-ONLY). Restarting is the most
-        // privileged op — a connect-user session token (which reaches the
-        // daemon THROUGH the tunnel) is rejected with 403.
+        // Auth: `require_owner_or_admin` (K2SO #660). The OWNER token still
+        // authorizes (the on-box host owner). ADDITIONALLY a connect-user
+        // SESSION whose role is Owner or Admin authorizes — that is the ONLY
+        // way a remote user restarting the host OVER K2 Connect can be
+        // authorized, since the remote user never holds the on-box owner
+        // token. A Member session (or an unknown/missing token) is rejected
+        // with 403. Exactly one 403 is written on rejection (the guard owns
+        // the response path).
         "/cli/daemon/restart" => {
             if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
                 return DispatchOutcome::Done;
             }
-            if !super::http::require_owner(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+            if !super::http::require_owner_or_admin(&mut *stream, &mut buf, &query, state.token.as_str()).await {
                 return DispatchOutcome::Done;
             }
-            // No JSON body — owner token rides the query string. Drain to flush.
+            // No JSON body — token rides the query string. Drain to flush.
             let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
 
             // Write + FLUSH the 200 BEFORE anything can trigger shutdown, so

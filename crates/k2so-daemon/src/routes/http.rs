@@ -304,6 +304,44 @@ pub(crate) async fn require_owner(
     false
 }
 
+/// OWNER-or-ADMIN authorization guard (K2SO #660). Returns `true` when the
+/// request is authorized to perform a privileged HOST-level operation —
+/// either the owner token is presented, OR a live connect-user session whose
+/// role is `Owner` or `Admin` (`can_manage_users`). A `Member` session (or an
+/// unknown/missing/empty token) is rejected with `403 Forbidden`, after which
+/// the caller MUST early-return.
+///
+/// Why this is distinct from [`require_owner`]: restarting the host over K2
+/// Connect can ONLY be authorized with a connect-user SESSION token (the
+/// remote user never holds the on-box owner token). [`require_owner`] would
+/// 403 that legitimate request. This guard broadens authorization to the same
+/// owner-or-admin tier [`require_manage`] uses for user management, but in a
+/// boolean (non-role-returning) shape that mirrors [`require_owner`] so the
+/// restart arm reads as a single drop-in swap. Exactly ONE response is
+/// written: success returns without touching the stream, rejection drains the
+/// peeked request and sends ONE `403`.
+pub(crate) async fn require_owner_or_admin(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+    query: &str,
+    owner_token: &str,
+) -> bool {
+    match actor_role(query, owner_token) {
+        Some(role) if k2so_core::connect_users::can_manage_users(role) => true,
+        _ => {
+            let _ = stream.read(buf).await;
+            send_response(
+                stream,
+                "403 Forbidden",
+                "application/json",
+                r#"{"error":"invalid or missing token"}"#,
+            )
+            .await;
+            false
+        }
+    }
+}
+
 /// Read the body of a POST request. Consumes the request line and
 /// headers from the peeked stream, then returns whatever bytes
 /// follow the `\r\n\r\n` separator up to the Content-Length header.
