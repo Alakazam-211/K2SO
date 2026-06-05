@@ -29,8 +29,13 @@ if [ -z "${K2SO_PROJECT_PATH:-}" ]; then
         _dir="$(dirname "$_dir")"
     done
     if [ -z "$_found" ]; then
-        # May be inside a git worktree — resolve to main repo root
-        _main_root=$(git -C "$(pwd)" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/.git$||')
+        # May be inside a git worktree — resolve to main repo root.
+        # `|| true` is REQUIRED: from a non-git CWD, `git rev-parse` exits 128,
+        # and under `set -euo pipefail` that failing command substitution would
+        # abort the entire script before it ever reads the daemon port — a
+        # silent exit 128 (GH #16). Swallow it so a non-git CWD just leaves
+        # _main_root empty and we fall back to $PWD as PROJECT.
+        _main_root=$(git -C "$(pwd)" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/.git$||' || true)
         if [ -n "$_main_root" ] && [ -d "$_main_root/.k2so" ]; then
             _found="$_main_root"
         fi
