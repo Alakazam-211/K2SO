@@ -3,6 +3,22 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.23 — K2 Connect: roles + cleaner remote settings
+
+- **User roles for shared servers.** Connect users now have a role:
+  **Owner**, **Admin**, or **Member**. The owner can promote trusted people
+  to help run the server (including handing off ownership); admins can add
+  users and enable/disable them; members just connect and use it. Removing
+  users and changing roles stay owner-only.
+- **Cleaner settings when viewing another machine.** The K2 Connect
+  *tunneling* controls — k2.dev sign-in, subdomain, start/stop — now hide
+  while you're connected to a remote host, since those belong to the machine
+  that owns the daemon. Managing **that** server's users still works from
+  right there.
+- **`k2so` works from any folder.** Fixed a bug where running the `k2so`
+  command (for example, an agent-to-agent message) from a directory that
+  isn't a git repository would exit silently with no output.
+
 ## 0.39.22 — Onboarding fixes + remote settings clarity
 
 - **Agents spawn out of the box.** The background daemon can now find
