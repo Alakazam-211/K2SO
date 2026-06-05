@@ -70,6 +70,25 @@ const REMOTE_HEALTH_POLL_MS = 4000
 /** Upper bound for the exponential reconnect backoff once a connected
  *  remote drops — avoids hammering a flaky tunnel. */
 const REMOTE_RECONNECT_MAX_MS = 8000
+/** How many CONSECUTIVE failed health-polls a connected remote must rack
+ *  up before we call it a real drop. A single slow/blipped poll over a
+ *  higher-latency tunnel must NOT trip the reconnect indicator while the
+ *  data WS is still streaming ("says dropped but the screen is moving").
+ *  Below this threshold the gate stays 'connected' with no banner. */
+const REMOTE_DROP_THRESHOLD = 2
+/** Per-poll /boot-status timeout for a REMOTE health-poll. Looser than
+ *  the local 2s because a tunnel round-trip is inherently higher-latency;
+ *  a tight 2s would flag transient slowness as a drop. */
+const REMOTE_BOOT_STATUS_TIMEOUT_MS = 4000
+
+/** Debounce rule for a connected-remote drop: given the running count of
+ *  CONSECUTIVE failed health-polls, should we surface the reconnect banner
+ *  yet? Pulled out as a pure fn so the threshold behaviour (N-1 fails →
+ *  no banner; Nth → banner) is unit-testable without the React/Tauri-bound
+ *  effect. Used by the poll loop below. */
+export function shouldSurfaceRemoteDrop(consecutiveFails: number): boolean {
+  return consecutiveFails >= REMOTE_DROP_THRESHOLD
+}
 
 /** The gate's verdict for a single poll. */
 type GateDecision =
@@ -167,17 +186,19 @@ async function getAppVersion(): Promise<string | null> {
   }
 }
 
-/** Hit the daemon's /boot-status with a short per-attempt timeout.
- *  Returns the parsed status, or null on any error / non-2xx (covers a
- *  pre-0.39.5 daemon's 404, network error, timeout, missing port file). */
-async function fetchBootStatus(): Promise<DaemonBootStatus | null> {
+/** Hit the daemon's /boot-status with a per-attempt timeout. Returns the
+ *  parsed status, or null on any error / non-2xx (covers a pre-0.39.5
+ *  daemon's 404, network error, timeout, missing port file). `timeoutMs`
+ *  is looser for a remote health-poll than for a local boot (a tunnel
+ *  round-trip is higher-latency — see REMOTE_BOOT_STATUS_TIMEOUT_MS). */
+async function fetchBootStatus(timeoutMs = 2000): Promise<DaemonBootStatus | null> {
   try {
     // Host-aware (K2 Connect step #1): polls the ACTIVE host's
     // /boot-status. For 'local' this is byte-identical to before
     // (host === '127.0.0.1').
     const creds = await getDaemonWs()
     const resp = await fetch(`${daemonHttpBase(creds)}/boot-status`, {
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (!resp.ok) {
       // 404 ⇒ pre-0.39.5 daemon (no /boot-status route). Re-read the port
@@ -216,6 +237,14 @@ export function ConnectionGate(): React.ReactElement {
   // host-key that has reached 'accept' at least once. Local is never
   // soft-reconnected (the blank is correct for the auto-update race).
   const [connectedOnceKey, setConnectedOnceKey] = useState<string | null>(null)
+  // K2 Connect step #4 (debounced drop): a single slow/blipped health-poll
+  // over a higher-latency tunnel must NOT surface anything while the data
+  // WS is still streaming. We only flip this true after
+  // REMOTE_DROP_THRESHOLD CONSECUTIVE failed polls; the gate then renders
+  // the small non-blocking "reconnecting" banner. Reset to false on the
+  // next accepting poll. Distinct from `decision` so a sub-threshold blip
+  // leaves connectionStatus 'connected' and the App fully interactive.
+  const [reconnecting, setReconnecting] = useState(false)
 
   // K2 Connect step #1: the gate is host-aware. `hostKey` changes when
   // the user picks a different daemon in the top-bar switcher → the
@@ -275,11 +304,17 @@ export function ConnectionGate(): React.ReactElement {
     // Has this host reached 'accept' at least once during THIS effect
     // run? Gates the post-accept remote health-poll + soft backoff.
     let acceptedOnce = false
+    // Consecutive FAILED health-polls since the last accept (closure-local
+    // so it survives across ticks but resets per host switch). Debounces a
+    // remote drop: a single blip is swallowed; only >= REMOTE_DROP_THRESHOLD
+    // in a row counts as a genuine reconnect. Reset to 0 on every accept.
+    let consecutiveFails = 0
 
     // A host switch must re-poll from scratch: drop any prior accept so
     // the overlay shows while the new host is contacted.
     setDecision({ kind: 'wait', reason: 'switching-host' })
     setAttempts(0)
+    setReconnecting(false)
 
     const ensurePolicy = async (): Promise<AcceptancePolicy> => {
       // Select the policy by active-host KIND (K2 Connect step #4):
@@ -310,15 +345,36 @@ export function ConnectionGate(): React.ReactElement {
         return
       }
       const policy = await ensurePolicy()
-      const status = await fetchBootStatus()
+      // Remote health-polls get a looser timeout (a tunnel round-trip is
+      // higher-latency than a localhost hit); local keeps the tight 2s.
+      const status = await fetchBootStatus(
+        isRemote ? REMOTE_BOOT_STATUS_TIMEOUT_MS : 2000,
+      )
       if (cancelled) return
       const next = policy.decide(status)
-      setDecision(next)
-      // Surface the active host's live status to the top-bar switcher.
-      useConnectHostStore.getState().setConnectionStatus(
-        next.kind === 'accept' ? 'connected' : 'connecting',
-      )
+      // Debounced-drop path: a REMOTE host that has already connected this
+      // effect-run (post-accept health-poll) must not surface a single
+      // blipped poll. Below REMOTE_DROP_THRESHOLD consecutive fails we keep
+      // the gate 'connected' with no banner — the data WS is likely still
+      // streaming — and only the accept branch / threshold branch below
+      // update `decision` + status. So skip the unconditional setters here
+      // for that case and let the branches own them.
+      const softPoll = isRemote && acceptedOnce
+      if (!softPoll) {
+        setDecision(next)
+        // Surface the active host's live status to the top-bar switcher.
+        useConnectHostStore.getState().setConnectionStatus(
+          next.kind === 'accept' ? 'connected' : 'connecting',
+        )
+      }
       if (next.kind === 'accept') {
+        // A soft health-poll skipped the unconditional setters above; apply
+        // them on recovery so the gate flips back to 'connected' and the
+        // banner clears.
+        if (softPoll) {
+          setDecision(next)
+          useConnectHostStore.getState().setConnectionStatus('connected')
+        }
         // #638: cache the accepted host's version + protocol so
         // lib/server-capabilities can gate newer client features against an
         // older host (and build "update the host to vX" hints). For a
@@ -334,6 +390,10 @@ export function ConnectionGate(): React.ReactElement {
         acceptedOnce = true
         setConnectedOnceKey(hostKey)
         attemptsLocal = 0
+        // A clean poll clears the debounce: any in-flight blip count is
+        // forgotten and the reconnect banner (if shown) comes down.
+        consecutiveFails = 0
+        setReconnecting(false)
         if (isRemote) {
           // Remote: keep a slow health-poll alive so a tunnel drop is
           // detected and surfaced as the soft-reconnect overlay (the App
@@ -344,15 +404,34 @@ export function ConnectionGate(): React.ReactElement {
         }
         return // local: stop polling; Phase 2 takes over
       }
+      // Non-accept (a failed poll). For a soft health-poll we DEBOUNCE: a
+      // single blip is swallowed (gate stays 'connected', no banner) and
+      // only >= REMOTE_DROP_THRESHOLD consecutive fails surface the wait
+      // decision + the non-blocking reconnect banner. The App stays mounted
+      // throughout; recovery (an accept above) clears the counter + banner.
+      if (softPoll) {
+        consecutiveFails += 1
+        if (shouldSurfaceRemoteDrop(consecutiveFails)) {
+          setDecision(next)
+          useConnectHostStore.getState().setConnectionStatus('connecting')
+          setReconnecting(true)
+        }
+        // else: below threshold — leave 'connected' + no banner untouched.
+      }
       setAttempts((a) => a + 1)
       attemptsLocal += 1
-      // Backoff: tight while first connecting; for a remote that has
-      // already connected once (soft reconnect) ease off exponentially so
-      // we don't hammer a flaky tunnel. Local keeps the tight cadence.
-      const backoff =
-        isRemote && acceptedOnce
+      // Backoff:
+      //   - First connect (local, or a remote not yet accepted): tight 500ms.
+      //   - Soft poll still WITHIN the debounce window (no banner yet): keep
+      //     the normal health cadence so we detect recovery / cross the
+      //     threshold promptly rather than stretching out a swallowed blip.
+      //   - Confirmed soft reconnect (banner up): ease off exponentially so
+      //     we don't hammer a flaky tunnel.
+      const backoff = softPoll
+        ? shouldSurfaceRemoteDrop(consecutiveFails)
           ? Math.min(REMOTE_RECONNECT_MAX_MS, 500 * 2 ** Math.min(attemptsLocal, 5))
-          : 500
+          : REMOTE_HEALTH_POLL_MS
+        : 500
       timeoutId = setTimeout(() => { void tick() }, backoff)
     }
 
@@ -386,16 +465,17 @@ export function ConnectionGate(): React.ReactElement {
   }, [decision.kind])
 
   // K2 Connect step #4 — soft reconnect. A REMOTE host that has already
-  // connected this session (App mounted) and then briefly drops should
-  // NOT blank the app: keep the last view mounted and dim a
-  // "Reconnecting to <label>…" overlay over it. Local — and a remote's
-  // FIRST connect — keep the full-screen blanking overlay (correct for
-  // the auto-update race / nothing-to-show-yet).
-  const softReconnecting =
-    activeHost !== 'local' &&
-    connectedOnceKey === hostKey &&
-    AppModule !== null &&
-    decision.kind !== 'accept'
+  // connected this session (App mounted) must stay MOUNTED + INTERACTIVE
+  // through transient drops — never fall back to the full-screen
+  // ConnectingOverlay/blank. We key this purely on "has connected once +
+  // App is mounted" (NOT the current decision): a sub-threshold blip leaves
+  // the App fully usable with NO banner, and only the debounced
+  // `reconnecting` flag (>= REMOTE_DROP_THRESHOLD consecutive fails) adds
+  // the small non-blocking banner over the still-live view. Local — and a
+  // remote's FIRST connect — keep the full-screen blanking overlay (correct
+  // for the auto-update race / nothing-to-show-yet).
+  const keepRemoteMounted =
+    activeHost !== 'local' && connectedOnceKey === hostKey && AppModule !== null
 
   // K2 Connect step #3 — full-screen sign-in for a picked host with no
   // remembered/valid token. Rendered ON TOP of the current view (the
@@ -403,13 +483,13 @@ export function ConnectionGate(): React.ReactElement {
   // user's place is preserved while they re-auth a single server.
   const signInOverlay = pendingSignIn ? <RemoteSignIn host={pendingSignIn} /> : null
 
-  if (softReconnecting) {
+  if (keepRemoteMounted) {
     const App = AppModule
     const label = activeHost.label
     return (
       <>
         <App key={hostKey} />
-        <ReconnectOverlay label={label} />
+        {reconnecting && <ReconnectBanner label={label} />}
         {signInOverlay}
       </>
     )
@@ -436,39 +516,63 @@ export function ConnectionGate(): React.ReactElement {
   )
 }
 
-/** Dimmed, NON-blanking overlay shown over the last mounted view while a
- *  previously-connected REMOTE host reconnects (K2 Connect step #4).
- *  Pointer-events pass-through is intentionally OFF: we block input while
- *  the daemon is unreachable so clicks don't queue against a dead socket. */
-function ReconnectOverlay({ label }: { label: string }): React.ReactElement {
+/** Small, NON-BLOCKING reconnect indicator shown over the still-live view
+ *  while a previously-connected REMOTE host reconnects (K2 Connect step #4).
+ *  Unlike the old full-screen overlay, this:
+ *    - does NOT cover the app or the top-bar (a bottom-center pill),
+ *    - passes ALL input through (`pointerEvents: 'none'`) so the app — and
+ *      the top-bar host switcher — stay fully usable while we retry.
+ *  It only mounts after the drop has been DEBOUNCED (>= REMOTE_DROP_THRESHOLD
+ *  consecutive failed polls), so a single blip over a higher-latency tunnel
+ *  never flashes it while the data WS is still streaming. */
+function ReconnectBanner({ label }: { label: string }): React.ReactElement {
   return (
     <div
       role="status"
       aria-live="polite"
       style={{
+        // Non-blocking: a pill pinned to the bottom-center, well clear of
+        // the top-bar, that lets every click/keystroke fall through to the
+        // app underneath.
         position: 'fixed',
-        inset: 0,
+        left: 0,
+        right: 0,
+        bottom: '1.25rem',
         zIndex: 9999,
         display: 'flex',
-        alignItems: 'center',
         justifyContent: 'center',
-        flexDirection: 'column',
-        gap: '0.75rem',
-        background: 'rgba(10,10,10,0.55)',
-        backdropFilter: 'blur(2px)',
-        WebkitBackdropFilter: 'blur(2px)',
-        color: 'var(--color-text-primary, #e0e0e0)',
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        userSelect: 'none',
-        WebkitUserSelect: 'none',
-        cursor: 'progress',
+        pointerEvents: 'none',
       }}
     >
-      <div style={{ fontSize: '0.95rem', fontWeight: 500 }}>
-        Reconnecting to {label}…
-      </div>
-      <div style={{ fontSize: '0.8rem', opacity: 0.7 }}>
-        The connection dropped. Retrying automatically.
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.5rem',
+          padding: '0.4rem 0.85rem',
+          borderRadius: '999px',
+          background: 'rgba(20,20,20,0.92)',
+          border: '1px solid var(--color-border, rgba(255,255,255,0.12))',
+          boxShadow: '0 2px 12px rgba(0,0,0,0.35)',
+          color: 'var(--color-text-primary, #e0e0e0)',
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fontSize: '0.8rem',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+        }}
+      >
+        {/* Amber status dot — "degraded, not down". */}
+        <span
+          aria-hidden
+          style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '50%',
+            background: '#f5a623',
+            flexShrink: 0,
+          }}
+        />
+        <span>Reconnecting to {label}… retrying automatically</span>
       </div>
     </div>
   )
