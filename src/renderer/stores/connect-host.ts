@@ -190,7 +190,7 @@ export function onActiveHostChange(
  */
 export type ConnectionStatus = 'connecting' | 'connected' | 'offline'
 
-interface ConnectHostState {
+export interface ConnectHostState {
   activeHost: ActiveHost
   hosts: ConnectHost[]
   /** Live status of the active host's connection (set by the gate). */
