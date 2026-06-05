@@ -71,6 +71,7 @@ pub mod wake_headless;
 pub mod watchdog;
 pub mod workspace_layouts_dedup;
 pub mod workspace_msg;
+pub mod workspace_routes;
 
 use std::sync::Arc;
 use std::time::Instant;

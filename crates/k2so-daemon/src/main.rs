@@ -82,6 +82,7 @@ mod wake_headless;
 mod watchdog;
 mod workspace_layouts_dedup;
 mod workspace_msg;
+mod workspace_routes;
 
 use std::fs;
 use std::io::Write;
