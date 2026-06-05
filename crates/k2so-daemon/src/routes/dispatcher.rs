@@ -205,6 +205,17 @@ async fn handle_one_request(
             // (feedback_post_only_route_guards). No body — owner token rides
             // the query string.
             | "/cli/daemon/restart"
+            // K2SO P3 — remote daemon self-UPDATE (binary-swap shape).
+            // OWNER/ADMIN-gated per-handler (require_owner_or_admin) below.
+            // `check` fetches the manifest + compares (read-only but POST so
+            // it's never idempotent-cached); `start` kicks the async
+            // download+verify+stage job; `apply` backs up + spawns the
+            // detached swap helper + triggers the P0 graceful shutdown. The
+            // status read is a GET via crate::cli::dispatch (misc_routes).
+            // Method-gated per-handler (feedback_post_only_route_guards).
+            | "/cli/daemon/update/check"
+            | "/cli/daemon/update/start"
+            | "/cli/daemon/update/apply"
             // GET reads the redacted config (tokenSet bool, never the
             // secret); POST sets token/subdomain/server. Claimed here for
             // both methods; the handler branches on `is_post`.
@@ -979,6 +990,93 @@ async fn handle_one_request(
                 });
             }
             return DispatchOutcome::Done;
+        }
+        // ── K2SO P3 — remote daemon self-UPDATE (binary-swap shape) ─────────
+        //
+        // All three POST routes are OWNER/ADMIN-gated (require_owner_or_admin,
+        // K2SO #660) — the same tier as restart: a remote Owner/Admin over K2
+        // Connect can drive an update with their SESSION token (they never
+        // hold the on-box owner token), but a Member is barred. Each route is
+        // explicitly POST-gated (require_post) per feedback_post_only_route_
+        // guards: the top-level dispatch lets a GET through on POST-allowlisted
+        // routes, and a curl GET must never download/swap/restart the daemon.
+        //
+        // Network I/O (manifest fetch, artifact download) runs on the blocking
+        // pool so it NEVER ties up an accept-loop thread.
+        //
+        // POST /cli/daemon/update/check — fetch daemon-latest.json, compare to
+        // the running version, report {current,latest,available,notes?,url?}.
+        // Read-only (only the small JSON manifest is fetched).
+        "/cli/daemon/update/check" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
+                return DispatchOutcome::Done;
+            }
+            if !super::http::require_owner_or_admin(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
+            // Blocking HTTP fetch off the accept loop.
+            let r = tokio::task::spawn_blocking(crate::update_routes::handle_check)
+                .await
+                .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/daemon/update/start {version?} — create an async job that
+        // downloads this platform's artifact + .sig, VERIFIES minisign against
+        // the embedded pubkey (MANDATORY — abort on mismatch), verifies sha256,
+        // and stages it. Returns {job_id} immediately; the download runs on a
+        // detached worker so the HTTP thread is never blocked.
+        "/cli/daemon/update/start" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
+                return DispatchOutcome::Done;
+            }
+            if !super::http::require_owner_or_admin(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            // handle_start does a (blocking) manifest fetch up front, then
+            // spawns the detached download worker; run the up-front part off
+            // the accept loop too.
+            let r = tokio::task::spawn_blocking(move || {
+                crate::update_routes::handle_start(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/daemon/update/apply {job_id} — only when phase==staged.
+        // Backs up the running binary, spawns a DETACHED swap/rollback helper,
+        // then triggers the P0 graceful shutdown so the supervisor respawns the
+        // NEW binary. SEAM: `shutdown_tx` is `None` in the test harness, so the
+        // handler returns its 200 ack and SKIPS the backup/helper/shutdown — a
+        // test NEVER swaps the binary or kills the process. Real swap/restart is
+        // e2e-smoke-test-pending.
+        "/cli/daemon/update/apply" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
+                return DispatchOutcome::Done;
+            }
+            if !super::http::require_owner_or_admin(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let shutdown_tx = state.shutdown_tx.clone();
+            let r = crate::update_routes::handle_apply(&body_bytes, shutdown_tx);
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // GET /cli/daemon/update/status?job_id= — poll a job's phase/progress.
+        // Read-only, but gated to the SAME owner/admin tier as the mutating
+        // update routes (a Member who can't start/apply an update has no need
+        // to watch one). Dispatched here (not via the /cli/ catchall, which
+        // would accept any session) so the gate is explicit.
+        "/cli/daemon/update/status" => {
+            if !super::http::require_owner_or_admin(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let _ = stream.read(&mut buf).await;
+            let params = super::http::parse_params(&path, &query);
+            let job_id = params.get("job_id").cloned().unwrap_or_default();
+            let r = crate::update_routes::handle_status(&job_id);
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         // GET/POST /cli/tunnel/config — read or set the K2 Connect tunnel
         // config. GET returns a REDACTED view (tokenSet bool, never the

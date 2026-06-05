@@ -77,6 +77,7 @@ mod terminal_lifecycle_routes;
 mod terminal_routes;
 mod themes_routes;
 mod triage;
+mod update_routes;
 mod v2_session_map;
 mod v2_spawn;
 mod wake_headless;

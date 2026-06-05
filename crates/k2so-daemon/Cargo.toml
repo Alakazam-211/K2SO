@@ -95,6 +95,14 @@ parking_lot = "0.12"
 # DOCX, images). A streaming WS endpoint is Phase 3 work.
 base64 = "0.22"
 
+# P3 remote daemon self-update (binary-swap shape). `sha2` verifies the
+# downloaded artifact's SHA-256 against the manifest; `minisign-verify`
+# is the verify-ONLY pure-Rust minisign implementation used to check the
+# artifact signature against the embedded `plugins.updater.pubkey`. No
+# signing keys ever live in the daemon — verify only.
+sha2 = "0.10"
+minisign-verify = "0.2"
+
 [dev-dependencies]
 # Enable k2so-core's `test-util` feature for integration tests that
 # need the in-memory DB helper (`db::init_for_tests`). Production
