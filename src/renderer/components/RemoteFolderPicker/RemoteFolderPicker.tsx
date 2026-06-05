@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { useRemoteFolderPickerStore } from '@/stores/remote-folder-picker'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { useServerSupports, featureMinVersion } from '@/lib/server-capabilities'
 
 // A lightweight, self-contained directory browser over the REMOTE daemon's
 // filesystem. Deliberately does NOT reuse the full FileTree component (too
@@ -43,6 +45,16 @@ export default function RemoteFolderPicker(): React.JSX.Element | null {
   const isOpen = useRemoteFolderPickerStore((s) => s.isOpen)
   const select = useRemoteFolderPickerStore((s) => s.select)
   const cancel = useRemoteFolderPickerStore((s) => s.cancel)
+
+  // #638: when the active host is too OLD to serve GET /cli/fs/info, the
+  // fetch below 404s and we fall back to browsing from '/'. That still
+  // works — but we show the user a muted note explaining why we didn't
+  // start at their home folder, and which host version unlocks it.
+  // `serverVersion` is the active host's cached marketing version (null for
+  // local / not-yet-known).
+  const supportsFsInfo = useServerSupports('fs-info')
+  const serverVersion = useConnectHostStore((s) => s.serverVersion)
+  const showOldHostNote = serverVersion !== null && !supportsFsInfo
 
   const [sep, setSep] = useState('/')
   const [cwd, setCwd] = useState<string | null>(null)
@@ -138,6 +150,12 @@ export default function RemoteFolderPicker(): React.JSX.Element | null {
               {cwd ?? '…'}
             </p>
           </div>
+          {showOldHostNote && (
+            <p className="mt-2 text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+              This host is on v{serverVersion} — update it to v{featureMinVersion('fs-info')}{' '}
+              to start at your home folder.
+            </p>
+          )}
         </div>
 
         {/* Listing */}

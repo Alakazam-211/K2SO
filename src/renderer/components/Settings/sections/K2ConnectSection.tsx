@@ -42,6 +42,7 @@ import {
 } from '../lib/k2-account'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
 import { useConnectHostStore } from '@/stores/connect-host'
+import { useServerSupports, featureMinVersion } from '@/lib/server-capabilities'
 
 const DEFAULT_SERVER_ADDR = '178.156.232.105'
 const DEFAULT_SERVER_PORT = 7000
@@ -296,6 +297,12 @@ export function K2ConnectSection(): React.JSX.Element {
   // remote daemon's users, already role-gated via /cli/auth/whoami).
   const activeHost = useConnectHostStore((s) => s.activeHost)
   const isRemote = activeHost !== 'local'
+  // #638: when viewing a REMOTE host whose version is known but predates
+  // roles (#629), whoami returns no role → the generic "handled by an
+  // administrator" note would mislead. Swap in a version-aware hint instead.
+  const serverVersion = useConnectHostStore((s) => s.serverVersion)
+  const supportsRoles = useServerSupports('roles')
+  const oldHostNoRoles = isRemote && serverVersion !== null && !supportsRoles
 
   // ── Users / Access state ──────────────────────────────────────────────
   // K2SO #629: the LOCAL viewer's role (from whoami). The desktop app talks
@@ -1216,7 +1223,9 @@ export function K2ConnectSection(): React.JSX.Element {
                 raw token/403 error. */}
             {whoamiLoaded && !canManageUsers(viewerRole) ? (
               <p className="text-[10px] text-[var(--color-text-muted)] leading-relaxed py-1">
-                User management is handled by an administrator.
+                {oldHostNoRoles
+                  ? `This host (v${serverVersion}) predates roles — update it to v${featureMinVersion('roles')} to manage users here.`
+                  : 'User management is handled by an administrator.'}
               </p>
             ) : !whoamiLoaded ? (
               <p className="text-[10px] text-[var(--color-text-muted)] py-1">Loading…</p>
