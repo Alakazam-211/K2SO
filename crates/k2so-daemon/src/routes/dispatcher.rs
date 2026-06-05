@@ -252,6 +252,15 @@ async fn handle_one_request(
             // `/cli/fs/` POST arm. Body carries the bytes so they're never
             // URL-logged.
             | "/cli/fs/upload-binary"
+            // K2 Connect "Clone to" P2 — workspace migration. `bundle`
+            // runs on the SOURCE daemon (build the scrubbed tar.gz +
+            // capture K2 settings); `unpack` runs on the DESTINATION daemon
+            // (extract at recomputed paths + register + apply settings).
+            // Both gated below by their own isolated `token_ok` arm (same
+            // one-line-swap pattern as upload-binary). Bodies carry paths so
+            // they're never URL-logged.
+            | "/cli/clone/bundle"
+            | "/cli/clone/unpack"
             | "/cli/fs/move"
             | "/cli/fs/copy"
             | "/cli/fs/delete"
@@ -1677,6 +1686,42 @@ async fn handle_one_request(
             }
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
             let result = crate::fs_routes::handle_upload_binary(&body_bytes);
+            super::http::send_response(&mut *stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // K2 Connect "Clone to" P2 — POST /cli/clone/bundle + /cli/clone/unpack.
+        //
+        // `bundle` (SOURCE side) builds the scrubbed tar.gz + captures the
+        // source workspace's K2 settings; `unpack` (DESTINATION side)
+        // extracts at recomputed paths, registers the folder as a project,
+        // and applies the manifest settings.
+        //
+        // SANDBOX/AUTH DECISION: gated by `token_ok` (any authed user —
+        // owner token OR a connect-user session), same isolated-gate
+        // pattern as `fs/upload-binary`. Split into its own arm AHEAD of the
+        // shared `/cli/fs/` POST arm so tightening to `require_manage` later
+        // is a one-line swap here with no effect on the fs routes.
+        p if is_post && post_allowed
+            && (p == "/cli/clone/bundle" || p == "/cli/clone/unpack") =>
+        {
+            // ── isolated clone auth gate (swap this one line) ──
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let result = if p == "/cli/clone/bundle" {
+                crate::clone_routes::handle_clone_bundle(&body_bytes)
+            } else {
+                crate::clone_routes::handle_clone_unpack(&body_bytes)
+            };
             super::http::send_response(&mut *stream, result.status, "application/json", &result.body)
                 .await;
         }

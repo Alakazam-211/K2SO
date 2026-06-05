@@ -42,6 +42,7 @@ mod chat_routes;
 mod claude_auth_host;
 mod cli;
 mod cli_response;
+mod clone_routes;
 mod companion_host;
 mod companion_routes;
 mod connect_users_routes;

@@ -31,6 +31,7 @@ pub mod chat_routes;
 pub mod claude_auth_host;
 pub mod cli;
 pub mod cli_response;
+pub mod clone_routes;
 pub mod companion_host;
 pub mod companion_routes;
 pub mod connect_users_routes;

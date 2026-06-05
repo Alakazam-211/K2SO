@@ -1,0 +1,209 @@
+//! K2 Connect "Clone to" daemon routes — the two ends of the
+//! bundle → push → unpack pipeline (PRD `k2-connect-clone-to.md`, P2).
+//!
+//! - `POST /cli/clone/bundle` runs on the SOURCE machine: build a scrubbed
+//!   tar.gz of the workspace + memory + live session, capture the source
+//!   workspace's K2 settings, write it to a temp path, and return the path
+//!   + a summary.
+//! - `POST /cli/clone/unpack` runs on the DESTINATION machine: extract the
+//!   bundle at `<dest_parent>/<source-name>` (collision-safe), place
+//!   memory/sessions under the recomputed remote slug, REGISTER the folder
+//!   as a project, and APPLY the manifest's settings so the migrated
+//!   workspace appears fully configured.
+//!
+//! Both are gated by `token_ok` in the dispatcher (the same isolated-gate
+//! pattern as `fs/upload-binary`), so these handlers assume the caller is
+//! already authenticated.
+
+use crate::cli_response::CliResponse;
+use k2so_core::clone;
+use k2so_core::db;
+use k2so_core::db::schema::Project;
+use k2so_core::projects_ops as pops;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct BundleBody {
+    /// Absolute source workspace path on this machine.
+    project_path: String,
+    /// Include EVERY session transcript, not just the live one.
+    #[serde(default)]
+    include_all_history: bool,
+    /// Carry secrets over the (encrypted) link instead of scrubbing them.
+    #[serde(default)]
+    carry_secrets: bool,
+}
+
+/// `POST /cli/clone/bundle` — build the bundle on the SOURCE daemon.
+///
+/// Inventories the three state locations, captures the source workspace's
+/// K2 settings from the projects DB row, tar.gz's everything to
+/// `~/.k2so/clone-tmp/<name>-<ts>.tar.gz`, and returns the bundle path + a
+/// summary (entry count, scrubbed-secret count, byte size).
+pub fn handle_clone_bundle(body: &[u8]) -> CliResponse {
+    let b: BundleBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+
+    let opts = clone::CloneOptions {
+        include_all_history: b.include_all_history,
+        carry_secrets: b.carry_secrets,
+        home_override: None,
+    };
+
+    let inv = match clone::inventory(&b.project_path, opts.clone()) {
+        Ok(i) => i,
+        Err(e) => return CliResponse::bad_request(format!("inventory failed: {e}")),
+    };
+
+    // Capture the source workspace's K2 settings (graceful: None if the
+    // path isn't a registered project).
+    let settings = {
+        let db = db::shared();
+        let conn = db.lock();
+        match clone::capture_settings(&conn, &inv.project_path) {
+            Ok(s) => s,
+            Err(e) => return CliResponse::internal_error(format!("settings capture: {e}")),
+        }
+    };
+
+    // Temp bundle path: ~/.k2so/clone-tmp/<name>-<ts>.tar.gz
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return CliResponse::internal_error("cannot resolve home directory"),
+    };
+    let tmp_dir = home.join(".k2so").join("clone-tmp");
+    if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+        return CliResponse::internal_error(format!("create clone-tmp dir: {e}"));
+    }
+    let name = std::path::Path::new(&inv.project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let bundle_path = tmp_dir.join(format!("{name}-{ts}.tar.gz"));
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let scrubbed_count = inv.scrubbed_secrets.len();
+    let entry_count = inv.entries.len();
+
+    if let Err(e) = clone::build_bundle(&inv, &opts, created_at, settings, &bundle_path) {
+        return CliResponse::internal_error(format!("build bundle: {e}"));
+    }
+
+    let size = std::fs::metadata(&bundle_path).map(|m| m.len()).unwrap_or(0);
+
+    CliResponse::ok_json(
+        serde_json::json!({
+            "bundle_path": bundle_path.to_string_lossy(),
+            "manifest_summary": {
+                "entry_count": entry_count,
+                "scrubbed_secret_count": scrubbed_count,
+                "size_bytes": size,
+                "include_all_history": b.include_all_history,
+                "carry_secrets": b.carry_secrets,
+            }
+        })
+        .to_string(),
+    )
+}
+
+#[derive(Deserialize)]
+struct UnpackBody {
+    /// Path of the uploaded bundle on THIS (remote) machine.
+    bundle_path: String,
+    /// Parent folder under which to create `<source-name>/`.
+    dest_parent: String,
+}
+
+/// `POST /cli/clone/unpack` — extract + register + configure on the
+/// DESTINATION daemon. Returns the new project row + the final dest path.
+pub fn handle_clone_unpack(body: &[u8]) -> CliResponse {
+    let b: UnpackBody = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return CliResponse::bad_request(format!("invalid JSON body: {e}")),
+    };
+
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return CliResponse::internal_error("cannot resolve home directory"),
+    };
+
+    match unpack_and_register(
+        std::path::Path::new(&b.bundle_path),
+        std::path::Path::new(&b.dest_parent),
+        &home,
+    ) {
+        Ok((project, dest_path)) => CliResponse::ok_json(
+            serde_json::json!({
+                "project": project,
+                "dest_path": dest_path,
+            })
+            .to_string(),
+        ),
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Core unpack + DB registration. Split out (and `home`-parameterized) so
+/// it's hermetically testable with a temp HOME. Returns the registered
+/// project + final dest path.
+pub fn unpack_and_register(
+    bundle_path: &std::path::Path,
+    dest_parent: &std::path::Path,
+    home: &std::path::Path,
+) -> Result<(Project, String), String> {
+    // 1. Extract files at recomputed paths; get the manifest back.
+    let (result, manifest) = clone::unpack_bundle(bundle_path, dest_parent, home)?;
+    let dest_path = result.dest_path.to_string_lossy().to_string();
+
+    // 2. Register the folder as a project. Prefer the git-aware path
+    //    (`add-from-path`); a cloned workspace whose ROOT isn't a git repo
+    //    falls back to the git-free registration rather than erroring with
+    //    a needs-git-init prompt the remote can't answer.
+    let project = match pops::projects_add_from_path(&dest_path) {
+        Ok(pops::AddFromPathResult::Project(p)) => p,
+        Ok(pops::AddFromPathResult::NeedsGitInit { .. }) => {
+            pops::projects_add_without_git(&dest_path)?
+        }
+        Err(e) => return Err(format!("register project: {e}")),
+    };
+
+    // 3. Apply the manifest's K2 settings to the freshly registered row.
+    //    Machine-specific fields (id/path/focus_group_id) are intentionally
+    //    NOT in `settings`, so the remote keeps its own id + path. If
+    //    settings is None (source wasn't a registered project), the project
+    //    keeps its registration defaults.
+    if let Some(s) = manifest.settings {
+        let agent_mode = if s.agent_mode.is_empty() {
+            None
+        } else {
+            Some(s.agent_mode.clone())
+        };
+        let updated = pops::projects_update(
+            &project.id,
+            Some(&s.name),
+            Some(&s.color),
+            None,                          // tab_order — keep registration order
+            Some(s.worktree_mode),
+            None,                          // pinned
+            None,                          // manually_active
+            None,                          // icon_url
+            Some(if s.agent_enabled { 1 } else { 0 }),
+            Some(if s.heartbeat_enabled { 1 } else { 0 }),
+            agent_mode,                    // also syncs agent_enabled
+            None,                          // state_id
+            None,                          // heartbeat_mode
+            None,                          // heartbeat_schedule
+        )
+        .map_err(|e| format!("apply settings: {e}"))?;
+        return Ok((updated, dest_path));
+    }
+
+    Ok((project, dest_path))
+}
+
+#[cfg(test)]
+mod tests;
