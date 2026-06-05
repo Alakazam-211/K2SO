@@ -660,10 +660,10 @@ export function startAgentPolling(): void {
               await terminalCreate({ cwd, command, args, id: bgTerminalId })
             }
             // Register system-managed worktree session
-            invoke('k2so_agents_lock', {
-              projectPath: cwd,
-              agentName,
-              terminalId: bgTerminalId,
+            daemonCliGet('agents/lock', {
+              project: cwd,
+              agent: agentName,
+              terminal_id: bgTerminalId,
               owner: 'system',
             }).catch(() => {})
           } catch { /* will be created when user navigates */ }
@@ -697,10 +697,10 @@ export function startAgentPolling(): void {
           })
         }
         // Register system-managed session in DB (owner='system' so scheduler knows)
-        invoke('k2so_agents_lock', {
-          projectPath: cwd,
-          agentName,
-          terminalId: bgTerminalId,
+        daemonCliGet('agents/lock', {
+          project: cwd,
+          agent: agentName,
+          terminal_id: bgTerminalId,
           owner: 'system',
         }).catch(() => {})
         // Detect and save session ID after a brief delay

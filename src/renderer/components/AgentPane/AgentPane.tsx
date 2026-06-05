@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliGet } from '@/lib/daemon-cli'
 import { terminalExists } from '@/lib/terminal-daemon'
 import { useTabsStore } from '@/stores/tabs'
 import { useProjectsStore } from '@/stores/projects'
@@ -438,7 +439,7 @@ function WorktreeChatTerminal({
         }>('k2so_agents_build_launch', { projectPath, agentName })
         if (!cancelled && result) {
           setLaunchConfig({ command: result.command, args: result.args, cwd: result.cwd })
-          invoke('k2so_agents_lock', { projectPath, agentName, terminalId: myTerminalId, owner: 'user' }).catch(() => {})
+          daemonCliGet('agents/lock', { project: projectPath, agent: agentName, terminal_id: myTerminalId, owner: 'user' }).catch(() => {})
           setReady(true)
           return
         }
@@ -447,7 +448,7 @@ function WorktreeChatTerminal({
       }
       if (!cancelled) {
         setLaunchConfig({ command: 'claude', args: ['--dangerously-skip-permissions'], cwd })
-        invoke('k2so_agents_lock', { projectPath, agentName, terminalId: myTerminalId, owner: 'user' }).catch(() => {})
+        daemonCliGet('agents/lock', { project: projectPath, agent: agentName, terminal_id: myTerminalId, owner: 'user' }).catch(() => {})
         setReady(true)
       }
     }

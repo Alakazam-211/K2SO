@@ -325,10 +325,10 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           args: ['--dangerously-skip-permissions', '--resume', restoredSessionId],
           cwd: projectPath,
         })
-        invoke('k2so_agents_lock', {
-          projectPath,
-          agentName,
-          terminalId: myTerminalId,
+        daemonCliGet('agents/lock', {
+          project: projectPath,
+          agent: agentName,
+          terminal_id: myTerminalId,
           owner: 'user',
         }).catch(() => {})
         stampSessionId(restoredSessionId)
@@ -404,10 +404,10 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
             args: result.args,
             cwd: result.cwd,
           })
-          invoke('k2so_agents_lock', {
-            projectPath,
-            agentName,
-            terminalId: myTerminalId,
+          daemonCliGet('agents/lock', {
+            project: projectPath,
+            agent: agentName,
+            terminal_id: myTerminalId,
             owner: 'user',
           }).catch(() => {})
           // 0.37.12 — stamp the resolved session id back onto the
@@ -428,10 +428,10 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           args: ['--dangerously-skip-permissions'],
           cwd: projectPath,
         })
-        invoke('k2so_agents_lock', {
-          projectPath,
-          agentName,
-          terminalId: myTerminalId,
+        daemonCliGet('agents/lock', {
+          project: projectPath,
+          agent: agentName,
+          terminal_id: myTerminalId,
           owner: 'user',
         }).catch(() => {})
         setReady(true)
