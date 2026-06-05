@@ -28,27 +28,36 @@ function formatBytes(n: number): string {
 
 export default function CloneToDialog(): React.JSX.Element | null {
   const isOpen = useCloneToDialogStore((s) => s.isOpen)
+  const phase = useCloneToDialogStore((s) => s.phase)
   const projectName = useCloneToDialogStore((s) => s.projectName)
   const host = useCloneToDialogStore((s) => s.host)
+  const carrySecrets = useCloneToDialogStore((s) => s.carrySecrets)
+  const setCarrySecrets = useCloneToDialogStore((s) => s.setCarrySecrets)
+  const confirm = useCloneToDialogStore((s) => s.confirm)
   const stage = useCloneToDialogStore((s) => s.stage)
   const summary = useCloneToDialogStore((s) => s.summary)
   const result = useCloneToDialogStore((s) => s.result)
   const error = useCloneToDialogStore((s) => s.error)
   const close = useCloneToDialogStore((s) => s.close)
 
+  const isOptions = phase === 'options'
   const isTerminal = stage === 'done' || stage === 'error'
+  // Closable (via backdrop / Esc) on the options panel (it's a no-op cancel)
+  // and once the run is terminal — never mid-flight (closing wouldn't cancel
+  // the in-progress daemon work, so we don't pretend it does).
+  const isClosable = isOptions || isTerminal
 
-  // Esc closes only once the run is terminal — never mid-flight (closing
-  // wouldn't cancel the in-progress daemon work, so we don't pretend it
-  // does).
+  // Esc closes on the options panel or once terminal. Enter on the options
+  // panel proceeds (convenience — matches the primary Clone button).
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && isTerminal) close()
+      if (e.key === 'Escape' && isClosable) close()
+      else if (e.key === 'Enter' && isOptions) confirm()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [isOpen, isTerminal, close])
+  }, [isOpen, isClosable, isOptions, close, confirm])
 
   if (!isOpen) return null
 
@@ -58,7 +67,7 @@ export default function CloneToDialog(): React.JSX.Element | null {
     <div
       className="fixed inset-0 z-50 flex items-center justify-center no-drag"
       style={{ backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)' }}
-      onClick={isTerminal ? close : undefined}
+      onClick={isClosable ? close : undefined}
     >
       <div
         className="w-[560px] max-h-[85vh] flex flex-col border border-[var(--color-border)] bg-[var(--color-bg-surface)] shadow-2xl"
@@ -67,11 +76,13 @@ export default function CloneToDialog(): React.JSX.Element | null {
         {/* Header */}
         <div className="px-5 pt-5 pb-2">
           <h2 className="text-sm font-medium text-[var(--color-text-primary)]">
-            {stage === 'done'
-              ? 'Workspace cloned'
-              : stage === 'error'
-                ? 'Clone failed'
-                : 'Cloning workspace'}
+            {isOptions
+              ? 'Clone workspace'
+              : stage === 'done'
+                ? 'Workspace cloned'
+                : stage === 'error'
+                  ? 'Clone failed'
+                  : 'Cloning workspace'}
           </h2>
           <p className="text-[11px] text-[var(--color-text-muted)] mt-1">
             <span className="text-[var(--color-text-secondary)]">{projectName ?? 'workspace'}</span>
@@ -86,9 +97,44 @@ export default function CloneToDialog(): React.JSX.Element | null {
 
         {/* Body */}
         <div className="px-5 pb-3 overflow-y-auto">
-          {/* Step tracker — hidden on the error screen (we show the failure
-              + which step it reached via the message). */}
-          {stage !== 'error' && (
+          {/* Pre-flight options panel — the "Include secrets" toggle. Shown
+              before any orchestration runs; clicking Clone flips to the
+              progress phase. */}
+          {isOptions && (
+            <div className="space-y-3 pt-1">
+              <label className="flex items-start gap-2 cursor-pointer select-none no-drag">
+                <input
+                  type="checkbox"
+                  checked={carrySecrets}
+                  onChange={(e) => setCarrySecrets(e.target.checked)}
+                  className="peer sr-only"
+                />
+                <span
+                  aria-hidden="true"
+                  className="mt-0.5 w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center border transition-colors border-[var(--color-border)] bg-[var(--color-bg-elevated)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)] peer-focus-visible:ring-1 peer-focus-visible:ring-[var(--color-accent)]"
+                >
+                  {carrySecrets && (
+                    <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2.5 6.5 L5 9 L9.5 3.5" />
+                    </svg>
+                  )}
+                </span>
+                <span className="text-xs text-[var(--color-text-secondary)] leading-relaxed">
+                  Include secrets (<span className="font-mono text-[11px]">.env</span>,{' '}
+                  <span className="font-mono text-[11px]">.auth/</span>, in-workspace tokens)
+                </span>
+              </label>
+              <p className="text-[11px] text-[var(--color-text-muted)] leading-relaxed pl-[22px]">
+                Carried securely over the encrypted connection between your machines.
+                Uncheck to scrub them — you’ll re-add them on the host.
+              </p>
+            </div>
+          )}
+
+          {/* Step tracker — hidden on the options + error screens (the error
+              screen shows the failure + which step it reached via the
+              message). */}
+          {!isOptions && stage !== 'error' && (
             <div className="border border-[var(--color-border)] bg-[var(--color-bg)]/40 px-3 py-3 space-y-1.5">
               {STEPS.map((step, i) => {
                 const isCurrent = i === activeIdx && stage !== 'done'
@@ -194,13 +240,30 @@ export default function CloneToDialog(): React.JSX.Element | null {
 
         {/* Actions */}
         <div className="px-5 pb-5 flex gap-2 justify-end border-t border-[var(--color-border)] pt-3">
-          <button
-            className="px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)] disabled:opacity-40"
-            onClick={close}
-            disabled={!isTerminal}
-          >
-            {isTerminal ? 'Close' : 'Working…'}
-          </button>
+          {isOptions ? (
+            <>
+              <button
+                className="px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-bg-elevated)]"
+                onClick={close}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)]"
+                onClick={confirm}
+              >
+                Clone
+              </button>
+            </>
+          ) : (
+            <button
+              className="px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)] disabled:opacity-40"
+              onClick={close}
+              disabled={!isTerminal}
+            >
+              {isTerminal ? 'Close' : 'Working…'}
+            </button>
+          )}
         </div>
       </div>
     </div>
