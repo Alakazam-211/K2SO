@@ -3,6 +3,21 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.26 — K2 Connect: drag files straight onto the remote machine
+
+When you're connected to another machine, dragging a file in from your
+computer now actually **transfers it to that machine**, decided by where
+you drop it:
+
+- **Onto a terminal** → the file uploads to the workspace's
+  `.k2so/downloads/` and the path is dropped into the prompt, so the agent
+  can use a file that really exists on the host.
+- **Onto a folder in the file tree** → the file uploads into that folder.
+- **Anywhere else** → you're asked where on the host to save it.
+
+Local drag-and-drop is unchanged. (Both machines need 0.39.26 for the
+host to accept the upload.)
+
 ## 0.39.25 — Remote folder picker everywhere + agent slash-commands
 
 - **Open a remote folder from anywhere.** The 0.39.24 remote folder
