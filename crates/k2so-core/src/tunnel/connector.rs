@@ -222,11 +222,17 @@ pub fn start(
                 .to_string(),
         );
     }
-    let resolved_local_port = cfg.local_port.unwrap_or(default_local_port);
-    // Persist the reconciled config (subdomain override + chosen port)
-    // so a later `status`/restart sees the same values.
+    // The K2SO tunnel ALWAYS exposes the live daemon, whose HTTP port is
+    // ephemeral and ROTATES on every daemon restart (app update, reboot).
+    // So we MUST forward to the live `default_local_port` and must NEVER
+    // persist a pinned `local_port`: a pinned snapshot goes stale the moment
+    // the daemon restarts on a new port, leaving frpc forwarding to a dead
+    // socket and the host silently unreachable — i.e. **every software
+    // update would lose the user's remote access**. Always resolve live and
+    // keep the stored config port-less so future starts re-resolve.
+    let resolved_local_port = default_local_port;
     let mut to_save = cfg.clone();
-    to_save.local_port = Some(resolved_local_port);
+    to_save.local_port = None;
     config::save(&to_save)?;
 
     // Resolve frpc + render config to disk (0600).

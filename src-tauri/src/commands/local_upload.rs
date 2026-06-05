@@ -26,18 +26,26 @@ const MAX_LOCAL_UPLOAD_SIZE: u64 = 100 * 1024 * 1024;
 /// renderer pairs this with `POST /cli/fs/upload-binary` (host-aware via
 /// `daemonCliPost`) to move a dropped file onto the active daemon's disk.
 #[tauri::command]
-pub fn read_local_file_base64(path: String) -> Result<String, String> {
-    if path.is_empty() {
-        return Err("Path is empty".to_string());
-    }
-    let meta = std::fs::metadata(&path)
-        .map_err(|e| format!("Cannot stat file: {e}"))?;
-    if !meta.is_file() {
-        return Err(format!("Not a file: {path}"));
-    }
-    if meta.len() > MAX_LOCAL_UPLOAD_SIZE {
-        return Err("File too large (>100MB)".to_string());
-    }
-    let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read file: {e}"))?;
-    Ok(B64.encode(&bytes))
+pub async fn read_local_file_base64(path: String) -> Result<String, String> {
+    // CRITICAL: this MUST be `async` + run on a blocking thread. A
+    // synchronous `#[tauri::command]` runs on the webview's MAIN thread, so
+    // reading + base64-encoding a file (up to 100MB) there freezes the UI —
+    // a beach-ball / lockup on every remote drag-drop. `spawn_blocking`
+    // moves the blocking read + encode off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        if path.is_empty() {
+            return Err("Path is empty".to_string());
+        }
+        let meta = std::fs::metadata(&path).map_err(|e| format!("Cannot stat file: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("Not a file: {path}"));
+        }
+        if meta.len() > MAX_LOCAL_UPLOAD_SIZE {
+            return Err("File too large (>100MB)".to_string());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read file: {e}"))?;
+        Ok(B64.encode(&bytes))
+    })
+    .await
+    .map_err(|e| format!("read task failed: {e}"))?
 }
