@@ -41,6 +41,7 @@ import {
   type K2Subdomain,
 } from '../lib/k2-account'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
+import { useConnectHostStore } from '@/stores/connect-host'
 
 const DEFAULT_SERVER_ADDR = '178.156.232.105'
 const DEFAULT_SERVER_PORT = 7000
@@ -286,6 +287,15 @@ export function K2ConnectSection(): React.JSX.Element {
   const accessTokenRef = useRef<string | null>(null)
   const boundLabelRef = useRef<string | null>(null)
   const confirm = useConfirmDialogStore((s) => s.confirm)
+
+  // K2SO #628: the tunnel EXPOSE controls only make sense for THIS Mac's
+  // own daemon — you can't expose someone else's daemon through your local
+  // tunnel. When the active host is a remote K2 Connect host, hide the
+  // account-login / tunnel-config / start-stop sub-panels and show a short
+  // note instead. The Users/Access panel below stays (it manages the
+  // remote daemon's users, already role-gated via /cli/auth/whoami).
+  const activeHost = useConnectHostStore((s) => s.activeHost)
+  const isRemote = activeHost !== 'local'
 
   // ── Users / Access state ──────────────────────────────────────────────
   // K2SO #629: the LOCAL viewer's role (from whoami). The desktop app talks
@@ -929,6 +939,21 @@ export function K2ConnectSection(): React.JSX.Element {
       </p>
 
       <div className="space-y-5">
+        {/* K2SO #628: the EXPOSE controls (account login, tunnel config,
+            start/stop) only apply to THIS Mac's own daemon. On a remote
+            host show a short note instead and let the user switch back. */}
+        {isRemote ? (
+          <div className="px-3 py-2 border border-[var(--color-border)] text-[10px] text-[var(--color-text-muted)] leading-relaxed">
+            K2 Connect tunneling is managed on the machine that owns the daemon. You&apos;re
+            viewing{' '}
+            <span className="text-[var(--color-text-secondary)]">
+              {activeHost.label}
+            </span>
+            . Switch to <span className="text-[var(--color-text-secondary)]">This Mac</span> in
+            the server switcher to configure your own tunnel.
+          </div>
+        ) : (
+          <>
         {/* ── Account: sign-in + purchased-subdomain picker ──────────── */}
         <SettingsGroup
           title="Account"
@@ -1179,6 +1204,8 @@ export function K2ConnectSection(): React.JSX.Element {
             </SettingsGroup>
           )}
         </div>
+          </>
+        )}
 
         {/* ── Users / Access — role-gated multi-user list (#617 / #629) ─── */}
         <SettingsGroup title="Users / Access">
