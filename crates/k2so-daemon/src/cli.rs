@@ -36,7 +36,10 @@ pub use crate::cli_response::CliResponse;
 /// Serialize a `Result<T, String>` from core into either a 200 JSON
 /// body or a 400 `{"error": "..."}`. The single biggest shape for
 /// `/cli/*` handlers.
-fn respond<T: serde::Serialize>(r: Result<T, String>) -> CliResponse {
+///
+/// Shared with the domain `*_routes.rs` modules (task #578 extraction)
+/// — they call `crate::cli::respond(...)` rather than re-defining it.
+pub fn respond<T: serde::Serialize>(r: Result<T, String>) -> CliResponse {
     match r {
         Ok(v) => CliResponse::ok_json(
             serde_json::to_string(&v).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e)),
@@ -46,7 +49,7 @@ fn respond<T: serde::Serialize>(r: Result<T, String>) -> CliResponse {
 }
 
 /// Wrap `Ok(())` success into `{"success":true}` JSON.
-fn respond_unit(r: Result<(), String>) -> CliResponse {
+pub fn respond_unit(r: Result<(), String>) -> CliResponse {
     match r {
         Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
         Err(e) => CliResponse::bad_request(e),
@@ -55,7 +58,7 @@ fn respond_unit(r: Result<(), String>) -> CliResponse {
 
 /// Extract project path from `project` or `project_path` query
 /// params; returns 400 response if missing/empty.
-fn need_project(params: &HashMap<String, String>) -> Result<String, CliResponse> {
+pub fn need_project(params: &HashMap<String, String>) -> Result<String, CliResponse> {
     for key in &["project_path", "project"] {
         if let Some(v) = params.get(*key) {
             if !v.is_empty() {
@@ -68,15 +71,15 @@ fn need_project(params: &HashMap<String, String>) -> Result<String, CliResponse>
     ))
 }
 
-fn str_param(params: &HashMap<String, String>, key: &str) -> String {
+pub fn str_param(params: &HashMap<String, String>, key: &str) -> String {
     params.get(key).cloned().unwrap_or_default()
 }
 
-fn opt_param(params: &HashMap<String, String>, key: &str) -> Option<String> {
+pub fn opt_param(params: &HashMap<String, String>, key: &str) -> Option<String> {
     params.get(key).cloned().filter(|s| !s.is_empty())
 }
 
-fn bool_param(params: &HashMap<String, String>, key: &str) -> bool {
+pub fn bool_param(params: &HashMap<String, String>, key: &str) -> bool {
     matches!(
         params.get(key).map(|v| v.as_str()),
         Some("1") | Some("true") | Some("on")
@@ -88,191 +91,12 @@ fn bool_param(params: &HashMap<String, String>, key: &str) -> bool {
 /// Route a single `/cli/*` path to its handler. Assumes the caller
 /// has already validated the bearer token.
 pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
+    // ── Agents-domain routes (task #578: agents_routes::dispatch) ────
+    if let Some(resp) = crate::agents_routes::dispatch(path, params) {
+        return resp;
+    }
+
     match path {
-        // ── Read-only: agent metadata ────────────────────────────────
-        "/cli/agents/list" => match need_project(params) {
-            Ok(p) => respond(k2so_core::workspace::agent::list(p)),
-            Err(r) => r,
-        },
-        "/cli/agents/profile" => match need_project(params) {
-            Ok(p) => {
-                let agent = str_param(params, "agent");
-                match k2so_core::workspace::agent::get_profile(p, agent) {
-                    Ok(content) => CliResponse::ok_json(
-                        serde_json::json!({ "content": content }).to_string(),
-                    ),
-                    Err(e) => CliResponse::bad_request(e),
-                }
-            }
-            Err(r) => r,
-        },
-        // 0.39.0f Phase 2.1b: `/cli/agents/work` retired → `/cli/inbox/list`.
-        "/cli/agents/work" => CliResponse::gone(
-            "agents/work route deprecated in Phase 2.1; use /cli/inbox/list — see `k2so help-deprecated`",
-        ),
-        // 0.39.0f Phase 2.1b: `/cli/work/inbox` retired → `/cli/inbox/list`.
-        "/cli/work/inbox" => CliResponse::gone(
-            "work/* routes deprecated in Phase 2.1; use /cli/inbox/* — see `k2so help-deprecated`",
-        ),
-
-        // ── State-mutating: agent CRUD ──────────────────────────────
-        "/cli/agents/create" => match need_project(params) {
-            Ok(p) => respond(k2so_core::workspace::agent::create(
-                p,
-                str_param(params, "name"),
-                str_param(params, "role"),
-                opt_param(params, "prompt"),
-                opt_param(params, "agent_type"),
-            )),
-            Err(r) => r,
-        },
-        "/cli/agents/delete" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::workspace::agent::delete(
-                p,
-                str_param(params, "name"),
-            )),
-            Err(r) => r,
-        },
-        "/cli/agent/update" => match need_project(params) {
-            Ok(p) => respond(k2so_core::workspace::agent::update_field(
-                p,
-                str_param(params, "agent"),
-                str_param(params, "field"),
-                str_param(params, "value"),
-            )
-            .map(|content| serde_json::json!({ "success": true, "content": content }))),
-            Err(r) => r,
-        },
-
-        // ── State-mutating: work queue ──────────────────────────────
-        // 0.39.0f Phase 2.1b: `/cli/agents/work/*` retired → `/cli/inbox/*`.
-        // Route entries kept so external callers get a clear HTTP-410 signal
-        // (rather than a silent 404 from the catch-all). The body points
-        // them at the new endpoint and `help-deprecated`.
-        "/cli/agents/work/create" => CliResponse::gone(
-            "work/* routes deprecated in Phase 2.1; use /cli/inbox/compose — see `k2so help-deprecated`",
-        ),
-        "/cli/agents/work/move" => CliResponse::gone(
-            "work/* routes deprecated in Phase 2.1; use /cli/inbox/move — see `k2so help-deprecated`",
-        ),
-        // 0.39.0f Phase 2.1c: `/cli/work/inbox/create` retired →
-        // POST /cli/inbox/compose?project=<target-workspace>. The
-        // sole CLI caller (cmd_msg_inbox_form) was migrated in
-        // Phase 2.1c; the Tauri-side caller `workspace_inbox_create`
-        // and its daemon dependency `deliver_to_inbox` were deleted
-        // in the Phase 2.1 wrap-up. Route entry kept as a 410-Gone
-        // so any external straggler gets a clear signal.
-        "/cli/work/inbox/create" => CliResponse::gone(
-            "work/* routes deprecated in Phase 2.1; use /cli/inbox/compose with project=<target-workspace> — see `k2so help-deprecated`",
-        ),
-
-        // ── Agent lifecycle: lock + session ─────────────────────────
-        "/cli/agents/lock" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::workspace::session::k2so_agents_lock(
-                p,
-                str_param(params, "agent"),
-                opt_param(params, "terminal_id"),
-                opt_param(params, "owner"),
-            )),
-            Err(r) => r,
-        },
-        "/cli/agents/unlock" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::workspace::session::k2so_agents_unlock(
-                p,
-                str_param(params, "agent"),
-            )),
-            Err(r) => r,
-        },
-
-        // ── Agent-hook channel events ───────────────────────────────
-        "/cli/events" => match need_project(params) {
-            Ok(p) => {
-                // 0.39.0f: default the `agent` query param to the
-                // workspace's primary agent name (resolved via
-                // `find_primary_agent`) instead of the pre-unification
-                // `__lead__` sentinel. The display-name fallback
-                // catches workspaces where the primary hasn't been
-                // fully scaffolded yet — `agent_display_name` is
-                // total (always returns a string) so callers without
-                // an explicit agent still get a routable identity.
-                let agent = opt_param(params, "agent").unwrap_or_else(|| {
-                    k2so_core::workspace::agent_identity::find_primary_agent(&p)
-                        .unwrap_or_else(|| k2so_core::workspace::display::agent_display_name(&p))
-                });
-                let events = k2so_core::workspace::events::drain_agent_events(&p, &agent);
-                CliResponse::ok_json(
-                    serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string()),
-                )
-            }
-            Err(r) => r,
-        },
-        "/cli/agent/reply" => match need_project(params) {
-            Ok(p) => {
-                let agent = str_param(params, "agent");
-                let message = str_param(params, "message");
-                k2so_core::agent_hooks::emit(
-                    k2so_core::agent_hooks::HookEvent::AgentReply,
-                    serde_json::json!({
-                        "agentName": agent,
-                        "message": message,
-                        "projectPath": p,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    }),
-                );
-                CliResponse::ok_json(r#"{"success":true}"#.to_string())
-            }
-            Err(r) => r,
-        },
-
-        // ── Per-agent heartbeat control ─────────────────────────────
-        "/cli/agents/heartbeat" => match need_project(params) {
-            Ok(p) => {
-                let agent = str_param(params, "agent");
-                let interval = opt_param(params, "interval").and_then(|v| v.parse::<u64>().ok());
-                let phase = opt_param(params, "phase");
-                let mode = opt_param(params, "mode");
-                let cost_budget = opt_param(params, "cost_budget");
-                // If ANY mutation param is present → update; else → read.
-                if interval.is_some()
-                    || phase.is_some()
-                    || mode.is_some()
-                    || cost_budget.is_some()
-                {
-                    let force_wake = if params.contains_key("force_wake") {
-                        Some(bool_param(params, "force_wake"))
-                    } else {
-                        None
-                    };
-                    respond(k2so_core::heartbeats::control::set_heartbeat(
-                        p,
-                        agent,
-                        interval,
-                        phase,
-                        mode,
-                        cost_budget,
-                        force_wake,
-                    ))
-                } else {
-                    respond(k2so_core::heartbeats::control::get_heartbeat(p, agent))
-                }
-            }
-            Err(r) => r,
-        },
-        "/cli/agents/heartbeat/noop" => match need_project(params) {
-            Ok(p) => respond(k2so_core::heartbeats::control::heartbeat_noop(
-                p,
-                str_param(params, "agent"),
-            )),
-            Err(r) => r,
-        },
-        "/cli/agents/heartbeat/action" => match need_project(params) {
-            Ok(p) => respond(k2so_core::heartbeats::control::heartbeat_action(
-                p,
-                str_param(params, "agent"),
-            )),
-            Err(r) => r,
-        },
-
         // ── Per-project mode + settings toggles ─────────────────────
         "/cli/mode" => match need_project(params) {
             Ok(p) => {
@@ -760,48 +584,6 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             }
         }
 
-        // ── Sub-agent completion ────────────────────────────────────
-        "/cli/agent/complete" => match need_project(params) {
-            Ok(p) => {
-                let agent = str_param(params, "agent");
-                let file = str_param(params, "file");
-                match k2so_core::workspace::reviews::agent_complete(p, agent, file) {
-                    Ok(body) => CliResponse::ok_json(body),
-                    Err(e) => CliResponse::bad_request(e),
-                }
-            }
-            Err(r) => r,
-        },
-
-        // ── Agent CLAUDE.md regen ───────────────────────────────────
-        "/cli/agents/generate-claude-md" => match need_project(params) {
-            Ok(p) => {
-                let agent = str_param(params, "agent");
-                if agent.is_empty() {
-                    return CliResponse::bad_request("Missing 'agent' parameter");
-                }
-                match k2so_core::skills::content::generate_agent_claude_md_content(
-                    &p, &agent, None,
-                ) {
-                    Ok(md) => {
-                        let claude_md_path =
-                            k2so_core::workspace::agent_identity::agent_dir(&p, &agent).join("CLAUDE.md");
-                        if let Err(e) =
-                            k2so_core::workspace::work_item::atomic_write(&claude_md_path, &md)
-                        {
-                            return CliResponse::bad_request(e);
-                        }
-                        CliResponse::ok_json(
-                            serde_json::json!({"success": true, "length": md.len()})
-                                .to_string(),
-                        )
-                    }
-                    Err(e) => CliResponse::bad_request(e),
-                }
-            }
-            Err(r) => r,
-        },
-
         // ── Workspace connections ───────────────────────────────────
         "/cli/connections" => match need_project(params) {
             Ok(p) => {
@@ -1078,23 +860,6 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             )
         }
 
-        // ── Scheduler / triage ──────────────────────────────────────
-        // `/cli/agents/triage` is READ-ONLY (plain-text summary for
-        // `k2so agents triage`). `/cli/scheduler-tick` is the
-        // DESTRUCTIVE heartbeat fire path — `~/.k2so/heartbeat.sh`
-        // invokes it on launchd's schedule and parses `"count":N`
-        // to log what fired. Pre-Phase-4 Tauri's agent_hooks
-        // listener served them with these same semantics; H7
-        // preserves the contract.
-        "/cli/agents/triage" => match need_project(params) {
-            Ok(p) => CliResponse::ok_text(crate::triage::handle_triage(&p)),
-            Err(r) => r,
-        },
-        "/cli/scheduler-tick" => match need_project(params) {
-            Ok(p) => CliResponse::ok_json(crate::triage::handle_scheduler_fire(&p)),
-            Err(r) => r,
-        },
-
         // P5.6: DB-as-source-of-truth replacement for the legacy
         // ~/.k2so/heartbeat-projects.txt file. heartbeat.sh now calls
         // this once per cron tick and iterates the response, calling
@@ -1152,12 +917,6 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
             crate::terminal_lifecycle_routes::handle_list_running(params)
         }
 
-        // ── Phase 4 H2: live-session enumeration ────────────────────
-        // Replaces the Tauri endpoint that walked AppState's
-        // terminal_manager. Now a walk of session_map + registry.
-        "/cli/agents/running" => crate::terminal_routes::handle_agents_running(params),
-        "/cli/agents/reap" => crate::terminal_routes::handle_agents_reap(params),
-
         // ── Phase 4.5 I7: resize a live session ─────────────────────
         // Resizes both the PTY and the alacritty Term so the child
         // re-flows for the new dimensions. Called by Kessel's
@@ -1196,23 +955,6 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> CliResponse {
         "/cli/companion/projects-summary" => {
             crate::companion_routes::handle_companion_projects_summary(params)
         }
-
-        // ── Phase 4 H5: agent launch + delegate ─────────────────────
-        // Daemon-owned Session Stream replacement for Tauri's
-        // `spawn_wake_pty`-backed handlers. Core still builds the
-        // launch JSON (three wake branches for launch; worktree +
-        // task CLAUDE.md for delegate) — the difference is the
-        // spawn lands in daemon session_map, not in Tauri's
-        // TerminalManager.
-        "/cli/agents/launch" => match need_project(params) {
-            Ok(p) => crate::agents_routes::handle_agents_launch(params, &p),
-            Err(r) => r,
-        },
-        "/cli/agents/delegate" => match need_project(params) {
-            Ok(p) => crate::agents_routes::handle_agents_delegate(params, &p),
-            Err(r) => r,
-        },
-
 
         // Look up a live session by agent_name across both legacy
         // session_map and v2_session_map. Used by the workspace
