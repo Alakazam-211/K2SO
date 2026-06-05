@@ -23,11 +23,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 const daemonCliGet = vi.fn()
+const daemonCliPost = vi.fn()
 vi.mock('@/lib/daemon-cli', () => ({
   daemonCliGet: (...args: unknown[]) => daemonCliGet(...args),
+  daemonCliPost: (...args: unknown[]) => daemonCliPost(...args),
 }))
 
-import { daemonCliGet as cli } from '@/lib/daemon-cli'
+import { daemonCliGet as cli, daemonCliPost as cliPost } from '@/lib/daemon-cli'
 
 // Mirrors HeartbeatsSection.commitRename: renderer holds row.name (old) +
 // the trimmed/lowercased draft (new); the route reads `from`/`to`.
@@ -84,5 +86,109 @@ describe('host-aware CLI swaps — wire contract', () => {
     expect(params).not.toHaveProperty('projectPath')
     expect(params).not.toHaveProperty('agentName')
     expect(params).not.toHaveProperty('terminalId')
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════
+// K2 Connect host-awareness GAP — POST wire contract (Unit 2b)
+// ════════════════════════════════════════════════════════════════════
+//
+// The GAP routes Unit 2a shipped are all POST + JSON body, so the
+// renderer swaps `invoke(cmd, {...})` → `daemonCliPost(route, {...})`.
+// Each swap remaps the renderer's camelCase args to the route's exact
+// snake_case body fields (verified against
+// crates/k2so-daemon/src/{skills,agents,heartbeat}_routes.rs). A
+// regression that reverts a remap (e.g. sends `sourceProjectId` again,
+// which the route ignores → empty `source_project_id` → 400) fails
+// these loudly. The two riskiest swaps are locked below:
+//
+//   1. relations/create — renderer sourceProjectId/targetProjectId →
+//      route reads source_project_id/target_project_id (the body has an
+//      optional relation_type, omitted by the renderer call site).
+//   2. session/set-surfaced — the 8-arg surfaced-toggle: each positional
+//      maps to its snake_case body field
+//      (projectPath/agentName/terminalId/heartbeatName/attachAgentName →
+//      project_path/agent_name/terminal_id/heartbeat_name/attach_agent_name).
+
+// Mirrors ProjectsSection.handleAdd: renderer holds projectId (source) +
+// the picked targetProjectId; the route reads source/target_project_id.
+function createRelation(sourceProjectId: string, targetProjectId: string) {
+  return cliPost('relations/create', {
+    source_project_id: sourceProjectId,
+    target_project_id: targetProjectId,
+  })
+}
+
+// Mirrors tabs.ts openHeartbeatTab: the 8-field surfaced=true body that
+// hands the existing PTY to the surfaced flow. Every camelCase arg the
+// old Tauri command took maps to a snake_case body field.
+function setSurfaced(
+  projectPath: string,
+  agentName: string,
+  terminalId: string,
+  command: string,
+  args: string[],
+  heartbeatName: string,
+  attachAgentName: string,
+) {
+  return cliPost('session/set-surfaced', {
+    project_path: projectPath,
+    agent_name: agentName,
+    surfaced: true,
+    terminal_id: terminalId,
+    command,
+    args,
+    heartbeat_name: heartbeatName,
+    attach_agent_name: attachAgentName,
+  })
+}
+
+describe('host-aware CLI POST swaps — GAP wire contract', () => {
+  beforeEach(() => {
+    daemonCliPost.mockReset()
+    daemonCliPost.mockResolvedValue({ success: true })
+  })
+
+  it('relations/create remaps sourceProjectId/targetProjectId → source/target_project_id', async () => {
+    await createRelation('proj-a', 'proj-b')
+    expect(daemonCliPost).toHaveBeenCalledWith('relations/create', {
+      source_project_id: 'proj-a',
+      target_project_id: 'proj-b',
+    })
+    const [, body] = daemonCliPost.mock.calls[0] as [string, Record<string, unknown>]
+    // Pre-swap camelCase keys must NOT survive — the route ignores them,
+    // so a leftover would 400 (missing source_project_id) on any host.
+    expect(body).not.toHaveProperty('sourceProjectId')
+    expect(body).not.toHaveProperty('targetProjectId')
+  })
+
+  it('session/set-surfaced maps all 8 fields to snake_case body', async () => {
+    await setSurfaced(
+      '/work/proj',
+      'manager',
+      'term-1',
+      'claude',
+      ['--resume', 'sess-1'],
+      'nightly',
+      'manager',
+    )
+    expect(daemonCliPost).toHaveBeenCalledWith('session/set-surfaced', {
+      project_path: '/work/proj',
+      agent_name: 'manager',
+      surfaced: true,
+      terminal_id: 'term-1',
+      command: 'claude',
+      args: ['--resume', 'sess-1'],
+      heartbeat_name: 'nightly',
+      attach_agent_name: 'manager',
+    })
+    const [, body] = daemonCliPost.mock.calls[0] as [string, Record<string, unknown>]
+    // None of the camelCase arg names may leak through — the route's
+    // SetSurfacedBody reads only the snake_case fields.
+    expect(body).not.toHaveProperty('projectPath')
+    expect(body).not.toHaveProperty('agentName')
+    expect(body).not.toHaveProperty('terminalId')
+    expect(body).not.toHaveProperty('heartbeatName')
+    expect(body).not.toHaveProperty('attachAgentName')
   })
 })
