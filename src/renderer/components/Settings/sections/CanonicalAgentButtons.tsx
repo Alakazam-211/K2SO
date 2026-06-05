@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { type RoleSkill, roleSkillLabel } from './canonicalAgentSeeds'
 import { type HarnessProbe, anyHarnessUnified } from './canonicalState'
 
@@ -91,7 +91,7 @@ export function CanonicalAgentButton({
     setFanoutBusy(true)
     setFanoutEnabled(next) // optimistic
     try {
-      await invoke('k2so_set_harness_fanout_enabled', { projectPath, enabled: next })
+      await daemonCliPost('onboarding/set-harness-fanout-enabled', { project_path: projectPath, enabled: next })
     } catch (err) {
       console.error('[canonical] set_harness_fanout_enabled failed:', err)
       setFanoutEnabled(!next) // reconcile on failure

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import {
   terminalCreate,
   terminalExists,
@@ -712,10 +712,10 @@ export function startAgentPolling(): void {
             })
             const sessionId = r.sessionId
             if (sessionId) {
-              invoke('k2so_agents_save_session_id', {
-                projectPath: cwd,
-                agentName,
-                sessionId,
+              daemonCliPost('agents/save-session-id', {
+                project_path: cwd,
+                agent_name: agentName,
+                session_id: sessionId,
               }).catch(() => {})
             }
           } catch { /* ignore */ }

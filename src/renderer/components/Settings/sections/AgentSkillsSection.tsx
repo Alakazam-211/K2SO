@@ -1,6 +1,7 @@
 import React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliPost } from '@/lib/daemon-cli'
 import type { SettingEntry } from '../searchManifest'
 import { AgentContextDiagram } from './AgentContextDiagram'
 import { useProjectsStore } from '@/stores/projects'
@@ -90,7 +91,7 @@ export function AgentSkillsSection(): React.JSX.Element {
     // Optimistic — reflect immediately, reconcile on failure.
     setFanoutEnabled(next)
     try {
-      await invoke('k2so_set_harness_fanout_enabled', { projectPath, enabled: next })
+      await daemonCliPost('onboarding/set-harness-fanout-enabled', { project_path: projectPath, enabled: next })
       await refresh()
     } catch (err) {
       console.error('[canonical-flow] set_harness_fanout_enabled failed:', err)

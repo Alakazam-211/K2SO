@@ -1,7 +1,7 @@
 import React from 'react'
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { listen, emit } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { agentDisplayName, setAgentDisplayName } from '@/lib/workspace-agent'
 import { useSettingsStore } from '@/stores/settings'
@@ -1452,8 +1452,8 @@ function ProjectDetail({
                     }
 
                     if (currentMode !== 'off') {
-                      await invoke('k2so_agents_disable_workspace_claude_md', {
-                        projectPath: project.path,
+                      await daemonCliPost('agents/disable-workspace-claude-md', {
+                        project_path: project.path,
                       }).catch(console.error)
                     }
 
@@ -1461,8 +1461,8 @@ function ProjectDetail({
                     emitProjectsChanged()
 
                     if (mode === 'agent' || mode === 'manager') {
-                      await invoke('k2so_agents_regenerate_workspace_skill', {
-                        projectPath: project.path,
+                      await daemonCliPost('agents/regenerate-workspace-skill', {
+                        project_path: project.path,
                       }).catch(console.error)
                     }
 
@@ -1702,8 +1702,8 @@ function ShowHeartbeatSessionsToggle({ projectPath }: { projectPath: string }): 
     setBusy(true)
     setEnabled(next) // optimistic
     try {
-      await invoke('k2so_workspace_set_show_heartbeat_sessions', {
-        projectPath,
+      await daemonCliPost('heartbeat/set-show-sessions', {
+        project_path: projectPath,
         enabled: next,
       })
     } catch (err) {
@@ -2081,7 +2081,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
   // propagate to every harness file before the user closes the editor.
   const handleClose = useCallback(async () => {
     try {
-      await invoke('k2so_agents_regenerate_workspace_skill', { projectPath })
+      await daemonCliPost('agents/regenerate-workspace-skill', { project_path: projectPath })
     } catch (err) {
       console.warn('[workspace-knowledge] regen on close failed:', err)
     }
@@ -2530,7 +2530,7 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
   const handleAdd = useCallback(async (targetProjectId: string) => {
     setAdding(true)
     try {
-      await invoke('workspace_relations_create', { sourceProjectId: projectId, targetProjectId })
+      await daemonCliPost('relations/create', { source_project_id: projectId, target_project_id: targetProjectId })
       setShowAdd(false)
       await fetchRelations()
     } catch (e) {
@@ -2542,7 +2542,7 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
 
   const handleRemove = useCallback(async (id: string) => {
     try {
-      await invoke('workspace_relations_delete', { id })
+      await daemonCliPost('relations/delete', { id })
       await fetchRelations()
     } catch (e) {
       console.error('[connected-workspaces] Delete failed:', e)
@@ -2878,10 +2878,10 @@ function ProjectSkillsPanel({ projectPath, onOpenEditor }: { projectPath: string
     if (!newName.trim()) return
     setCreating(true)
     try {
-      await invoke('k2so_skills_create', {
-        projectPath,
+      await daemonCliPost('skills/create', {
+        project_path: projectPath,
         name: newName.trim().toLowerCase().replace(/\s+/g, '-'),
-        fromSkill: newSeed.trim() ? newSeed.trim() : null,
+        from_skill: newSeed.trim() ? newSeed.trim() : null,
       })
       setNewName('')
       setNewSeed('')
@@ -2904,7 +2904,7 @@ function ProjectSkillsPanel({ projectPath, onOpenEditor }: { projectPath: string
     })
     if (!confirmed) return
     try {
-      await invoke('k2so_skills_remove', { projectPath, name })
+      await daemonCliPost('skills/remove', { project_path: projectPath, name })
       await fetchSkills()
       await fetchAgents()
     } catch (e) {

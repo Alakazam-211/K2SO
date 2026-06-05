@@ -94,15 +94,15 @@ function closeTerminalForRenderer(data: TerminalItemData): void {
   //       happened to inject into). Same close-as-minimize semantics
   //       apply: PTY survives, the row click can re-surface later.
   if (data.heartbeatName && data.projectPath && data.surfacedAgentName) {
-    invoke('k2so_session_set_surfaced', {
-      projectPath: data.projectPath,
-      agentName: data.surfacedAgentName,
+    daemonCliPost('session/set-surfaced', {
+      project_path: data.projectPath,
+      agent_name: data.surfacedAgentName,
       surfaced: false,
-      terminalId: null,
+      terminal_id: null,
       command: null,
       args: null,
-      heartbeatName: null,
-      attachAgentName: null,
+      heartbeat_name: null,
+      attach_agent_name: null,
     }).catch((e) => console.warn('[tabs] heartbeat surfaced=false failed:', e))
     return
   }
@@ -1517,18 +1517,18 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         try {
           const presetArgs = await resolveClaudePresetArgs()
           const args = [...presetArgs, '--resume', active.claudeSessionId ?? '']
-          await invoke('k2so_session_set_surfaced', {
-            projectPath,
-            agentName,
+          await daemonCliPost('session/set-surfaced', {
+            project_path: projectPath,
+            agent_name: agentName,
             surfaced: true,
-            terminalId: active.activeTerminalId,
+            terminal_id: active.activeTerminalId,
             command: 'claude',
             args,
-            heartbeatName,
+            heartbeat_name: heartbeatName,
             // The daemon's v2_session_map key for the existing PTY.
             // TerminalPane uses this to attach via /cli/sessions/v2/spawn
             // instead of spawning a fresh resume — see the PRD.
-            attachAgentName: active.activeAgentName,
+            attach_agent_name: active.activeAgentName,
           })
           // The session:surfaced listener will create the tab
           // asynchronously; don't return a tab id yet.

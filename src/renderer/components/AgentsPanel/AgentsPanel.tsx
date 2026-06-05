@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
@@ -268,7 +268,7 @@ export default function AgentsPanel(): React.JSX.Element {
                     // Regenerate the workspace SKILL.md (also auto-
                     // scaffolds `.k2so/` layout + manager/k2so-agent
                     // dirs on first call).
-                    await invoke('k2so_agents_regenerate_workspace_skill', { projectPath: activeProject.path })
+                    await daemonCliPost('agents/regenerate-workspace-skill', { project_path: activeProject.path })
                     await fetchAgents()
                   } catch (e) {
                     console.error('[agents] Setup failed:', e)

@@ -117,9 +117,9 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     try {
       if (agentMdPath) {
         const result = await daemonCliGet<{ content: string }>('fs/read-file', { path: agentMdPath })
-        await invoke('k2so_agents_save_agent_md', {
-          projectPath,
-          agentName,
+        await daemonCliPost('agents/save-agent-md', {
+          project_path: projectPath,
+          agent_name: agentName,
           content: result.content,
         })
       }
@@ -127,7 +127,7 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       console.error('[agent-editor] Failed to save on close:', err)
     }
     try {
-      await invoke('k2so_agents_regenerate_workspace_skill', { projectPath })
+      await daemonCliPost('agents/regenerate-workspace-skill', { project_path: projectPath })
     } catch (err) {
       console.warn('[agent-editor] regen on close failed:', err)
     }

@@ -940,7 +940,7 @@ export default function Sidebar(): React.JSX.Element {
       onConfirm: async () => {
         await addProject(folderPath)
         try {
-          await invoke('k2so_agents_run_workspace_ingest', { projectPath: folderPath })
+          await daemonCliPost('agents/run-workspace-ingest', { project_path: folderPath })
         } catch (err) {
           console.warn('[add-workspace] run ingest failed:', err)
         }

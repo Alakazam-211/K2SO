@@ -10,6 +10,7 @@ import { useAddWorkspaceDialogStore } from '../../stores/add-workspace-dialog'
 import { useRemoveWorkspaceDialogStore } from '../../stores/remove-workspace-dialog'
 import { useGitInfo, useGitChanges } from '../../hooks/useGit'
 import { invoke } from '@tauri-apps/api/core'
+import { daemonCliPost } from '@/lib/daemon-cli'
 import { showContextMenu } from '../../lib/context-menu'
 import { pickWorkspaceFolder } from '../../lib/pick-workspace-folder'
 import { useConnectHostStore } from '../../stores/connect-host'
@@ -169,7 +170,7 @@ export default function IconRail(): React.JSX.Element {
         // Trigger the skill write immediately so the user sees the effect
         // of the migration without having to restart K2SO.
         try {
-          await invoke('k2so_agents_run_workspace_ingest', { projectPath: folderPath })
+          await daemonCliPost('agents/run-workspace-ingest', { project_path: folderPath })
         } catch (err) {
           console.warn('[add-workspace] run ingest failed:', err)
         }

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import Markdown from '@/components/Markdown/Markdown'
 import remarkGfm from 'remark-gfm'
 import { AIFileEditor } from '@/components/AIFileEditor/AIFileEditor'
@@ -53,7 +52,7 @@ export function RoleSkillEditor({
   // Ensure the role SKILL.md exists before the agent runs (PRD §8.1
   // "Enable"). Idempotent + upgrade-tracked in core.
   useEffect(() => {
-    invoke('k2so_write_opt_in_skill', { projectPath, skill: role }).catch((err) =>
+    daemonCliPost('skills/write-opt-in', { project_path: projectPath, skill: role }).catch((err) =>
       console.warn('[role-skill] write_opt_in_skill failed:', err),
     )
   }, [projectPath, role])
