@@ -50,6 +50,8 @@ import {
   isImagePath,
   quotePathForImageDrop,
 } from '@/lib/file-drag'
+import { useConnectHostStore } from '@/stores/connect-host'
+import { executeRemoteDrop } from '@/lib/handle-remote-drop'
 
 // ── Wire types (mirror k2so-core/src/terminal/grid_snapshot.rs) ───
 
@@ -1984,14 +1986,27 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           if (p) paths.push(p)
         }
         if (paths.length > 0) {
-          sendInput(buildDropPayload(paths))
+          // REMOTE host: local paths → upload + inject remote (rare DOM
+          // fallback under Tauri; native drag-drop is the usual path).
+          if (useConnectHostStore.getState().activeHost !== 'local') {
+            void executeRemoteDrop(
+              paths,
+              { kind: 'terminal' },
+              { workspacePath: cwd },
+              buildDropPayload,
+            ).then((payload) => {
+              if (payload) sendInput(payload)
+            })
+          } else {
+            sendInput(buildDropPayload(paths))
+          }
           return
         }
       }
       const text = e.dataTransfer.getData('text/plain')
       if (text) sendInput(text)
     },
-    [sendInput],
+    [sendInput, cwd],
   )
 
   // External drag-drop from Finder / other apps. Window-level event,
@@ -2014,6 +2029,23 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
           // Only accept if the drop landed inside *this* container.
           const container = containerRef.current
           if (!container || !container.contains(el)) return
+
+          // REMOTE host (K2 Connect): `paths` are LOCAL paths with no bytes
+          // on the daemon. Upload to the workspace's `.k2so/downloads/` then
+          // inject the returned REMOTE paths so the agent can resolve them.
+          // buildDropPayload is this pane's existing builder (same quoting),
+          // just fed the remote paths.
+          if (useConnectHostStore.getState().activeHost !== 'local') {
+            void executeRemoteDrop(
+              paths,
+              { kind: 'terminal' },
+              { workspacePath: cwd },
+              buildDropPayload,
+            ).then((payload) => {
+              if (payload) sendInput(payload)
+            })
+            return
+          }
           sendInput(buildDropPayload(paths))
         },
       ).then((fn) => {
@@ -2025,7 +2057,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       cancelled = true
       unlisten?.()
     }
-  }, [sendInput])
+  }, [sendInput, cwd])
 
   // Internal drag-drop from K2SO's file tree. file-drag.ts dispatches
   // this CustomEvent on the v2 container when mouseup lands here.
