@@ -3,6 +3,23 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.35 — Remote updates that actually work (both kinds of host)
+
+- **Updating a machine you're connected to now works end-to-end.** A signing-
+  manifest bug was silently breaking every remote daemon self-update; that's
+  fixed. **Headless/server hosts** update via a verified binary swap;
+  **desktop-app hosts** update by triggering that machine's own app updater —
+  K2 now auto-detects which kind of host it is and picks the right path for you.
+- **Update failures tell you why.** Instead of a generic "Update failed," the
+  remote-update panel now shows the actual reason (download, signature, or
+  version detail) so a stuck update is diagnosable at a glance.
+- **Cleaner Settings when connected to a host.** The remote **Restart** and
+  **Update** controls now sit together in their own right-hand column with a
+  divider; when you're on your own Mac, the page is a single column as before.
+- Under the hood: signed-download hardening (redirect handling + real logging),
+  host-type reporting on the connection handshake, and a clear "open the app on
+  that machine" message if a desktop host's app isn't running.
+
 ## 0.39.34 — Active bar that tells the truth (and uses less RAM)
 
 - **"Active" now means *alive or recently worked*, not *what you're looking
