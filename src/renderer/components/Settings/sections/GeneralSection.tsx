@@ -1180,6 +1180,11 @@ function UpdateHostRow(): React.JSX.Element | null {
           <p className="text-[11px] text-red-400">
             {updatePhaseCopy(phase, hostLabel, { current: check?.current })}
           </p>
+          {status?.error && (
+            <p className="mt-1 text-[10px] text-red-400 break-all">
+              {status.error}
+            </p>
+          )}
         </div>
       )}
     </div>

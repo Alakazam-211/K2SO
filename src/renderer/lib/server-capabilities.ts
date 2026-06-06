@@ -42,6 +42,10 @@ export const FEATURES = {
    *  Gates the "Update host" control so an OLDER remote (no routes) hides
    *  it instead of dead-ending on a 404. */
   'remote-update': '0.39.33',
+  /** POST /cli/daemon/update/app — host-pushed desktop-app update (Shape A,
+   *  0.39.35). Gates the future remote app-update path by remote daemon
+   *  version; not yet wired to a control. */
+  'remote-update-app': '0.39.35',
 } as const
 
 export type FeatureKey = keyof typeof FEATURES
