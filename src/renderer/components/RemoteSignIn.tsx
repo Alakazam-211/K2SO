@@ -26,6 +26,7 @@ import {
   loginToHost,
   type ConnectHost,
 } from '@/stores/connect-host'
+import { IconLock } from '@/components/icons/IconLock'
 
 export function RemoteSignIn({ host }: { host: ConnectHost }): React.JSX.Element {
   const selectHost = useConnectHostStore((s) => s.selectHost)
@@ -110,69 +111,42 @@ export function RemoteSignIn({ host }: { host: ConnectHost }): React.JSX.Element
     if (!ok) setBusy(false)
   }
 
+  const inputCls =
+    'w-full px-2.5 py-1.5 text-[13px] bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]'
+
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 10000,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--color-bg, #0a0a0a)',
-        color: 'var(--color-text-primary, #e0e0e0)',
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-      }}
-    >
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--color-bg)] text-[var(--color-text-primary)]">
       <form
         onSubmit={(e) => {
           e.preventDefault()
           void submit()
         }}
-        style={{
-          width: 360,
-          maxWidth: '90vw',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 14,
-          padding: 28,
-          border: '1px solid var(--color-border, rgba(255,255,255,0.12))',
-          borderRadius: 8,
-          background: 'var(--color-bg-surface, rgba(255,255,255,0.02))',
-        }}
+        className="w-[360px] max-w-[90vw] flex flex-col gap-3.5 p-7 border border-[var(--color-border)] bg-[var(--color-bg-surface)]"
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+        <div className="flex flex-col gap-1">
+          <div className="text-[15px] font-semibold text-[var(--color-text-primary)]">
             Sign in to {host.label}
           </div>
-          <div style={{ fontSize: '0.78rem', opacity: 0.65, fontFamily: 'ui-monospace, monospace' }}>
-            {host.secure ? '🔒 ' : ''}{address}
+          <div className="flex items-center gap-1 text-[12px] text-[var(--color-text-muted)] font-mono">
+            {host.secure && <IconLock className="w-3 h-3 flex-shrink-0" />}
+            {address}
           </div>
         </div>
 
         {host.username && (
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: '0.78rem', opacity: 0.85 }}>
+          <label className="flex flex-col gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
             Username
             <input
               type="text"
               value={host.username}
               readOnly
               autoComplete="username"
-              style={{
-                padding: '0.5rem 0.65rem',
-                fontSize: '0.85rem',
-                borderRadius: 4,
-                border: '1px solid var(--color-border, rgba(255,255,255,0.15))',
-                background: 'var(--color-bg, rgba(0,0,0,0.3))',
-                color: 'inherit',
-                outline: 'none',
-                opacity: 0.7,
-              }}
+              className={`${inputCls} opacity-70`}
             />
           </label>
         )}
 
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: '0.78rem', opacity: 0.85 }}>
+        <label className="flex flex-col gap-1.5 text-[12px] text-[var(--color-text-secondary)]">
           Password
           <input
             ref={passwordRef}
@@ -182,49 +156,33 @@ export function RemoteSignIn({ host }: { host: ConnectHost }): React.JSX.Element
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Server password"
             autoComplete="off"
-            style={{
-              padding: '0.5rem 0.65rem',
-              fontSize: '0.85rem',
-              borderRadius: 4,
-              border: '1px solid var(--color-border, rgba(255,255,255,0.15))',
-              background: 'var(--color-bg, rgba(0,0,0,0.3))',
-              color: 'inherit',
-              outline: 'none',
-            }}
+            className={`${inputCls} disabled:opacity-60`}
           />
         </label>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.78rem', opacity: 0.85, cursor: 'pointer' }}>
+        <label className="flex items-center gap-2 text-[12px] text-[var(--color-text-secondary)] cursor-pointer select-none">
           <input
             type="checkbox"
             checked={remember}
             disabled={busy}
             onChange={(e) => setRemember(e.target.checked)}
+            className="peer sr-only"
           />
+          <span className="w-3.5 h-3.5 flex-shrink-0 border border-[var(--color-border)] bg-[var(--color-bg)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)]" />
           Remember password (stored in your OS keychain)
         </label>
 
         {error && (
-          <div style={{ fontSize: '0.75rem', color: '#f85149' }} role="alert">
+          <div className="text-[12px] text-red-400" role="alert">
             {error}
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        <div className="flex gap-2 mt-1">
           <button
             type="submit"
             disabled={busy}
-            style={{
-              flex: 1,
-              padding: '0.5rem 1rem',
-              fontSize: '0.85rem',
-              borderRadius: 4,
-              border: 'none',
-              background: 'var(--color-accent, #2f81f7)',
-              color: '#fff',
-              cursor: busy ? 'progress' : 'pointer',
-              opacity: busy ? 0.7 : 1,
-            }}
+            className="flex-1 px-4 py-1.5 text-[13px] text-white bg-[var(--color-accent)] hover:opacity-90 cursor-pointer disabled:opacity-60 disabled:cursor-progress"
           >
             {busy ? 'Connecting…' : 'Connect'}
           </button>
@@ -232,15 +190,7 @@ export function RemoteSignIn({ host }: { host: ConnectHost }): React.JSX.Element
             type="button"
             onClick={cancelSignIn}
             disabled={busy}
-            style={{
-              padding: '0.5rem 1rem',
-              fontSize: '0.85rem',
-              borderRadius: 4,
-              border: '1px solid var(--color-border, rgba(255,255,255,0.15))',
-              background: 'transparent',
-              color: 'inherit',
-              cursor: 'pointer',
-            }}
+            className="px-4 py-1.5 text-[13px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] cursor-pointer disabled:opacity-60"
           >
             Cancel
           </button>

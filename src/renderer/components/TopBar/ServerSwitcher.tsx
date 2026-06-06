@@ -26,6 +26,7 @@ import {
   type ConnectionStatus,
 } from '@/stores/connect-host'
 import { useSettingsStore } from '@/stores/settings'
+import { useAddServerFocusStore } from '@/stores/add-server-focus'
 
 function statusColor(status: ConnectionStatus): string {
   switch (status) {
@@ -61,6 +62,7 @@ export default function ServerSwitcher(): React.JSX.Element {
   const connectionStatus = useConnectHostStore((s) => s.connectionStatus)
   const pickHost = useConnectHostStore((s) => s.pickHost)
   const openSettings = useSettingsStore((s) => s.openSettings)
+  const requestAddServerFocus = useAddServerFocusStore((s) => s.requestAddServerFocus)
 
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -98,11 +100,14 @@ export default function ServerSwitcher(): React.JSX.Element {
   )
 
   // PRD §1: "Add a server…" routes to Settings → Connections (the
-  // address book), NOT an inline add form.
+  // address book), NOT an inline add form. Beyond opening the section, we
+  // ask the Connections "Add a Server" form to reveal itself, scroll into
+  // view, and focus its first input — so the user lands ready to type.
   const goToConnections = useCallback(() => {
     setOpen(false)
     openSettings('connections')
-  }, [openSettings])
+    requestAddServerFocus()
+  }, [openSettings, requestAddServerFocus])
 
   return (
     <div

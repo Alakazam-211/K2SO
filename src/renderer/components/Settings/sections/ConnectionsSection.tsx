@@ -13,7 +13,7 @@
 // (`pickHost`) so a host without a remembered token drops into the same
 // full-screen sign-in.
 
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   useConnectHostStore,
   rememberPassword,
@@ -24,6 +24,8 @@ import {
   type ConnectionStatus,
 } from '@/stores/connect-host'
 import { parseServerUrl, isValidUsername } from '@/lib/connect-validate'
+import { IconLock } from '@/components/icons/IconLock'
+import { useAddServerFocus } from '@/stores/add-server-focus'
 import type { SettingEntry } from '../searchManifest'
 
 export const CONNECTIONS_MANIFEST: SettingEntry[] = [
@@ -77,10 +79,32 @@ export function ConnectionsSection(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Top-bar "Add a server…" → reveal + scroll-to + focus this form.
+  const addServerFocusSeq = useAddServerFocus()
+  const formRef = useRef<HTMLDivElement | null>(null)
+  const labelRef = useRef<HTMLInputElement | null>(null)
+
   const beginAdd = (): void => {
     setError(null)
     setDraft(emptyDraft())
   }
+
+  // When the top-bar requests focus, open the add form (if not already
+  // editing one) so it mounts, then scroll it into view + focus the first
+  // input. We respond to every bump of the monotonic request counter.
+  useEffect(() => {
+    if (addServerFocusSeq === 0) return
+    setError(null)
+    setDraft((d) => d ?? emptyDraft())
+    // Defer to the next frame so the form (and its inputs) are mounted.
+    const raf = requestAnimationFrame(() => {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      labelRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+    // Only re-run when a NEW focus request arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addServerFocusSeq])
 
   const beginEdit = (h: ConnectHost): void => {
     setError(null)
@@ -216,8 +240,8 @@ export function ConnectionsSection(): React.JSX.Element {
                 />
                 <div className="flex flex-col min-w-0">
                   <span className="text-xs text-[var(--color-text-primary)] truncate">{h.label}</span>
-                  <span className="text-[10px] text-[var(--color-text-muted)] truncate">
-                    {h.secure ? '🔒 ' : ''}
+                  <span className="text-[10px] text-[var(--color-text-muted)] truncate flex items-center gap-1">
+                    {h.secure && <IconLock className="w-2.5 h-2.5 flex-shrink-0" />}
                     {h.secure && h.port === 443 ? h.hostname : `${h.hostname}:${h.port}`}
                     {h.remember ? ' · saved' : ''}
                   </span>
@@ -248,11 +272,11 @@ export function ConnectionsSection(): React.JSX.Element {
 
       {/* Add / Edit form */}
       {draft ? (
-        <div className="mt-4 px-3 py-3 border border-[var(--color-border)] space-y-2" data-settings-id="connections.add">
+        <div ref={formRef} className="mt-4 px-3 py-3 border border-[var(--color-border)] space-y-2" data-settings-id="connections.add">
           <div className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">
             {draft.id ? 'Edit server' : 'Add server'}
           </div>
-          <input className={inputCls} placeholder="Label (e.g. Hetzner box)" value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} />
+          <input ref={labelRef} className={inputCls} placeholder="Label (e.g. My Mac Mini)" value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} />
           <input
             className={inputCls}
             placeholder="K2 Server URL (e.g. https://rosson.k2.dev)"
