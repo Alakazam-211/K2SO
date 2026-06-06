@@ -1,7 +1,7 @@
-import { useMemo, useCallback, useState, useEffect, useRef } from 'react'
+import { useMemo, useCallback, useState, useEffect, useRef, Fragment } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
-import { useActiveAgentsStore } from '@/stores/active-agents'
+import { useActiveAgentsStore, projectHasLiveSession } from '@/stores/active-agents'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
 import { useSettingsStore, clampActiveWindowHours } from '@/stores/settings'
@@ -39,34 +39,22 @@ export function isWithinActiveWindow(
 }
 
 /**
- * P3 — autonomous (self-driving) predicate for the Active-bar indicator.
+ * EKG (heartbeat) badge predicate for the Active-bar indicator.
  *
- * A heartbeat work-fire bumps the workspace's `last_interaction_at`
- * (daemon-side, gated on `heartbeat_action` — real work, never a no-op),
- * which puts it inside the Active window. This predicate decides whether
- * an item shows the autonomous EKG-pulse badge (self-driving) instead of
- * the braille spinner (user-driving):
- *
- *   - `heartbeatEnabled` must be on — only heartbeat-managed workspaces
- *     can be self-driving. (A no-op wake never surfaces, so being inside
- *     the window already implies a recent work-fire OR a user action;
- *     the heartbeat gate keeps user-only workspaces from showing it.)
- *   - inside the Active window (the work-fire just bumped it).
- *   - NOT while the user's own session is actively working — the braille
- *     spinner wins then, so a user-driven turn never reads as autonomous.
+ * CONFIG-FLAG semantics (user decision 2026-06-06): the EKG icon means
+ * "this workspace has at least one enabled heartbeat" — i.e. it CAN run
+ * on its own — NOT "it is self-driving right this second." It's a static
+ * capability flag, persistent for as long as a heartbeat is enabled,
+ * shown on any Active item. It deliberately does NOT depend on the Active
+ * window or on whether a heartbeat recently fired, and it COEXISTS with
+ * the braille spinner (EKG = configured to self-drive; spinner = working
+ * now). `heartbeatEnabled` is the live aggregate from projects/list (any
+ * enabled, non-archived heartbeat).
  *
  * Pure + exported so it's unit-testable without mounting the component.
  */
-export function isAutonomouslyActive(
-  heartbeatEnabled: number,
-  lastInteractionAt: number | null | undefined,
-  nowSecs: number,
-  windowHours: number,
-  isUserAgentWorking: boolean,
-): boolean {
-  if (isUserAgentWorking) return false
-  if (heartbeatEnabled === 0) return false
-  return isWithinActiveWindow(lastInteractionAt, nowSecs, windowHours)
+export function hasEnabledHeartbeat(heartbeatEnabled: number): boolean {
+  return heartbeatEnabled !== 0
 }
 
 /**
@@ -324,8 +312,19 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       }
     }
 
-    return result
+    return sortPinnedFirst(result)
   }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick, activeWindowHours])
+}
+
+/** Stable partition: manually-pinned (Active-pinned) workspaces float to the
+ *  top, everything else keeps its existing order. The renderer draws a single
+ *  separator at the pinned↔rest boundary so the pinned group reads apart
+ *  without needing a per-item icon. Applied to BOTH the hook and the
+ *  keyboard-shortcut variant so Cmd/⌥⌘ 1-9 follow the visible order. */
+function sortPinnedFirst(items: ProjectWithWorkspaces[]): ProjectWithWorkspaces[] {
+  const pinned = items.filter((p) => p.manuallyActive)
+  if (pinned.length === 0 || pinned.length === items.length) return items
+  return [...pinned, ...items.filter((p) => !p.manuallyActive)]
 }
 
 function ActiveBarItem({
@@ -344,25 +343,17 @@ function ActiveBarItem({
   const shortcutNum = index < 9 ? index + 1 : index === 9 ? 0 : null
   const projectAgentStatus = useActiveAgentsStore((s) => s.getProjectStatus(project.id))
   const isAgentWorking = projectAgentStatus === 'working' || projectAgentStatus === 'permission'
-  const activeWindowHours = useSettingsStore((s) => s.activeWindowHours)
+  // Green "live session" dot — the workspace currently holds a live PTY
+  // (i.e. it's consuming RAM and is reapable on dismiss/age-out). Selector
+  // returns a boolean so the item only re-renders when its liveness flips.
+  const hasLiveSession = useActiveAgentsStore((s) => projectHasLiveSession(s.liveSessionCwds, project.path))
 
-  // P3 — autonomous (self-driving) indicator. A heartbeat work-fire bumps
-  // the workspace's `last_interaction_at` (daemon-side), putting it inside
-  // the Active window; this badge tells the user the agent surfaced this
-  // workspace ON ITS OWN. Shown when the workspace has an enabled
-  // heartbeat AND is inside the Active window, but NOT while the user's
-  // own session is actively working (the braille spinner wins then — a
-  // user-driven turn shouldn't read as autonomous). Distinct glyph (EKG
-  // pulse) vs the braille spinner so self-driving reads apart from
-  // user-driving.
-  const now = Math.floor(Date.now() / 1000)
-  const isAutonomous = isAutonomouslyActive(
-    project.heartbeatEnabled,
-    project.lastInteractionAt,
-    now,
-    activeWindowHours,
-    isAgentWorking,
-  )
+  // EKG (heartbeat) badge — config-flag semantics: shown whenever this
+  // workspace has ≥1 enabled heartbeat, i.e. it CAN self-drive. Persistent
+  // (not gated on recency or on a recent fire) and coexists with the
+  // braille spinner. Distinct glyph (EKG pulse) reads as "has autonomous
+  // heartbeats" vs the spinner's "working now".
+  const showEkg = hasEnabledHeartbeat(project.heartbeatEnabled)
 
   return (
     <button
@@ -390,14 +381,22 @@ function ActiveBarItem({
           <span className="braille-spinner" />
         </span>
       )}
-      {isAutonomous && (
+      {showEkg && (
         <span
           className="flex-shrink-0 text-[var(--color-text-muted)] opacity-80"
-          title="Self-driving — surfaced by a heartbeat doing work"
+          title="Has an enabled heartbeat — this workspace can run on its own"
         >
           <IconAutonomous className="w-3.5 h-3.5" />
         </span>
       )}
+      {/* Session-liveness square, RIGHT of the EKG — always shown: green when
+          ≥1 live session (consuming RAM, reapable), grey when none alive. */}
+      <span
+        className={`flex-shrink-0 w-1.5 h-1.5 rounded-[1px] ${
+          hasLiveSession ? 'bg-green-500' : 'bg-white/20'
+        }`}
+        title={hasLiveSession ? 'Live session running' : 'No live session'}
+      />
       {shortcutNum !== null && (
         <span className="text-[10px] font-mono text-[var(--color-text-muted)] flex-shrink-0 tabular-nums">
           {shortcutNum}
@@ -500,6 +499,10 @@ export default function ActiveBar(): React.JSX.Element | null {
 
   const [collapsed, setCollapsed] = useState(false)
 
+  // Boundary index for the pinned↔rest separator. Items are already sorted
+  // pinned-first by sortPinnedFirst, so this is just the pinned count.
+  const pinnedCount = items.filter((p) => p.manuallyActive).length
+
   if (items.length === 0) return null
 
   return (
@@ -537,14 +540,20 @@ export default function ActiveBar(): React.JSX.Element | null {
       >
         <div className="px-1 pb-1">
         {items.map((project, index) => (
-          <ActiveBarItem
-            key={project.id}
-            project={project}
-            index={index}
-            isCurrentProject={project.id === activeProjectId}
-            onClick={() => handleClick(project)}
-            onContextMenu={(e) => handleContextMenu(e, project)}
-          />
+          <Fragment key={project.id}>
+            {/* Single separator at the pinned↔rest boundary (pinned floated
+                to top). Only renders when both groups are non-empty. */}
+            {index === pinnedCount && pinnedCount > 0 && (
+              <div className="mx-2 my-1 border-t border-[var(--color-border)]" />
+            )}
+            <ActiveBarItem
+              project={project}
+              index={index}
+              isCurrentProject={project.id === activeProjectId}
+              onClick={() => handleClick(project)}
+              onContextMenu={(e) => handleContextMenu(e, project)}
+            />
+          </Fragment>
         ))}
         </div>
       </div>
@@ -565,7 +574,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   pruneExpiredActiveBarMemory(now)
   pruneExpiredDismissedProjects(now)
 
-  return projects.filter((p) => {
+  return sortPinnedFirst(projects.filter((p) => {
     // 0.37.13 — keep pinned + agent-mode workspaces eligible for
     // Active. Same rationale as the hook above: 1-0 shortcuts should
     // work on the workspaces the user is actually using.
@@ -576,7 +585,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
     if (Object.keys(backgroundWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
     if (_activeBarMemory.has(p.id)) return true
     return false
-  })
+  }))
 }
 
 /** Export for use by keyboard shortcuts */

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { useToastStore } from '@/stores/toast'
 import type { SettingEntry } from '../searchManifest'
@@ -792,6 +793,10 @@ export function HeartbeatsPanel({
     await daemonCliGet('heartbeat/archive', { project: project.path, name })
     toast.addToast(`Archived heartbeat "${name}"`, 'info', 3000)
     await refresh()
+    // Archiving changes the workspace's heartbeat aggregate (archived
+    // heartbeats don't count), so refresh the projects store → Active-bar
+    // EKG badge updates live without an app relaunch.
+    void emit('sync:projects').catch(() => {})
   }
 
   const handleToggle = async (row: HeartbeatRow): Promise<void> => {
@@ -802,6 +807,10 @@ export function HeartbeatsPanel({
       enabled: !row.enabled,
     })
     await refresh()
+    // Enabling/disabling flips the workspace's `heartbeat_enabled` aggregate.
+    // Emit sync:projects so the projects store refetches and the Active-bar
+    // EKG badge reflects the change immediately (no relaunch needed).
+    void emit('sync:projects').catch(() => {})
   }
 
   // 0.37.8 — per-heartbeat opt-in to deliver WAKEUP.md into the

@@ -44,6 +44,19 @@ function agentMapsEqual(
   return true
 }
 
+/** True when any live PTY's cwd is inside `projectPath` (exact match or a
+ *  subdirectory) — i.e. the workspace currently holds a live session. Drives
+ *  the Active-bar green "live session" dot. Reads `liveSessionCwds` off the
+ *  active-agents store. */
+export function projectHasLiveSession(liveSessionCwds: Set<string>, projectPath: string): boolean {
+  if (liveSessionCwds.has(projectPath)) return true
+  const prefix = projectPath.endsWith('/') ? projectPath : `${projectPath}/`
+  for (const cwd of liveSessionCwds) {
+    if (cwd.startsWith(prefix)) return true
+  }
+  return false
+}
+
 export interface ActiveAgent {
   terminalId: string
   command: string
@@ -90,6 +103,10 @@ interface ActiveAgentsState {
   paneProjectMap: Map<string, string>
   /** Terminals waiting to be briefly mounted off-screen to spawn their PTY */
   backgroundSpawns: BackgroundSpawn[]
+  /** cwds of every live PTY — drives the Active-bar "has a live session" dot.
+   *  Derived from the list-running poll; a workspace is "live" when any PTY's
+   *  cwd is inside it. See `projectHasLiveSession`. */
+  liveSessionCwds: Set<string>
 
   hasActiveAgents: () => boolean
   getActiveAgentsList: () => ActiveAgent[]
@@ -114,6 +131,7 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
   paneStatuses: new Map(),
   paneProjectMap: new Map(),
   backgroundSpawns: [],
+  liveSessionCwds: new Set(),
 
   addBackgroundSpawn: (spawn: BackgroundSpawn) => {
     set((s) => ({ backgroundSpawns: [...s.backgroundSpawns, spawn] }))
@@ -468,6 +486,29 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
       // detection rather than thrash with per-terminal retries.
     }
     const cmdByTerminal = new Map(running.map((r) => [r.terminalId, r.command]))
+
+    // Active-bar "has a live session" dot — the set of cwds with a live
+    // session. UNION of two sources because they're disjoint:
+    //   - terminal/list-running → legacy TerminalManager PTYs (`running`)
+    //   - agents/running        → v2 daemon-PTY agent sessions (the pinned
+    //                             Chat / claude sessions — NOT in list-running)
+    // The v2 set is the one that actually matters for the chat sessions we
+    // reap; without it the dot would never light for a normal workspace.
+    const liveCwds = new Set(running.map((r) => r.cwd))
+    try {
+      const agentSessions = await daemonCliGet<Array<{ cwd: string }>>('agents/running')
+      for (const a of agentSessions) liveCwds.add(a.cwd)
+    } catch {
+      // Daemon momentarily unreachable — keep the legacy set for this cycle.
+    }
+    const prevLive = get().liveSessionCwds
+    let liveChanged = prevLive.size !== liveCwds.size
+    if (!liveChanged) {
+      for (const c of liveCwds) {
+        if (!prevLive.has(c)) { liveChanged = true; break }
+      }
+    }
+    if (liveChanged) set({ liveSessionCwds: liveCwds })
 
     for (const t of terminals) {
       const command = cmdByTerminal.get(t.terminalId) ?? null

@@ -24,7 +24,7 @@ vi.mock('@/lib/daemon-settings', () => ({
   settingsReset: vi.fn(async () => ({})),
 }))
 
-import { isWithinActiveWindow, isAutonomouslyActive } from './ActiveBar'
+import { isWithinActiveWindow, hasEnabledHeartbeat } from './ActiveBar'
 
 describe('P1.C — isWithinActiveWindow (Active-Bar rule 2)', () => {
   // All values in unix SECONDS (matching ActiveBar's clock).
@@ -60,32 +60,21 @@ describe('P1.C — isWithinActiveWindow (Active-Bar rule 2)', () => {
   })
 })
 
-describe('P3 — isAutonomouslyActive (Active-Bar autonomous indicator)', () => {
-  const now = 1_000_000
-  const hour = 60 * 60
-  const recent = now - hour / 2 // 30 min ago — inside the default window
-
-  it('shows for a heartbeat workspace freshly bumped by a work-fire', () => {
-    // heartbeatEnabled=1, inside window, user not driving → self-driving.
-    expect(isAutonomouslyActive(1, recent, now, 24, false)).toBe(true)
+describe('EKG badge — hasEnabledHeartbeat (config-flag semantics)', () => {
+  // Config-flag (2026-06-06): the EKG icon means "has ≥1 enabled heartbeat",
+  // i.e. CAN self-drive — NOT "self-driving right now". It does NOT depend on
+  // the Active window, recency of a fire, or whether the user is driving.
+  it('shows whenever a heartbeat is enabled (heartbeatEnabled !== 0)', () => {
+    expect(hasEnabledHeartbeat(1)).toBe(true)
   })
 
-  it('does NOT show when no heartbeat is enabled (user-only workspace)', () => {
-    // A user could have bumped lastInteractionAt; with no heartbeat it
-    // is NOT autonomous (it shows as a plain Active item, no badge).
-    expect(isAutonomouslyActive(0, recent, now, 24, false)).toBe(false)
+  it('does NOT show when no heartbeat is enabled', () => {
+    expect(hasEnabledHeartbeat(0)).toBe(false)
   })
 
-  it('does NOT show while the user session is actively working', () => {
-    // The braille spinner wins — a user-driven turn must not read as
-    // self-driving even on a heartbeat-enabled workspace.
-    expect(isAutonomouslyActive(1, recent, now, 24, true)).toBe(false)
-  })
-
-  it('does NOT show once the workspace has aged out of the window', () => {
-    // No recent work-fire → outside the window → ages out normally
-    // (mirrors the daemon gate: a no-op wake never bumps the stamp).
-    expect(isAutonomouslyActive(1, now - hour * 36, now, 24, false)).toBe(false)
-    expect(isAutonomouslyActive(1, null, now, 24, false)).toBe(false)
+  it('is independent of recency — shows even for a long-idle workspace', () => {
+    // No window/lastInteractionAt input at all: a stale-but-enabled
+    // workspace still reads as "can self-drive".
+    expect(hasEnabledHeartbeat(1)).toBe(true)
   })
 })

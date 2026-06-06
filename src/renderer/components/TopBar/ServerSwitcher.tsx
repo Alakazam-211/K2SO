@@ -47,7 +47,7 @@ function StatusDot({ status }: { status: ConnectionStatus }): React.JSX.Element 
       style={{
         width: 7,
         height: 7,
-        borderRadius: '50%',
+        borderRadius: 1,
         background: statusColor(status),
         flexShrink: 0,
         display: 'inline-block',

@@ -1,7 +1,9 @@
 import { useCallback, useState, useRef, useEffect, useMemo } from 'react'
 import { useTabsStore, type TerminalItemData } from '@/stores/tabs'
 import { useSettingsStore } from '@/stores/settings'
+import { useProjectsStore } from '@/stores/projects'
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import { agentChatId } from '@/lib/terminal-id'
 import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliPost } from '@/lib/daemon-cli'
@@ -27,6 +29,12 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
   const reorderTabs = useTabsStore((s) => s.reorderTabs)
   const agentMap = useActiveAgentsStore((s) => s.agents)
   const paneStatusMap = useActiveAgentsStore((s) => s.paneStatuses)
+  // This TabBar is scoped to one workspace (`cwd`); resolve its projectId so
+  // the pinned Chat tab can read its daemon-backed chat pane's working status.
+  // The chat pane is keyed `agent-chat:<projectId>` in `paneStatuses` — it's
+  // an `agent` item, NOT a `terminal` item, so the generic working-detection
+  // below (which only inspects terminal panes) never sees it.
+  const projectId = useProjectsStore((s) => s.projects.find((p) => p.path === cwd)?.id ?? null)
 
   // Heartbeat-tab detection key: a Set of every heartbeat's
   // `lastSessionId` (the Claude `--resume` target stamped in the DB
@@ -385,8 +393,20 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                 ? (firstItem.data as { section?: 'inbox' | 'chat' }).section
                 : undefined
 
+            // The pinned Chat tab's working signal lives on its daemon-backed
+            // chat pane (`agent-chat:<projectId>`), invisible to the generic
+            // terminal-pane check above. Read it directly so the icon→spinner
+            // swap (and activity underline) fire. Chat-only — the Inbox tab is
+            // a passive queue with no working state. Same flag the Active bar
+            // uses (paneStatuses, set by recordTitleActivity / lifecycle hook).
+            const chatStatus = section === 'chat' && projectId
+              ? paneStatusMap.get(agentChatId(projectId, ''))
+              : undefined
+            const chatWorking = chatStatus === 'working' || chatStatus === 'permission'
+            const systemTabActive = isAgentActive || chatWorking
+
             const iconSvg = (() => {
-              if (isAgentActive) {
+              if (systemTabActive) {
                 return <span className="braille-spinner text-[11px]" />
               }
               if (section === 'inbox') {
@@ -440,7 +460,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
               >
                 {iconSvg}
                 {/* Activity underline */}
-                {isAgentActive && (
+                {systemTabActive && (
                   <div className="absolute bottom-0 left-1 right-1 h-[2px] bg-[var(--color-accent)] rounded-full" />
                 )}
               </div>
