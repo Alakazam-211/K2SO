@@ -44,6 +44,28 @@ let hasLoadedWorkspaceSessions = false
 export const DISMISS_REAP_GRACE_MS = 15_000
 const _pendingChatReaps = new Map<string, ReturnType<typeof setTimeout>>()
 
+/** P2 — one workspace's inputs to the age-out sweep. The caller
+ *  (ActiveBar's periodic recompute) supplies the per-project signals
+ *  the renderer already holds in the projects store, plus the
+ *  pre-computed Active-window verdict (so the predicate stays in one
+ *  place — `isWithinActiveWindow` in ActiveBar). tabs.ts owns the
+ *  background-snapshot + foreground checks and the reap scheduling. */
+export interface AgeOutSweepCandidate {
+  projectId: string
+  projectPath: string
+  /** True when this project's `lastInteractionAt` is OUTSIDE the
+   *  configured Active window (i.e. `isWithinActiveWindow(...) ===
+   *  false`). Computed by the caller against the same predicate the
+   *  Active Bar uses so there's a single source of truth. */
+  isAged: boolean
+  /** Pinned to Active (projects.manuallyActive !== 0). Never reaped. */
+  manuallyActive: boolean
+  /** Has an ENABLED heartbeat (projects.heartbeatEnabled !== 0). A
+   *  heartbeat-managed workspace is kept warm so an autonomous wake
+   *  doesn't land on a reaped PTY. Never reaped while enabled. */
+  heartbeatEnabled: boolean
+}
+
 /** Test-only — clear every pending reap timer so vitest cases don't
  *  leak handles into each other. Not exported through the store API. */
 export function __clearPendingChatReapsForTests(): void {
@@ -675,6 +697,20 @@ interface TabsState {
    *  Wired into the project-activation + re-add-to-Active paths so a
    *  return within the 15s window keeps the warm chat PTY alive. */
   cancelWorkspaceChatReap: (projectId: string) => void
+  /** P2 — age-out sweep. For each project holding a live pinned-Chat
+   *  PTY (a stashed `backgroundWorkspaces` snapshot), schedule the #657
+   *  dismiss-reap when ALL of: its `lastInteractionAt` is OUTSIDE the
+   *  Active window (`isAged`), it's NOT pinned (`manuallyActive`), it's
+   *  NOT the foreground workspace, and it has NO enabled heartbeat. So
+   *  "aged out of Active" behaves exactly like an implicit dismiss
+   *  (same 15s grace + cancel-on-return + fire-time foreground
+   *  re-check). Heartbeat-managed workspaces are kept warm so an
+   *  autonomous wake doesn't land on a reaped PTY. Idempotent and safe
+   *  to call on every ActiveBar tick — `scheduleWorkspaceChatReap`
+   *  de-dupes pending timers and a still-live chat that's already
+   *  scheduled just resets to the same grace. Driven by the renderer
+   *  (the daemon has no `lastInteractionAt` access). */
+  sweepAgedOutWorkspaceChats: (candidates: AgeOutSweepCandidate[]) => void
   persistActiveWorkspace: () => void
   /** Add a tab to a workspace without switching to it. If the workspace is active,
    *  adds directly. If background/stashed, saves to DB session so it's there when restored.
@@ -3678,6 +3714,40 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     if (!handle) return
     clearTimeout(handle)
     _pendingChatReaps.delete(projectId)
+  },
+
+  sweepAgedOutWorkspaceChats: (candidates: AgeOutSweepCandidate[]) => {
+    if (candidates.length === 0) return
+    const state = get()
+    const fgId = currentActiveProjectId()
+
+    for (const c of candidates) {
+      // Keep-warm gates — any one keeps the chat PTY alive:
+      //   - still inside the Active window (recent interaction),
+      //   - pinned to Active (explicit user signal),
+      //   - the workspace the user is looking at right now,
+      //   - an enabled heartbeat (autonomous wake would resume into it).
+      if (!c.isAged) continue
+      if (c.manuallyActive) continue
+      if (c.heartbeatEnabled) continue
+      if (c.projectId === fgId) continue
+
+      // Only reap workspaces that actually hold a live pinned-Chat
+      // session — i.e. a stashed `backgroundWorkspaces` snapshot whose
+      // chat agent item carries a persisted sessionId. The active
+      // workspace's chat lives in `tabs`, not a snapshot, and is
+      // already excluded by the foreground gate above. Skipping
+      // snapshot-less projects avoids scheduling no-op reaps (and the
+      // 1s/15s timer churn) for workspaces that never spawned a chat.
+      if (!findChatSessionIdForProject(state, c.projectId)) continue
+
+      // Reuse #657's dismiss path verbatim: 15s grace, cancel-on-return
+      // (wired into setActiveProject/setActiveWorkspace +
+      // "Keep in Active Bar"), and a fire-time foreground re-check. So
+      // an age-out is an implicit dismiss. Idempotent — a project
+      // already scheduled just resets to the same grace window.
+      get().scheduleWorkspaceChatReap(c.projectId, c.projectPath)
+    }
   },
 
   persistActiveWorkspace: () => {

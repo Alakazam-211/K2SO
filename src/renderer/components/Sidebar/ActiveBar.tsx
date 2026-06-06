@@ -160,6 +160,28 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
     prevActiveProjectIdRef.current = activeProjectId
   }, [activeProjectId])
 
+  // P2 — age-out sweep. Piggyback the existing 60s `tick`: any project
+  // that has aged out of the Active window (and isn't pinned / the
+  // foreground / heartbeat-managed) has its background pinned-Chat PTY
+  // reaped via the #657 dismiss path, freeing RAM. The decision uses
+  // the SAME `isWithinActiveWindow` predicate the bar membership uses
+  // (single source of truth); tabs.ts owns the background-snapshot +
+  // foreground gates and the 15s-grace scheduling. Renderer-driven
+  // because the daemon has no `lastInteractionAt` access.
+  useEffect(() => {
+    const now = Math.floor(Date.now() / 1000)
+    const candidates = projects.map((p) => ({
+      projectId: p.id,
+      projectPath: p.path,
+      isAged: !isWithinActiveWindow(p.lastInteractionAt, now, activeWindowHours),
+      manuallyActive: p.manuallyActive !== 0,
+      heartbeatEnabled: p.heartbeatEnabled !== 0,
+    }))
+    useTabsStore.getState().sweepAgedOutWorkspaceChats(candidates)
+    // `tick` (the 60s interval) is the cadence driver; projects /
+    // activeWindowHours re-run it immediately on a relevant change.
+  }, [projects, activeWindowHours, tick])
+
   return useMemo(() => {
     const now = Math.floor(Date.now() / 1000)
 
