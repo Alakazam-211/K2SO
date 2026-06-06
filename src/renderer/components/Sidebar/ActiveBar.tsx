@@ -16,6 +16,7 @@ import { onActiveHostChange } from '@/stores/connect-host'
 import { showContextMenu } from '@/lib/context-menu'
 import ProjectAvatar from './ProjectAvatar'
 import { KeyCombo } from '@/components/KeySymbol'
+import { IconAutonomous } from '@/components/icons/IconAutonomous'
 import type { ProjectWithWorkspaces } from '@/stores/projects'
 
 const TWENTY_FOUR_HOURS = 24 * 60 * 60
@@ -35,6 +36,37 @@ export function isWithinActiveWindow(
   if (!lastInteractionAt) return false
   const windowSecs = clampActiveWindowHours(windowHours) * 60 * 60
   return nowSecs - lastInteractionAt < windowSecs
+}
+
+/**
+ * P3 — autonomous (self-driving) predicate for the Active-bar indicator.
+ *
+ * A heartbeat work-fire bumps the workspace's `last_interaction_at`
+ * (daemon-side, gated on `heartbeat_action` — real work, never a no-op),
+ * which puts it inside the Active window. This predicate decides whether
+ * an item shows the autonomous EKG-pulse badge (self-driving) instead of
+ * the braille spinner (user-driving):
+ *
+ *   - `heartbeatEnabled` must be on — only heartbeat-managed workspaces
+ *     can be self-driving. (A no-op wake never surfaces, so being inside
+ *     the window already implies a recent work-fire OR a user action;
+ *     the heartbeat gate keeps user-only workspaces from showing it.)
+ *   - inside the Active window (the work-fire just bumped it).
+ *   - NOT while the user's own session is actively working — the braille
+ *     spinner wins then, so a user-driven turn never reads as autonomous.
+ *
+ * Pure + exported so it's unit-testable without mounting the component.
+ */
+export function isAutonomouslyActive(
+  heartbeatEnabled: number,
+  lastInteractionAt: number | null | undefined,
+  nowSecs: number,
+  windowHours: number,
+  isUserAgentWorking: boolean,
+): boolean {
+  if (isUserAgentWorking) return false
+  if (heartbeatEnabled === 0) return false
+  return isWithinActiveWindow(lastInteractionAt, nowSecs, windowHours)
 }
 
 /**
@@ -283,6 +315,25 @@ function ActiveBarItem({
   const shortcutNum = index < 9 ? index + 1 : index === 9 ? 0 : null
   const projectAgentStatus = useActiveAgentsStore((s) => s.getProjectStatus(project.id))
   const isAgentWorking = projectAgentStatus === 'working' || projectAgentStatus === 'permission'
+  const activeWindowHours = useSettingsStore((s) => s.activeWindowHours)
+
+  // P3 — autonomous (self-driving) indicator. A heartbeat work-fire bumps
+  // the workspace's `last_interaction_at` (daemon-side), putting it inside
+  // the Active window; this badge tells the user the agent surfaced this
+  // workspace ON ITS OWN. Shown when the workspace has an enabled
+  // heartbeat AND is inside the Active window, but NOT while the user's
+  // own session is actively working (the braille spinner wins then — a
+  // user-driven turn shouldn't read as autonomous). Distinct glyph (EKG
+  // pulse) vs the braille spinner so self-driving reads apart from
+  // user-driving.
+  const now = Math.floor(Date.now() / 1000)
+  const isAutonomous = isAutonomouslyActive(
+    project.heartbeatEnabled,
+    project.lastInteractionAt,
+    now,
+    activeWindowHours,
+    isAgentWorking,
+  )
 
   return (
     <button
@@ -308,6 +359,14 @@ function ActiveBarItem({
           projectAgentStatus === 'permission' ? 'text-red-400' : 'text-[var(--color-text-muted)]'
         }`}>
           <span className="braille-spinner" />
+        </span>
+      )}
+      {isAutonomous && (
+        <span
+          className="flex-shrink-0 text-[var(--color-text-muted)] opacity-80"
+          title="Self-driving — surfaced by a heartbeat doing work"
+        >
+          <IconAutonomous className="w-3.5 h-3.5" />
         </span>
       )}
       {shortcutNum !== null && (

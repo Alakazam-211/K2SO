@@ -24,7 +24,7 @@ vi.mock('@/lib/daemon-settings', () => ({
   settingsReset: vi.fn(async () => ({})),
 }))
 
-import { isWithinActiveWindow } from './ActiveBar'
+import { isWithinActiveWindow, isAutonomouslyActive } from './ActiveBar'
 
 describe('P1.C — isWithinActiveWindow (Active-Bar rule 2)', () => {
   // All values in unix SECONDS (matching ActiveBar's clock).
@@ -57,5 +57,35 @@ describe('P1.C — isWithinActiveWindow (Active-Bar rule 2)', () => {
     expect(isWithinActiveWindow(now - hour / 2, now, 0)).toBe(true)
     expect(isWithinActiveWindow(now - hour * 2, now, 0)).toBe(false)
     expect(isWithinActiveWindow(now - hour / 2, now, NaN)).toBe(true)
+  })
+})
+
+describe('P3 — isAutonomouslyActive (Active-Bar autonomous indicator)', () => {
+  const now = 1_000_000
+  const hour = 60 * 60
+  const recent = now - hour / 2 // 30 min ago — inside the default window
+
+  it('shows for a heartbeat workspace freshly bumped by a work-fire', () => {
+    // heartbeatEnabled=1, inside window, user not driving → self-driving.
+    expect(isAutonomouslyActive(1, recent, now, 24, false)).toBe(true)
+  })
+
+  it('does NOT show when no heartbeat is enabled (user-only workspace)', () => {
+    // A user could have bumped lastInteractionAt; with no heartbeat it
+    // is NOT autonomous (it shows as a plain Active item, no badge).
+    expect(isAutonomouslyActive(0, recent, now, 24, false)).toBe(false)
+  })
+
+  it('does NOT show while the user session is actively working', () => {
+    // The braille spinner wins — a user-driven turn must not read as
+    // self-driving even on a heartbeat-enabled workspace.
+    expect(isAutonomouslyActive(1, recent, now, 24, true)).toBe(false)
+  })
+
+  it('does NOT show once the workspace has aged out of the window', () => {
+    // No recent work-fire → outside the window → ages out normally
+    // (mirrors the daemon gate: a no-op wake never bumps the stamp).
+    expect(isAutonomouslyActive(1, now - hour * 36, now, 24, false)).toBe(false)
+    expect(isAutonomouslyActive(1, null, now, 24, false)).toBe(false)
   })
 })

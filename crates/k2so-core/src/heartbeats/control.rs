@@ -18,7 +18,7 @@ use crate::workspace::scheduler::{
     read_heartbeat_config, write_heartbeat_config, AgentHeartbeatConfig,
 };
 use crate::workspace::wake_prompts::{agent_wakeup_path, wakeup_template_for};
-use crate::db::schema::WorkspaceSession;
+use crate::db::schema::{Project, WorkspaceSession};
 use crate::fs_atomic::{atomic_write_str, log_if_err};
 use crate::workspace::agent::log_agent_warning;
 
@@ -171,6 +171,15 @@ pub fn heartbeat_noop(
 /// Record that an agent took meaningful action this wake. Resets the
 /// consecutive-no-op counter so backoff doesn't trigger on the next
 /// wake.
+///
+/// Session-lifecycle P3: a wake that did REAL WORK must surface the
+/// workspace in the renderer's Active bar with the autonomous indicator,
+/// and must keep it out of P2's age-out reap while the work is live.
+/// `heartbeat_action` is the canonical "this wake produced work" signal —
+/// it's the only call the agent makes from inside the session when it
+/// took meaningful action (its sibling `heartbeat_noop` fires the
+/// opposite, "found nothing" case and deliberately does NOT surface).
+/// So we bolt the surface onto this success edge. See OPEN-2 in the PRD.
 pub fn heartbeat_action(
     project_path: String,
     agent_name: String,
@@ -178,7 +187,59 @@ pub fn heartbeat_action(
     let mut config = read_heartbeat_config(&project_path, &agent_name);
     config.consecutive_no_ops = 0;
     write_heartbeat_config(&project_path, &agent_name, &config)?;
+
+    // Surface the workspace as autonomously-active. Best-effort: a
+    // surfacing failure must never fail the action recording (the
+    // backoff-reset above is the contract; the Active-bar bump is a
+    // courtesy). Errors are swallowed so a missing project row / closed
+    // DB on a headless wake doesn't bubble up to the caller.
+    surface_workspace_for_autonomous_work(&project_path);
+
     Ok(config)
+}
+
+/// P3 — mark a workspace as doing autonomous (heartbeat-driven) work so
+/// it appears in the renderer's Active bar with the autonomous indicator.
+///
+/// Two daemon-side writes, then one renderer kick:
+///   1. `Project::touch_interaction` bumps `last_interaction_at = now`,
+///      which puts the workspace inside the configurable Active window —
+///      the renderer's ActiveBar rule 2 (`isWithinActiveWindow`) already
+///      surfaces any workspace inside that window, so no new renderer
+///      membership rule is needed.
+///   2. `WorkspaceSession::set_surfaced(true)` flips the per-session
+///      surfaced flag (idempotent; a no-op when no session row exists).
+///   3. Emit `HookEvent::SyncProjects` so the renderer's `useWindowSync`
+///      listener re-fetches `projects/list` and the bumped
+///      `last_interaction_at` (plus `heartbeat_enabled`, which drives the
+///      autonomous indicator) flows into the projects store.
+///
+/// P2 interplay: the age-out sweep already skips workspaces with an
+/// enabled heartbeat, so a heartbeat-working workspace is never reaped
+/// mid-work regardless of this bump. Once the heartbeat goes quiet and
+/// the Active window elapses, the workspace ages out normally (this only
+/// refreshes `last_interaction_at` on a real work-fire, not on no-ops).
+///
+/// Best-effort throughout: any failure is logged-and-swallowed.
+pub fn surface_workspace_for_autonomous_work(project_path: &str) {
+    let project_id = {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let Some(project_id) = resolve_project_id(&conn, project_path) else {
+            return;
+        };
+        let _ = Project::touch_interaction(&conn, &project_id);
+        let _ = WorkspaceSession::set_surfaced(&conn, &project_id, true);
+        project_id
+    };
+
+    // Kick the renderer to re-fetch projects/list so the bumped
+    // last_interaction_at surfaces the workspace. Fired outside the DB
+    // lock; a no-op when no sink is registered (headless / smoke tests).
+    crate::agent_hooks::emit(
+        crate::agent_hooks::HookEvent::SyncProjects,
+        serde_json::json!({ "projectId": project_id }),
+    );
 }
 
 #[cfg(test)]
@@ -381,5 +442,120 @@ mod tests {
             err.contains("does not exist"),
             "expected 'does not exist' in error, got: {err}"
         );
+    }
+
+    // ── P3: autonomous-work surfacing gate ────────────────────────────
+    //
+    // These exercise the work-vs-no-op gate that drives the Active-bar
+    // autonomous indicator. `heartbeat_action` (work) MUST bump
+    // `last_interaction_at` + flip `surfaced=1`; `heartbeat_noop`
+    // (found nothing) MUST leave `last_interaction_at` untouched.
+    //
+    // They seed a real `projects` row whose `path` equals the temp
+    // project root (so `resolve_project_id` resolves) plus a
+    // `workspace_sessions` row (so `set_surfaced` has something to
+    // flip). No PTY/heartbeat is ever spawned — `heartbeat_action` /
+    // `heartbeat_noop` are pure DB + config writes.
+
+    use crate::db;
+    use crate::db::schema::{Project, WorkspaceSession};
+
+    /// Insert a `projects` row at `path` (id is unique per call) and a
+    /// matching `workspace_sessions` row. Returns the project id.
+    fn seed_project_with_session(path: &str, label: &str) -> String {
+        db::init_for_tests();
+        let project_id = format!("p3-{label}-{}", std::process::id());
+        let db = db::shared();
+        let conn = db.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO projects \
+             (id, path, name, color, agent_mode, pinned, tab_order) \
+             VALUES (?1, ?2, ?3, '#123456', 'off', 0, 0)",
+            rusqlite::params![project_id, path, label],
+        )
+        .expect("seed project");
+        conn.execute(
+            "INSERT OR REPLACE INTO workspace_sessions \
+             (id, project_id, harness, owner, status, surfaced, created_at) \
+             VALUES (?1, ?2, 'claude', 'agent', 'sleeping', 0, unixepoch())",
+            rusqlite::params![format!("sess-{project_id}"), project_id],
+        )
+        .expect("seed workspace_session");
+        project_id
+    }
+
+    fn read_last_interaction(project_id: &str) -> Option<i64> {
+        let db = db::shared();
+        let conn = db.lock();
+        Project::list(&conn)
+            .expect("Project::list")
+            .into_iter()
+            .find(|p| p.id == project_id)
+            .and_then(|p| p.last_interaction_at)
+    }
+
+    fn read_surfaced(project_id: &str) -> bool {
+        let db = db::shared();
+        let conn = db.lock();
+        WorkspaceSession::is_surfaced(&conn, project_id).expect("is_surfaced")
+    }
+
+    #[test]
+    fn heartbeat_action_bumps_interaction_and_surfaces() {
+        let tp = TempProject::new("p3-action");
+        tp.make_agent("cortana");
+        let project_id = seed_project_with_session(&tp.path_str(), "action");
+
+        // Precondition: not surfaced, no interaction stamp.
+        assert!(!read_surfaced(&project_id), "should start unsurfaced");
+        assert!(
+            read_last_interaction(&project_id).is_none(),
+            "should start with no last_interaction_at"
+        );
+
+        heartbeat_action(tp.path_str(), "cortana".to_string())
+            .expect("heartbeat_action");
+
+        // A work-fire surfaces the workspace.
+        assert!(
+            read_last_interaction(&project_id).is_some(),
+            "work-fire must bump last_interaction_at (enters Active window)"
+        );
+        assert!(
+            read_surfaced(&project_id),
+            "work-fire must flip surfaced=1"
+        );
+    }
+
+    #[test]
+    fn heartbeat_noop_does_not_surface() {
+        let tp = TempProject::new("p3-noop");
+        tp.make_agent("cortana");
+        let project_id = seed_project_with_session(&tp.path_str(), "noop");
+
+        assert!(
+            read_last_interaction(&project_id).is_none(),
+            "should start with no last_interaction_at"
+        );
+
+        heartbeat_noop(tp.path_str(), "cortana".to_string())
+            .expect("heartbeat_noop");
+
+        // A no-op wake must NOT surface the workspace.
+        assert!(
+            read_last_interaction(&project_id).is_none(),
+            "no-op wake must leave last_interaction_at unchanged"
+        );
+        assert!(
+            !read_surfaced(&project_id),
+            "no-op wake must not flip surfaced"
+        );
+    }
+
+    #[test]
+    fn surface_helper_is_noop_for_unknown_project() {
+        // An unknown project path must not panic / error — the helper
+        // is best-effort and silently returns when resolve fails.
+        surface_workspace_for_autonomous_work("/tmp/k2so-p3-does-not-exist-xyz");
     }
 }
