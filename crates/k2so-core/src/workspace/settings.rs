@@ -74,7 +74,12 @@ pub fn get_project_settings(project_path: &str) -> Result<serde_json::Value, Str
     let conn = db.lock();
 
     conn.query_row(
-        "SELECT agent_mode, worktree_mode, heartbeat_enabled, agent_enabled, \
+        // `heartbeat_enabled` computed live as a true aggregate (any enabled,
+        // non-archived heartbeat) — see `Project::list` in db/schema.rs. The
+        // stored `projects.heartbeat_enabled` column is legacy and drifts.
+        "SELECT agent_mode, worktree_mode, \
+                (EXISTS(SELECT 1 FROM workspace_heartbeats wh WHERE wh.project_id = projects.id AND wh.enabled = 1 AND wh.archived_at IS NULL)) AS heartbeat_enabled, \
+                agent_enabled, \
                 pinned, name, tier_id, use_session_stream \
          FROM projects WHERE path = ?1",
         rusqlite::params![project_path],

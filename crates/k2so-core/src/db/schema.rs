@@ -102,8 +102,18 @@ pub struct Project {
 
 impl Project {
     pub fn list(conn: &Connection) -> Result<Vec<Project>> {
+        // `heartbeat_enabled` is computed LIVE as a true aggregate — "does this
+        // workspace have at least one enabled, non-archived heartbeat?" — rather
+        // than read from the stale legacy `projects.heartbeat_enabled` column
+        // (which was derived from `heartbeat_mode` and drifted out of sync with
+        // the per-heartbeat `enabled` flags in `workspace_heartbeats`). The
+        // `enabled = 1 AND archived_at IS NULL` predicate mirrors the scheduler's
+        // notion of a heartbeat that can actually fire (triage.rs). This keeps the
+        // Active-bar autonomous badge + age-out keep-warm gate honest.
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, \
+             (EXISTS(SELECT 1 FROM workspace_heartbeats wh WHERE wh.project_id = projects.id AND wh.enabled = 1 AND wh.archived_at IS NULL)) AS heartbeat_enabled, \
+             agent_mode, tier_id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
              FROM projects ORDER BY tab_order",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -134,8 +144,11 @@ impl Project {
     }
 
     pub fn get(conn: &Connection, id: &str) -> Result<Project> {
+        // `heartbeat_enabled` computed live — see `Project::list` for rationale.
         conn.query_row(
-            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, heartbeat_enabled, agent_mode, tier_id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
+            "SELECT id, name, path, color, tab_order, last_opened_at, worktree_mode, icon_url, focus_group_id, pinned, manually_active, last_interaction_at, created_at, agent_enabled, \
+             (EXISTS(SELECT 1 FROM workspace_heartbeats wh WHERE wh.project_id = projects.id AND wh.enabled = 1 AND wh.archived_at IS NULL)) AS heartbeat_enabled, \
+             agent_mode, tier_id, heartbeat_mode, heartbeat_schedule, heartbeat_last_fire \
              FROM projects WHERE id = ?1",
             params![id],
             |row| {
@@ -2390,6 +2403,53 @@ mod unit_tests {
 
         Project::delete(&conn, &id).unwrap();
         assert_eq!(Project::list(&conn).unwrap().len(), baseline);
+    }
+
+    #[test]
+    fn project_heartbeat_enabled_is_live_aggregate_not_legacy_mode() {
+        // Regression: `projects.heartbeat_enabled` used to be derived from the
+        // legacy `heartbeat_mode` string and drifted out of sync with the
+        // per-heartbeat `enabled` flags (the "Sarah" bug: mode='scheduled' but
+        // every heartbeat disabled → flag wrongly reported 1, which lit the
+        // autonomous badge and kept the session warm forever). `Project::list`
+        // / `get` now compute it live as "any enabled, non-archived heartbeat".
+        let conn = fresh();
+        let id = make_project_row(&conn, "/tmp/proj-hb-agg");
+
+        // Force the legacy drift directly: mode='scheduled' with the stale
+        // stored column set to 1 (exactly what Project::update used to write).
+        conn.execute(
+            "UPDATE projects SET heartbeat_mode = 'scheduled', heartbeat_enabled = 1 WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        let stored: i64 = conn
+            .query_row("SELECT heartbeat_enabled FROM projects WHERE id = ?1", params![id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 1, "legacy stored column should be 1 (the drift we're defending against)");
+
+        // No heartbeats yet → live aggregate must be 0 despite mode='scheduled'.
+        assert_eq!(Project::get(&conn, &id).unwrap().heartbeat_enabled, 0);
+
+        // Two heartbeats, both disabled → still 0 (the exact Sarah state).
+        AgentHeartbeat::insert(&conn, "hb-default", &id, "default", "daily", "{}", "wakeup.md", false).unwrap();
+        AgentHeartbeat::insert(&conn, "hb-triage", &id, "triage", "hourly", "{}", "wakeup.md", false).unwrap();
+        assert_eq!(
+            Project::get(&conn, &id).unwrap().heartbeat_enabled,
+            0,
+            "all heartbeats disabled → aggregate 0"
+        );
+        // And via list() (the renderer's actual source).
+        let from_list = Project::list(&conn).unwrap().into_iter().find(|p| p.id == id).unwrap();
+        assert_eq!(from_list.heartbeat_enabled, 0);
+
+        // Enable one → aggregate flips to 1.
+        AgentHeartbeat::set_enabled(&conn, &id, "triage", true).unwrap();
+        assert_eq!(Project::get(&conn, &id).unwrap().heartbeat_enabled, 1);
+
+        // Archive the only enabled one → back to 0 (archived ≠ live, matches scheduler).
+        AgentHeartbeat::archive(&conn, &id, "triage").unwrap();
+        assert_eq!(Project::get(&conn, &id).unwrap().heartbeat_enabled, 0, "archived heartbeat must not count");
     }
 
     #[test]
