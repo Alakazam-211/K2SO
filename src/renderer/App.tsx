@@ -47,6 +47,7 @@ import AgentCloseDialog from './components/AgentCloseDialog/AgentCloseDialog'
 import FocusWorkspaceHeader from './components/FocusWindow/FocusWorkspaceHeader'
 import { useGitInfo } from './hooks/useGit'
 import { useUpdateChecker } from './hooks/useUpdateChecker'
+import { useAppUpdateTrigger } from './hooks/useAppUpdateTrigger'
 import { useWindowSync } from './hooks/useWindowSync'
 import { useTimerStore } from './stores/timer'
 import CountdownOverlay from './components/Timer/CountdownOverlay'
@@ -578,6 +579,12 @@ export default function App(): React.JSX.Element {
 
   // Check for updates on launch and every 3 hours
   useUpdateChecker()
+
+  // Shape A remote-update driver: when a remote Owner/Admin triggers an
+  // update of THIS bundled-app host, the local daemon emits
+  // `app:update-trigger`; drive the app's own Tauri updater + relay phases
+  // back to the local daemon. No-op on hosts that never receive the event.
+  useAppUpdateTrigger()
 
   // Sync state across all windows (main, focus, new)
   useWindowSync()

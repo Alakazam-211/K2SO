@@ -216,6 +216,11 @@ async fn handle_one_request(
             | "/cli/daemon/update/check"
             | "/cli/daemon/update/start"
             | "/cli/daemon/update/apply"
+            // K2SO 0.39.35 — Shape A phase-relay: the co-located Tauri app
+            // POSTs its updater's phase back here so the daemon's
+            // update/status poll surfaces it uniformly. Owner/admin-gated +
+            // POST-gated per-handler below.
+            | "/cli/daemon/app-update/progress"
             // GET reads the redacted config (tokenSet bool, never the
             // secret); POST sets token/subdomain/server. Claimed here for
             // both methods; the handler branches on `is_post`.
@@ -469,8 +474,10 @@ async fn handle_one_request(
                 "protocol": crate::boot_status::PROTOCOL,
                 "phase": crate::boot_status::phase_str(),
                 "detail": crate::boot_status::detail(),
-                // Install topology (standalone | bundled-app | unknown) so the
-                // renderer can route the remote-update mechanism (PRD §3.1).
+                // 0.39.35: update SHAPE selector. "bundled-app" hosts update
+                // via the co-located Tauri app (Shape A); "standalone" hosts
+                // via the in-daemon binary swap (Shape B). The renderer reads
+                // this to vary copy; update/start routes on it server-side.
                 "installKind": crate::boot_status::install_kind(),
             })
             .to_string();
@@ -1037,14 +1044,33 @@ async fn handle_one_request(
                 return DispatchOutcome::Done;
             }
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
-            // handle_start does a (blocking) manifest fetch up front, then
-            // spawns the detached download worker; run the up-front part off
-            // the accept loop too.
+            // handle_start does a (blocking) manifest fetch up front (Shape B)
+            // then spawns the detached download worker; run the up-front part
+            // off the accept loop too. For a "bundled-app" host it instead
+            // emits the app:update-trigger frame over `event_tx` (Shape A) and
+            // returns immediately. Thread the broadcast sender in for that.
+            let event_tx = Some(state.event_tx.clone());
             let r = tokio::task::spawn_blocking(move || {
-                crate::update_routes::handle_start(&body_bytes)
+                crate::update_routes::handle_start(&body_bytes, event_tx)
             })
             .await
             .unwrap_or_else(|e| crate::cli_response::CliResponse::internal_error(format!("worker join: {e}")));
+            super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
+        }
+        // POST /cli/daemon/app-update/progress {job_id,phase,progress?,error?}
+        // — Shape A phase-relay (0.39.35). The co-located Tauri app POSTs here
+        // at each step of its OWN updater so `/cli/daemon/update/status`
+        // reflects app-side progress uniformly. Same owner/admin gate +
+        // explicit POST gate as the other update routes. Bad phase ⇒ 400.
+        "/cli/daemon/app-update/progress" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
+                return DispatchOutcome::Done;
+            }
+            if !super::http::require_owner_or_admin(&mut *stream, &mut buf, &query, state.token.as_str()).await {
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let r = crate::update_routes::handle_app_update_progress(&body_bytes);
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         // POST /cli/daemon/update/apply {job_id} — only when phase==staged.

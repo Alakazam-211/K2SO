@@ -105,64 +105,51 @@ pub fn detail() -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Install-topology detection (remote-update routing — PRD §3.1)
+// Install-kind classification (0.39.35 — unified remote update)
 // ─────────────────────────────────────────────────────────────────────
 
-/// The host's install topology, surfaced on `/boot-status` and
-/// `update/check` so the renderer can route the remote-update mechanism:
-/// `"bundled-app"`   → daemon runs inside a notarized `K2SO.app` bundle
-///                     (Shape A — remote-trigger the app's Tauri updater).
-/// `"standalone"`    → a bare `k2so-daemon` binary (Shape B — binary swap).
-/// `"unknown"`       → `current_exe()` could not be resolved.
+/// How THIS daemon binary was installed, which decides the update SHAPE:
 ///
-/// Reads `std::env::current_exe()` and classifies its path. The pure
-/// classification lives in [`classify_install_kind`] for unit-testing.
+///   - `"bundled-app"` — the daemon binary lives INSIDE a macOS `.app`
+///     bundle (its path contains `.app/Contents/`). Updating means
+///     replacing the whole signed/notarized bundle, which only the
+///     co-located app's Tauri updater can do (Shape A). The daemon
+///     remote-triggers that app rather than swapping its own binary.
+///   - `"standalone"` — a bare `k2so-daemon` binary under a supervisor
+///     (launchd/systemd). Updating is the in-daemon download→verify→
+///     stage→swap path (Shape B).
+///   - `"unknown"` — the path couldn't be resolved; callers treat this
+///     conservatively (no remote update shape is assumed).
+///
+/// This is reported on `/boot-status` and in the `update/check`
+/// CheckResult so the renderer can vary copy, and `update/start` routes
+/// on it to pick Shape A vs Shape B.
 pub fn install_kind() -> &'static str {
-    match std::env::current_exe() {
-        Ok(p) => classify_install_kind(&p.to_string_lossy()),
-        Err(_) => "unknown",
-    }
+    let exe = std::env::current_exe().ok();
+    classify_install_kind(exe.as_deref())
 }
 
-/// Pure path-classifier behind [`install_kind`]. A macOS bundle runs the
-/// daemon at `…/K2SO.app/Contents/MacOS/k2so-daemon`, so the presence of
-/// `.app/Contents/MacOS/` in the path means a bundled host; anything else
-/// is a standalone binary.
-pub fn classify_install_kind(exe_path: &str) -> &'static str {
-    if exe_path.contains(".app/Contents/MacOS/") {
-        "bundled-app"
-    } else {
-        "standalone"
+/// Pure classifier behind [`install_kind`], split out so it's unit-
+/// testable without depending on the test binary's own path. Returns one
+/// of `"bundled-app" | "standalone" | "unknown"`.
+pub fn classify_install_kind(exe: Option<&std::path::Path>) -> &'static str {
+    let Some(exe) = exe else {
+        return "unknown";
+    };
+    // A macOS app bundle nests the executable at
+    // `…/K2SO.app/Contents/MacOS/<bin>`. Detect the `.app/Contents/`
+    // segment anywhere in the path — robust to the bundle name and to a
+    // sidecar daemon binary placed elsewhere under Contents/.
+    let s = exe.to_string_lossy();
+    if s.contains(".app/Contents/") {
+        return "bundled-app";
     }
+    "standalone"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classify_install_kind_bundled_vs_standalone() {
-        assert_eq!(
-            classify_install_kind("/Applications/K2SO.app/Contents/MacOS/k2so-daemon"),
-            "bundled-app"
-        );
-        assert_eq!(
-            classify_install_kind("/usr/local/bin/k2so-daemon"),
-            "standalone"
-        );
-        // A daemon staged inside a user's home bundle is still bundled.
-        assert_eq!(
-            classify_install_kind(
-                "/Users/rosson/Applications/K2SO.app/Contents/MacOS/k2so-daemon"
-            ),
-            "bundled-app"
-        );
-        // Linux standalone path.
-        assert_eq!(
-            classify_install_kind("/opt/k2so/k2so-daemon"),
-            "standalone"
-        );
-    }
 
     // These mutate process-global state, so they live in ONE test to
     // run serially and not race the shared AtomicU8 / RwLock across
@@ -193,5 +180,41 @@ mod tests {
         // Guards against an accidental bump — protocol changes are a
         // deliberate, breaking-contract decision.
         assert_eq!(PROTOCOL, 1);
+    }
+
+    #[test]
+    fn classify_install_kind_detects_bundled_app() {
+        use std::path::Path;
+        assert_eq!(
+            classify_install_kind(Some(Path::new(
+                "/Applications/K2SO.app/Contents/MacOS/k2so-daemon"
+            ))),
+            "bundled-app"
+        );
+        // Bundle name doesn't matter — any `.app/Contents/` nesting counts.
+        assert_eq!(
+            classify_install_kind(Some(Path::new(
+                "/Users/x/Build/K2 by Alakazam Labs.app/Contents/Resources/k2so-daemon"
+            ))),
+            "bundled-app"
+        );
+    }
+
+    #[test]
+    fn classify_install_kind_detects_standalone() {
+        use std::path::Path;
+        assert_eq!(
+            classify_install_kind(Some(Path::new("/usr/local/bin/k2so-daemon"))),
+            "standalone"
+        );
+        assert_eq!(
+            classify_install_kind(Some(Path::new("/home/u/.k2so/bin/k2so-daemon"))),
+            "standalone"
+        );
+    }
+
+    #[test]
+    fn classify_install_kind_unknown_when_unresolved() {
+        assert_eq!(classify_install_kind(None), "unknown");
     }
 }

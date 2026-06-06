@@ -143,7 +143,8 @@ pub struct CheckResult {
     pub url: Option<String>,
     /// Install topology of THIS host (`standalone` | `bundled-app` |
     /// `unknown`) so the renderer can route the remote-update mechanism
-    /// (Shape B binary swap vs Shape A app-updater trigger). PRD §3.1.
+    /// (Shape B binary swap vs Shape A app-updater trigger) and vary copy;
+    /// `update/start` routes on it server-side. PRD §3.1. Always present.
     #[serde(rename = "installKind")]
     pub install_kind: String,
 }
@@ -169,19 +170,32 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// Decide whether `manifest` offers an upgrade over `current`, building
-/// the `CheckResult`. `available` is true ONLY when the manifest version
-/// is strictly newer AND this platform has an artifact (you can't apply
-/// what you can't download).
-pub fn decide_check(current: &str, manifest: &DaemonManifest) -> CheckResult {
+/// the `CheckResult`.
+///
+/// `available` rules, keyed on `install_kind`:
+///   - `"standalone"` (Shape B): true ONLY when the manifest version is
+///     strictly newer AND this platform has a daemon artifact (you can't
+///     swap-apply what you can't download).
+///   - `"bundled-app"` (Shape A): true whenever the manifest version is
+///     strictly newer — the app's OWN Tauri updater (not the daemon
+///     artifact) performs the download, so a missing daemon artifact must
+///     NOT suppress the offer.
+///   - `"unknown"`: conservative — same as standalone (require an artifact).
+pub fn decide_check(current: &str, manifest: &DaemonManifest, install_kind: &str) -> CheckResult {
     let newer = compare_versions(&manifest.version, current) == std::cmp::Ordering::Greater;
     let artifact = manifest.artifact_for_current_platform();
+    let available = if install_kind == "bundled-app" {
+        newer
+    } else {
+        newer && artifact.is_some()
+    };
     CheckResult {
         current: current.to_string(),
         latest: manifest.version.clone(),
-        available: newer && artifact.is_some(),
+        available,
         notes: manifest.notes.clone(),
         url: artifact.map(|a| a.url.clone()),
-        install_kind: crate::boot_status::install_kind().to_string(),
+        install_kind: install_kind.to_string(),
     }
 }
 
@@ -447,7 +461,7 @@ pub fn handle_check() -> CliResponse {
         Ok(m) => m,
         Err(e) => return CliResponse::bad_request(e),
     };
-    let result = decide_check(current_version(), &manifest);
+    let result = decide_check(current_version(), &manifest, crate::boot_status::install_kind());
     CliResponse::ok_json(serde_json::to_string(&result).unwrap_or_default())
 }
 
@@ -464,7 +478,15 @@ pub fn handle_check() -> CliResponse {
 ///   4. verify sha256,
 ///   5. write the binary into `~/.k2so/update/<job_id>/k2so-daemon` (mode
 ///      0755) and mark the job `staged`.
-pub fn handle_start(body: &[u8]) -> CliResponse {
+/// `event_tx` is the daemon's `/events` broadcast sender, threaded in so a
+/// `"bundled-app"` host can EMIT the `app:update-trigger` frame to its
+/// co-located Tauri app (Shape A). `None` in the test harness ⇒ the Shape A
+/// branch fails the job with the "app isn't running" reason (receiver_count
+/// is 0), which is the correct observable behavior with no app attached.
+pub fn handle_start(
+    body: &[u8],
+    event_tx: Option<std::sync::Arc<tokio::sync::broadcast::Sender<crate::events::WireEvent>>>,
+) -> CliResponse {
     #[derive(Deserialize, Default)]
     struct Req {
         #[serde(default)]
@@ -479,6 +501,17 @@ pub fn handle_start(body: &[u8]) -> CliResponse {
         }
     };
 
+    // ── Shape selector (0.39.35) ────────────────────────────────────────
+    // A "bundled-app" host CANNOT swap its own binary (it's inside a
+    // signed/notarized .app); it must remote-trigger its co-located Tauri
+    // updater. Branch BEFORE the daemon-manifest fetch — the bundled path
+    // doesn't use daemon-latest.json at all (the app has its OWN updater
+    // feed); it just needs a job + a trigger.
+    if crate::boot_status::install_kind() == "bundled-app" {
+        return start_bundled_app_update(req.version, event_tx);
+    }
+
+    // ── Shape B (standalone) ────────────────────────────────────────────
     // Resolve the manifest synchronously enough to learn the target
     // version + reject "nothing to do" up front; the heavy download then
     // runs detached.
@@ -521,6 +554,143 @@ pub fn handle_start(body: &[u8]) -> CliResponse {
     });
 
     CliResponse::ok_json(serde_json::json!({ "job_id": job_id }).to_string())
+}
+
+/// Shape A: remote-trigger the co-located Tauri app's OWN updater.
+///
+/// Flow:
+///   1. Create the job (target version is best-effort — the app's updater
+///      resolves the actual version from its own feed; we record what the
+///      caller asked for, or the current version as a placeholder).
+///   2. Confirm the app is RUNNING by checking the `/events` broadcast has
+///      at least one subscriber (`receiver_count() > 0`). The app's
+///      `daemon_events` subscriber holds exactly such a receiver. If it's
+///      0, the app isn't open on this host → fail the job with a clear,
+///      actionable message rather than emitting a trigger nobody hears.
+///   3. Emit `WireEvent { event: "app:update-trigger", payload: {job_id} }`.
+///      The app re-emits it through Tauri, runs its updater, and POSTs
+///      phases back to `/cli/daemon/app-update/progress` (see
+///      [`handle_app_update_progress`]) so `/status` reflects them.
+///   4. Return `{job_id}` immediately — the HTTP thread NEVER blocks on the
+///      app-side updater.
+fn start_bundled_app_update(
+    requested_version: Option<String>,
+    event_tx: Option<std::sync::Arc<tokio::sync::broadcast::Sender<crate::events::WireEvent>>>,
+) -> CliResponse {
+    // We don't know the published app version here (the app owns its feed),
+    // so record the caller's request or the current version as a placeholder
+    // the status route can echo until the app reports its target.
+    let target = requested_version.unwrap_or_else(|| current_version().to_string());
+    let job_id = create_job(&target);
+
+    let Some(tx) = event_tx else {
+        // No broadcast sender (test harness / no app wiring) ⇒ the co-located
+        // app definitionally isn't reachable. Surface the same actionable
+        // error the receiver_count==0 path does.
+        fail_job(&job_id, app_not_running_msg());
+        return CliResponse::ok_json(serde_json::json!({ "job_id": job_id }).to_string());
+    };
+
+    if tx.receiver_count() == 0 {
+        // No `/events` subscriber ⇒ K2SO.app isn't running on this host.
+        // Fail the job (the remote client polling /status sees a real
+        // reason) but still return {job_id} so the client can read it.
+        fail_job(&job_id, app_not_running_msg());
+        return CliResponse::ok_json(serde_json::json!({ "job_id": job_id }).to_string());
+    }
+
+    // Emit the trigger. The app's daemon_events subscriber re-emits it via
+    // Tauri; the renderer drives its updater and POSTs phases back.
+    let frame = crate::events::WireEvent {
+        event: "app:update-trigger".to_string(),
+        payload: serde_json::json!({ "job_id": job_id }),
+    };
+    let _ = tx.send(frame);
+
+    CliResponse::ok_json(serde_json::json!({ "job_id": job_id }).to_string())
+}
+
+/// Actionable "the app isn't open" message surfaced on a bundled-app job
+/// when no co-located app is listening to drive the Tauri updater.
+fn app_not_running_msg() -> String {
+    let host = std::env::var("K2SO_HOSTNAME")
+        .ok()
+        .or_else(|| hostname_best_effort())
+        .unwrap_or_else(|| "this host".to_string());
+    format!("K2SO.app isn't running on {host} — open it there, or update on the machine.")
+}
+
+/// Best-effort hostname for the app-not-running message. Falls back to
+/// `None` (the caller substitutes "this host") rather than failing.
+fn hostname_best_effort() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Map a wire phase string (sent by the app over
+/// `/cli/daemon/app-update/progress`) to the [`Phase`] enum. Returns `None`
+/// for an unrecognized string so the route can 400 a bad request.
+pub fn phase_from_str(s: &str) -> Option<Phase> {
+    match s {
+        "downloading" => Some(Phase::Downloading),
+        "verifying" => Some(Phase::Verifying),
+        "staged" => Some(Phase::Staged),
+        "applying" => Some(Phase::Applying),
+        "restarting" => Some(Phase::Restarting),
+        "done" => Some(Phase::Done),
+        "failed" => Some(Phase::Failed),
+        "rolled-back" => Some(Phase::RolledBack),
+        _ => None,
+    }
+}
+
+/// `POST /cli/daemon/app-update/progress` — body
+/// `{ job_id, phase, progress?, error? }`. The co-located Tauri app calls
+/// this at each step of its OWN updater (Shape A) so the existing
+/// `/cli/daemon/update/status` poll surfaces app-side progress uniformly.
+///
+/// Validates the phase string (bad ⇒ 400) and the job_id (unknown ⇒ 400),
+/// then maps phase→[`Phase`] and writes phase/progress/error onto the job.
+pub fn handle_app_update_progress(body: &[u8]) -> CliResponse {
+    #[derive(Deserialize)]
+    struct Req {
+        job_id: String,
+        phase: String,
+        #[serde(default)]
+        progress: Option<f64>,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let req: Req = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return CliResponse::bad_request(format!("invalid body: {e}")),
+    };
+    let phase = match phase_from_str(&req.phase) {
+        Some(p) => p,
+        None => {
+            return CliResponse::bad_request(format!("unknown phase '{}'", req.phase));
+        }
+    };
+    if get_job(&req.job_id).is_none() {
+        return CliResponse::bad_request(format!("unknown job_id {}", req.job_id));
+    }
+    update_job(&req.job_id, |j| {
+        j.phase = phase;
+        if let Some(p) = req.progress {
+            j.progress = Some(p);
+        }
+        // Only overwrite error when the app actually reported one, so a
+        // later non-failed phase doesn't clobber a prior message oddly;
+        // the app sends `error` only with the "failed" phase.
+        if req.error.is_some() {
+            j.error = req.error.clone();
+        }
+    });
+    CliResponse::ok_json(serde_json::json!({ "ok": true }).to_string())
 }
 
 /// The download → verify → stage pipeline for one job. Mutates the job's
@@ -1041,11 +1211,12 @@ mod tests {
             artifacts,
             notes: Some("n".into()),
         };
-        let r = decide_check("0.39.0", &m);
+        let r = decide_check("0.39.0", &m, "standalone");
         assert!(r.available, "newer + artifact ⇒ available");
         assert_eq!(r.latest, "999.0.0");
         assert_eq!(r.url.as_deref(), Some("https://x/bin"));
         assert_eq!(r.notes.as_deref(), Some("n"));
+        assert_eq!(r.install_kind, "standalone");
     }
 
     #[test]
@@ -1066,7 +1237,7 @@ mod tests {
             notes: None,
         };
         // current is way newer than manifest ⇒ not available
-        let r = decide_check("99.0.0", &m);
+        let r = decide_check("99.0.0", &m, "standalone");
         assert!(!r.available, "older manifest ⇒ not available");
     }
 
@@ -1088,12 +1259,23 @@ mod tests {
             artifacts,
             notes: None,
         };
-        let r = decide_check("0.1.0", &m);
+        let r = decide_check("0.1.0", &m, "standalone");
         assert!(
             !r.available,
-            "no artifact for this platform ⇒ not available even though newer"
+            "no artifact for this platform ⇒ not available even though newer (standalone)"
         );
         assert!(r.url.is_none());
+
+        // BUT a bundled-app host updates via its own Tauri updater, so a
+        // missing daemon artifact must NOT suppress the offer — newer alone
+        // is enough.
+        let r_bundled = decide_check("0.1.0", &m, "bundled-app");
+        assert!(
+            r_bundled.available,
+            "bundled-app: newer ⇒ available even with no daemon artifact"
+        );
+        assert_eq!(r_bundled.install_kind, "bundled-app");
+        assert!(r_bundled.url.is_none(), "still no daemon artifact url");
     }
 
     // ── sha256 ──────────────────────────────────────────────────────
@@ -1208,6 +1390,155 @@ mod tests {
     fn get_unknown_job_is_none() {
         clear_jobs_for_test();
         assert!(get_job("nope").is_none());
+    }
+
+    // ── Shape A: phase-string → Phase mapping (app-update/progress) ──
+
+    #[test]
+    fn phase_from_str_maps_all_contract_strings() {
+        assert_eq!(phase_from_str("downloading"), Some(Phase::Downloading));
+        assert_eq!(phase_from_str("verifying"), Some(Phase::Verifying));
+        assert_eq!(phase_from_str("staged"), Some(Phase::Staged));
+        assert_eq!(phase_from_str("applying"), Some(Phase::Applying));
+        assert_eq!(phase_from_str("restarting"), Some(Phase::Restarting));
+        assert_eq!(phase_from_str("done"), Some(Phase::Done));
+        assert_eq!(phase_from_str("failed"), Some(Phase::Failed));
+        assert_eq!(phase_from_str("rolled-back"), Some(Phase::RolledBack));
+    }
+
+    #[test]
+    fn phase_from_str_rejects_unknown() {
+        assert_eq!(phase_from_str("nope"), None);
+        assert_eq!(phase_from_str(""), None);
+        // Round-trips with as_str for the well-known phases.
+        for p in [
+            Phase::Downloading,
+            Phase::Verifying,
+            Phase::Staged,
+            Phase::Applying,
+            Phase::Restarting,
+            Phase::Done,
+            Phase::Failed,
+            Phase::RolledBack,
+        ] {
+            assert_eq!(phase_from_str(p.as_str()), Some(p));
+        }
+    }
+
+    // ── Shape A: app-update/progress route updates the job ──────────────
+
+    #[test]
+    fn app_update_progress_updates_phase_and_progress() {
+        clear_jobs_for_test();
+        let id = create_job("0.40.0");
+        let body = serde_json::json!({
+            "job_id": id,
+            "phase": "downloading",
+            "progress": 0.5,
+        })
+        .to_string();
+        let resp = handle_app_update_progress(body.as_bytes());
+        assert!(resp.status.starts_with("200"), "status={}", resp.status);
+        let j = get_job(&id).unwrap();
+        assert_eq!(j.phase, Phase::Downloading);
+        assert_eq!(j.progress, Some(0.5));
+    }
+
+    #[test]
+    fn app_update_progress_records_error_on_failed() {
+        clear_jobs_for_test();
+        let id = create_job("0.40.0");
+        let body = serde_json::json!({
+            "job_id": id,
+            "phase": "failed",
+            "error": "updater feed 404",
+        })
+        .to_string();
+        let resp = handle_app_update_progress(body.as_bytes());
+        assert!(resp.status.starts_with("200"), "status={}", resp.status);
+        let j = get_job(&id).unwrap();
+        assert_eq!(j.phase, Phase::Failed);
+        assert_eq!(j.error.as_deref(), Some("updater feed 404"));
+    }
+
+    #[test]
+    fn app_update_progress_rejects_bad_phase() {
+        clear_jobs_for_test();
+        let id = create_job("0.40.0");
+        let body = serde_json::json!({ "job_id": id, "phase": "bogus" }).to_string();
+        let resp = handle_app_update_progress(body.as_bytes());
+        assert!(resp.status.starts_with("400"), "status={}", resp.status);
+        assert!(resp.body.contains("unknown phase"), "body={}", resp.body);
+        // The job's phase must NOT have changed off its initial downloading.
+        assert_eq!(get_job(&id).unwrap().phase, Phase::Downloading);
+    }
+
+    #[test]
+    fn app_update_progress_rejects_unknown_job() {
+        clear_jobs_for_test();
+        let body = serde_json::json!({ "job_id": "ghost", "phase": "staged" }).to_string();
+        let resp = handle_app_update_progress(body.as_bytes());
+        assert!(resp.status.starts_with("400"), "status={}", resp.status);
+        assert!(resp.body.contains("unknown job_id"), "body={}", resp.body);
+    }
+
+    #[test]
+    fn app_update_progress_rejects_bad_body() {
+        let resp = handle_app_update_progress(b"{not json");
+        assert!(resp.status.starts_with("400"), "status={}", resp.status);
+    }
+
+    // ── Shape A: start_bundled_app_update — no app listening ─────────────
+
+    #[test]
+    fn bundled_start_fails_job_when_no_event_tx() {
+        clear_jobs_for_test();
+        // None ⇒ no broadcast sender at all (test harness): the co-located
+        // app is definitionally unreachable, so the job must FAIL with the
+        // actionable "app isn't running" reason rather than hang.
+        let resp = start_bundled_app_update(Some("0.40.0".into()), None);
+        assert!(resp.status.starts_with("200"), "status={}", resp.status);
+        let v: serde_json::Value = serde_json::from_str(&resp.body).expect("json");
+        let id = v["job_id"].as_str().expect("job_id");
+        let j = get_job(id).unwrap();
+        assert_eq!(j.phase, Phase::Failed);
+        assert!(
+            j.error.as_deref().unwrap_or_default().contains("isn't running"),
+            "error should explain app not running: {:?}",
+            j.error
+        );
+    }
+
+    #[test]
+    fn bundled_start_fails_job_when_no_subscribers() {
+        clear_jobs_for_test();
+        // A sender with ZERO receivers ⇒ the app's /events subscriber isn't
+        // attached ⇒ same actionable failure.
+        let (tx, _) = tokio::sync::broadcast::channel::<crate::events::WireEvent>(4);
+        let tx = std::sync::Arc::new(tx);
+        let resp = start_bundled_app_update(None, Some(tx));
+        let v: serde_json::Value = serde_json::from_str(&resp.body).expect("json");
+        let id = v["job_id"].as_str().expect("job_id");
+        let j = get_job(id).unwrap();
+        assert_eq!(j.phase, Phase::Failed);
+        assert!(j.error.as_deref().unwrap_or_default().contains("isn't running"));
+    }
+
+    #[test]
+    fn bundled_start_emits_trigger_when_app_listening() {
+        clear_jobs_for_test();
+        // A live subscriber ⇒ the app is "running": the job is NOT failed and
+        // an app:update-trigger frame carrying the job_id is broadcast.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::events::WireEvent>(4);
+        let tx = std::sync::Arc::new(tx);
+        let resp = start_bundled_app_update(Some("9.9.9".into()), Some(tx));
+        let v: serde_json::Value = serde_json::from_str(&resp.body).expect("json");
+        let id = v["job_id"].as_str().expect("job_id").to_string();
+        // Job stays in its initial (downloading) phase — the app drives it.
+        assert_eq!(get_job(&id).unwrap().phase, Phase::Downloading);
+        let frame = rx.try_recv().expect("trigger frame broadcast");
+        assert_eq!(frame.event, "app:update-trigger");
+        assert_eq!(frame.payload["job_id"].as_str(), Some(id.as_str()));
     }
 
     #[test]

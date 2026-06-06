@@ -35,6 +35,12 @@ export interface UpdateCheckResult {
   available: boolean
   notes?: string
   url?: string
+  /** 0.39.35: how the remote host is installed. "bundled-app" hosts update
+   *  via their co-located Tauri app (Shape A — auto-installs + relaunches,
+   *  no separate manual "Install & restart" step); "standalone" hosts via
+   *  the in-daemon binary swap (Shape B). Used only to vary copy; the daemon
+   *  routes on it server-side. May be absent on older hosts. */
+  installKind?: 'standalone' | 'bundled-app' | 'unknown'
 }
 
 /** The status route's response shape (P3). */
