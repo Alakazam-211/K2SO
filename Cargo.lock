@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "k2so"
-version = "0.39.35"
+version = "0.39.36"
 dependencies = [
  "ahash",
  "alacritty_terminal",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-core"
-version = "0.39.35"
+version = "0.39.36"
 dependencies = [
  "alacritty_terminal",
  "argon2",
@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "k2so-daemon"
-version = "0.39.35"
+version = "0.39.36"
 dependencies = [
  "base64 0.22.1",
  "chrono",
