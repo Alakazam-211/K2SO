@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { agentDisplayName, setChatSession } from '@/lib/workspace-agent'
-import { terminalKill } from '@/lib/terminal-daemon'
+import { terminalKill, terminalListRunning } from '@/lib/terminal-daemon'
+import { parseTerminalId } from '@/lib/terminal-id'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
@@ -63,6 +64,33 @@ export interface AgeOutSweepCandidate {
   /** Has an ENABLED heartbeat (projects.heartbeatEnabled !== 0). A
    *  heartbeat-managed workspace is kept warm so an autonomous wake
    *  doesn't land on a reaped PTY. Never reaped while enabled. */
+  heartbeatEnabled: boolean
+}
+
+/** P2 (LIVE-fix) — per-project age-out metadata, keyed by projectId.
+ *  The DAEMON-driven sweep (`sweepAgedOutWorkspaceChatsFromDaemon`)
+ *  enumerates candidates from the daemon's live PTY list rather than the
+ *  Active-bar items, so it can reach workspaces that aged out WHILE HIDDEN
+ *  (never opened in this renderer session, or restored on boot) — the
+ *  exact set the Active-bar-fed `sweepAgedOutWorkspaceChats` could never
+ *  see (an aged-out workspace is by definition NOT in the Active bar).
+ *
+ *  The caller supplies the same per-project signals the renderer already
+ *  holds in the projects store; the sweep matches them by projectId
+ *  against the live `agent-chat:<projectId>` PTYs. A projectId present in
+ *  the running list but ABSENT from this map (e.g. a workspace the daemon
+ *  is running but the renderer's projects store hasn't hydrated) is left
+ *  alone — we never reap a workspace whose age-out verdict we can't
+ *  compute. */
+export interface AgeOutProjectMeta {
+  projectPath: string
+  /** `isWithinActiveWindow(...) === false` — computed by the caller
+   *  against the same predicate the Active Bar uses. */
+  isAged: boolean
+  /** Pinned to Active (projects.manuallyActive !== 0). Never reaped. */
+  manuallyActive: boolean
+  /** Has an ENABLED heartbeat (projects.heartbeatEnabled !== 0). Kept
+   *  warm so an autonomous wake doesn't land on a reaped PTY. */
   heartbeatEnabled: boolean
 }
 
@@ -711,6 +739,21 @@ interface TabsState {
    *  scheduled just resets to the same grace. Driven by the renderer
    *  (the daemon has no `lastInteractionAt` access). */
   sweepAgedOutWorkspaceChats: (candidates: AgeOutSweepCandidate[]) => void
+  /** P2 (LIVE-fix) — the same age-out reap, but with the candidate set
+   *  derived from the DAEMON's live PTY list (`terminal/list-running`)
+   *  instead of the Active-bar items. Enumerates every live
+   *  `agent-chat:<projectId>` session — including workspaces that aged
+   *  out WHILE HIDDEN or were left running by a prior app session (which
+   *  the Active-bar-fed sweep can never see, since an aged-out workspace
+   *  is by definition absent from the Active bar). For each live-chat
+   *  projectId it looks up `metaByProjectId` for the age-out verdict and,
+   *  when aged + not pinned + not foreground + no heartbeat, schedules
+   *  the #657 reap. A live projectId with no entry in the map is skipped
+   *  (verdict unknown → never reap). Async because it polls the daemon;
+   *  safe to call on the same periodic tick. */
+  sweepAgedOutWorkspaceChatsFromDaemon: (
+    metaByProjectId: Record<string, AgeOutProjectMeta>,
+  ) => Promise<void>
   persistActiveWorkspace: () => void
   /** Add a tab to a workspace without switching to it. If the workspace is active,
    *  adds directly. If background/stashed, saves to DB session so it's there when restored.
@@ -3747,6 +3790,62 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // an age-out is an implicit dismiss. Idempotent — a project
       // already scheduled just resets to the same grace window.
       get().scheduleWorkspaceChatReap(c.projectId, c.projectPath)
+    }
+  },
+
+  sweepAgedOutWorkspaceChatsFromDaemon: async (
+    metaByProjectId: Record<string, AgeOutProjectMeta>,
+  ): Promise<void> => {
+    // Enumerate the daemon's live PTYs and keep only the pinned-Chat
+    // sessions (`agent-chat:<projectId>`). This is the candidate source
+    // the Active-bar-fed sweep CAN'T provide: an aged-out workspace is
+    // absent from the Active bar by definition, and a workspace whose
+    // chat PTY survives from a prior app session was never stashed into
+    // this renderer's `backgroundWorkspaces`. The daemon, however, still
+    // holds the live PTY — and its terminal id encodes the projectId.
+    let running: Awaited<ReturnType<typeof terminalListRunning>>
+    try {
+      running = await terminalListRunning()
+    } catch (e) {
+      console.warn('[tabs] age-out daemon sweep: list-running failed:', e)
+      return
+    }
+
+    const fgId = currentActiveProjectId()
+    // De-dupe: a workspace can hold more than one chat-shaped PTY
+    // (legacy + bare-pid). One reap per projectId.
+    const seen = new Set<string>()
+
+    for (const term of running) {
+      const parsed = parseTerminalId(term.terminalId)
+      // Only the bare project-scoped chat session is reapable here. The
+      // v2 close uses the projectId as the agent_name (AgentChatPane's
+      // `attachAgentName={projectId}`), so worktree-/heartbeat-/legacy-
+      // scoped ids (which carry a different agent_name) are out of scope.
+      if (!parsed || parsed.kind !== 'agent_chat' || parsed.agent !== '') continue
+      const projectId = parsed.projectId
+      if (seen.has(projectId)) continue
+      seen.add(projectId)
+
+      const meta = metaByProjectId[projectId]
+      // No verdict for this live workspace (projects store hasn't
+      // hydrated it, or it's a remote/foreign id) — leave it alone.
+      if (!meta) continue
+
+      // Same keep-warm gates as `sweepAgedOutWorkspaceChats`.
+      if (!meta.isAged) continue
+      if (meta.manuallyActive) continue
+      if (meta.heartbeatEnabled) continue
+      if (projectId === fgId) continue
+
+      // The live PTY IS the proof there's something to reap (no renderer
+      // snapshot required), so we skip the `findChatSessionIdForProject`
+      // gate the snapshot sweep uses. `scheduleWorkspaceChatReap` re-checks
+      // foreground, persists any renderer-held sessionId first, then reaps
+      // via `closeV2Session(projectId)` — which works whether or not the
+      // session was ever opened in THIS renderer (the daemon already saved
+      // its session_id, so `--resume` has a target on return).
+      get().scheduleWorkspaceChatReap(projectId, meta.projectPath)
     }
   },
 

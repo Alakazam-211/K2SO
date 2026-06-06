@@ -25,8 +25,16 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => undefined),
   listen: vi.fn(async () => () => undefined),
 }))
+// The daemon-running sweep calls `daemonCliGet('terminal/list-running')`
+// (via terminalListRunning). Route it to a per-test-controllable list so
+// we can model "the daemon holds a live agent-chat:<projectId> PTY for a
+// HIDDEN, aged-out workspace the renderer never opened".
+let runningPtys: Array<{ terminalId: string; cwd: string; command: string | null }> = []
 vi.mock('@/lib/daemon-cli', () => ({
-  daemonCliGet: vi.fn(async () => []),
+  daemonCliGet: vi.fn(async (route: string) => {
+    if (route === 'terminal/list-running') return runningPtys
+    return []
+  }),
   daemonCliPost: vi.fn(async () => ({})),
 }))
 vi.mock('@/lib/daemon-reconnect', () => ({
@@ -60,7 +68,9 @@ import {
   __clearPendingChatReapsForTests,
   __hasPendingChatReapForTests,
   type AgeOutSweepCandidate,
+  type AgeOutProjectMeta,
 } from './tabs'
+import { agentChatId } from '@/lib/terminal-id'
 
 // ── Test harness ─────────────────────────────────────────────────────────
 
@@ -139,7 +149,8 @@ describe('#P2 age-out sweep (renderer)', () => {
     fetchSpy.mockClear()
     vi.stubGlobal('fetch', fetchSpy)
     __clearPendingChatReapsForTests()
-    useTabsStore.setState({ backgroundWorkspaces: {} })
+    runningPtys = []
+    useTabsStore.setState({ backgroundWorkspaces: {}, tabs: [] })
   })
 
   afterEach(() => {
@@ -240,5 +251,136 @@ describe('#P2 age-out sweep (renderer)', () => {
       candidate('proj-NONE', '/work/proj-NONE'),
     ])
     expect(__hasPendingChatReapForTests('proj-NONE')).toBe(false)
+  })
+})
+
+// ── LIVE-fix — daemon-driven sweep reaches HIDDEN aged-out workspaces ─────
+//
+// The Active-bar-fed `sweepAgedOutWorkspaceChats` can only see candidates
+// that are IN the Active bar — but an aged-out workspace is by definition
+// NOT in the bar, so a workspace that ages out WHILE HIDDEN (or whose
+// chat PTY survives from a prior app session, never opened in this
+// renderer) was invisible to the sweep and never reaped. The LIVE smoke
+// test caught exactly this: 6 aged-out workspaces with live daemon chat
+// PTYs that survived multiple reaper ticks.
+//
+// `sweepAgedOutWorkspaceChatsFromDaemon` fixes it by enumerating the
+// daemon's live `agent-chat:<projectId>` PTYs as the candidate source,
+// independent of any renderer-side Active-bar / backgroundWorkspaces
+// state, then applying the SAME age-out gates.
+
+function meta(overrides: Partial<AgeOutProjectMeta> = {}): AgeOutProjectMeta {
+  return {
+    projectPath: '/work/x',
+    isAged: true,
+    manuallyActive: false,
+    heartbeatEnabled: false,
+    ...overrides,
+  }
+}
+
+describe('#P2 age-out daemon sweep (renderer) — reaches hidden workspaces', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    foregroundProjectId = 'proj-FOREGROUND'
+    closedAgentNames.length = 0
+    setChatSessionCalls.length = 0
+    fetchSpy.mockClear()
+    vi.stubGlobal('fetch', fetchSpy)
+    __clearPendingChatReapsForTests()
+    runningPtys = []
+    // Crucially: NO backgroundWorkspaces snapshot and NO live tabs — the
+    // hidden workspace was never opened in this renderer session. The old
+    // snapshot-fed sweep would find nothing to reap; the daemon list is
+    // the only evidence the PTY is alive.
+    useTabsStore.setState({ backgroundWorkspaces: {}, tabs: [] })
+  })
+
+  afterEach(() => {
+    __clearPendingChatReapsForTests()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('reaps a HIDDEN, aged-out, non-pinned, non-heartbeat workspace with a live daemon chat PTY', async () => {
+    const projectId = 'proj-HIDDEN'
+    const projectPath = '/work/proj-HIDDEN'
+    // The daemon holds a live chat PTY for this workspace, but the
+    // renderer never opened it (no snapshot, no tab).
+    runningPtys = [
+      { terminalId: agentChatId(projectId, ''), cwd: projectPath, command: 'claude' },
+    ]
+
+    // Sanity: the snapshot-fed sweep can't see it (no renderer state).
+    useTabsStore.getState().sweepAgedOutWorkspaceChats([
+      candidate(projectId, projectPath),
+    ])
+    expect(__hasPendingChatReapForTests(projectId)).toBe(false)
+
+    // The daemon-fed sweep DOES see it (the LIVE-fix).
+    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon({
+      [projectId]: meta({ projectPath }),
+    })
+    expect(__hasPendingChatReapForTests(projectId)).toBe(true)
+
+    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS)
+    await vi.runAllTimersAsync()
+
+    // The v2 session (agent_name === projectId) is closed even though no
+    // renderer sessionId existed — the daemon already saved it for resume.
+    expect(closedAgentNames).toContain(projectId)
+    expect(__hasPendingChatReapForTests(projectId)).toBe(false)
+  })
+
+  it('honors the keep-warm gates from the daemon list (foreground / pinned / heartbeat / fresh / no-verdict)', async () => {
+    runningPtys = [
+      { terminalId: agentChatId('proj-FOREGROUND', ''), cwd: '/work/fg', command: 'claude' },
+      { terminalId: agentChatId('proj-PINNED', ''), cwd: '/work/pinned', command: 'claude' },
+      { terminalId: agentChatId('proj-HB', ''), cwd: '/work/hb', command: 'claude' },
+      { terminalId: agentChatId('proj-FRESH', ''), cwd: '/work/fresh', command: 'claude' },
+      // Live PTY with NO verdict in the meta map — must be left alone.
+      { terminalId: agentChatId('proj-UNKNOWN', ''), cwd: '/work/unknown', command: 'claude' },
+      // A non-chat PTY — must be ignored entirely.
+      { terminalId: 'plain-terminal-123', cwd: '/work/term', command: 'zsh' },
+    ]
+
+    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon({
+      'proj-FOREGROUND': meta({ projectPath: '/work/fg' }),
+      'proj-PINNED': meta({ projectPath: '/work/pinned', manuallyActive: true }),
+      'proj-HB': meta({ projectPath: '/work/hb', heartbeatEnabled: true }),
+      'proj-FRESH': meta({ projectPath: '/work/fresh', isAged: false }),
+      // proj-UNKNOWN deliberately absent.
+    })
+
+    expect(__hasPendingChatReapForTests('proj-FOREGROUND')).toBe(false)
+    expect(__hasPendingChatReapForTests('proj-PINNED')).toBe(false)
+    expect(__hasPendingChatReapForTests('proj-HB')).toBe(false)
+    expect(__hasPendingChatReapForTests('proj-FRESH')).toBe(false)
+    expect(__hasPendingChatReapForTests('proj-UNKNOWN')).toBe(false)
+
+    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS * 2)
+    await vi.runAllTimersAsync()
+    expect(closedAgentNames.length).toBe(0)
+  })
+
+  it('cancel-on-return works for a daemon-swept reap (re-activation within the grace)', async () => {
+    const projectId = 'proj-RETURN'
+    const projectPath = '/work/proj-RETURN'
+    runningPtys = [
+      { terminalId: agentChatId(projectId, ''), cwd: projectPath, command: 'claude' },
+    ]
+
+    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon({
+      [projectId]: meta({ projectPath }),
+    })
+    expect(__hasPendingChatReapForTests(projectId)).toBe(true)
+
+    vi.advanceTimersByTime(5_000)
+    useTabsStore.getState().cancelWorkspaceChatReap(projectId)
+    expect(__hasPendingChatReapForTests(projectId)).toBe(false)
+
+    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS)
+    await vi.runAllTimersAsync()
+    expect(closedAgentNames.length).toBe(0)
   })
 })

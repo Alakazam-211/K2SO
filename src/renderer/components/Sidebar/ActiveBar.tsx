@@ -194,12 +194,27 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
 
   // P2 — age-out sweep. Piggyback the existing 60s `tick`: any project
   // that has aged out of the Active window (and isn't pinned / the
-  // foreground / heartbeat-managed) has its background pinned-Chat PTY
-  // reaped via the #657 dismiss path, freeing RAM. The decision uses
-  // the SAME `isWithinActiveWindow` predicate the bar membership uses
-  // (single source of truth); tabs.ts owns the background-snapshot +
-  // foreground gates and the 15s-grace scheduling. Renderer-driven
-  // because the daemon has no `lastInteractionAt` access.
+  // foreground / heartbeat-managed) has its pinned-Chat PTY reaped via
+  // the #657 dismiss path, freeing RAM. The decision uses the SAME
+  // `isWithinActiveWindow` predicate the bar membership uses (single
+  // source of truth); tabs.ts owns the foreground gate and the
+  // 15s-grace scheduling. Renderer-driven because the daemon has no
+  // `lastInteractionAt` access.
+  //
+  // TWO candidate sources, run together so nothing aged-out escapes:
+  //
+  //   1. `sweepAgedOutWorkspaceChats` over the projects store — fast,
+  //      reaps workspaces whose chat PTY is stashed in THIS renderer's
+  //      `backgroundWorkspaces` snapshot.
+  //
+  //   2. `sweepAgedOutWorkspaceChatsFromDaemon` over the daemon's live
+  //      PTY list — reaches workspaces that aged out WHILE HIDDEN or
+  //      whose chat PTY survives from a PRIOR app session (never opened
+  //      in this renderer, so source 1 + the old Active-bar-fed sweep
+  //      could never see them — an aged-out workspace is absent from the
+  //      Active bar by construction). This is the LIVE-observed leak: 6
+  //      aged-out workspaces with live daemon chat PTYs that the
+  //      Active-bar-fed sweep never received as candidates.
   useEffect(() => {
     const now = Math.floor(Date.now() / 1000)
     const candidates = projects.map((p) => ({
@@ -209,7 +224,21 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       manuallyActive: p.manuallyActive !== 0,
       heartbeatEnabled: p.heartbeatEnabled !== 0,
     }))
-    useTabsStore.getState().sweepAgedOutWorkspaceChats(candidates)
+    const tabsStore = useTabsStore.getState()
+    tabsStore.sweepAgedOutWorkspaceChats(candidates)
+
+    // Build the projectId-keyed verdict map for the daemon-driven sweep
+    // from the same per-project signals.
+    const metaByProjectId: Record<string, import('@/stores/tabs').AgeOutProjectMeta> = {}
+    for (const c of candidates) {
+      metaByProjectId[c.projectId] = {
+        projectPath: c.projectPath,
+        isAged: c.isAged,
+        manuallyActive: c.manuallyActive,
+        heartbeatEnabled: c.heartbeatEnabled,
+      }
+    }
+    void tabsStore.sweepAgedOutWorkspaceChatsFromDaemon(metaByProjectId)
     // `tick` (the 60s interval) is the cadence driver; projects /
     // activeWindowHours re-run it immediately on a relevant change.
   }, [projects, activeWindowHours, tick])
