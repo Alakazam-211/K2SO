@@ -44,6 +44,7 @@ export const GENERAL_MANIFEST: SettingEntry[] = [
   { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep server running when the window is closed', description: 'When on, clicking the red close button hides the window and keeps the Agent & Companion server running. When off, the red button stops everything. Cmd+Q always closes everything.', keywords: ['daemon', 'server', 'agent', 'companion', 'close', 'red button', 'window', 'hide', 'background', 'persistent'] },
   { id: 'general.restart-host', section: 'general', label: 'Restart connected host', description: 'Restart the REMOTE machine you are connected to over K2 Connect', keywords: ['restart', 'reboot', 'remote', 'host', 'connect', 'server', 'daemon', 'bounce'] },
   { id: 'general.update-host', section: 'general', label: 'Update connected host', description: 'Update the REMOTE machine you are connected to over K2 Connect', keywords: ['update', 'upgrade', 'remote', 'host', 'connect', 'server', 'daemon', 'version'] },
+  { id: 'general.active-window-hours', section: 'general', label: 'Active Bar window', description: 'How long workspaces stay Active after activity', keywords: ['active', 'bar', 'window', 'hours', 'tenure', 'workspace', 'recent', 'sidebar'] },
   { id: 'general.ai-assistant', section: 'general', label: 'AI Workspace Assistant', description: 'Local LLM for natural-language workspace operations (⌘L)', keywords: ['ai', 'assistant', 'llm', 'cmd+l', 'qwen', 'model', 'local', 'gguf'] },
   { id: 'general.model-status', section: 'general', label: 'Model Status', description: 'Current local LLM load state', keywords: ['model', 'llm', 'loaded', 'download'] },
   { id: 'general.download-model', section: 'general', label: 'Download Default Model', description: 'Fetch Qwen2.5-1.5B locally (~1.1GB)', keywords: ['download', 'model', 'qwen', 'local llm'] },
@@ -197,6 +198,9 @@ export function GeneralSection(): React.JSX.Element {
         {/* Claude Auth Auto-Refresh */}
         <ClaudeAuthRefreshRow />
 
+        {/* P1.C — configurable Active-Bar tenure window */}
+        <ActiveWindowHoursRow />
+
         {/* K2SO Daemon — persistent-agents service */}
         <DaemonRow />
 
@@ -254,6 +258,66 @@ export function GeneralSection(): React.JSX.Element {
             </button>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Active Bar window (P1.C) ───────────────────────────────────────────
+// How long a workspace stays in the sidebar's Active section after the
+// user last interacted with it (Active-Bar rule 2). Default 24h, min 1h.
+// Backed by `settings.activeWindowHours` (persisted via the daemon's
+// app_settings deep-merge); read by ActiveBar and a future reaper.
+function ActiveWindowHoursRow(): React.JSX.Element {
+  const activeWindowHours = useSettingsStore((s) => s.activeWindowHours)
+  const setActiveWindowHours = useSettingsStore((s) => s.setActiveWindowHours)
+  // Local draft so the user can clear/type freely; commit (clamped) on blur
+  // or Enter. Mirrors the typed-input ergonomics of the terminal settings.
+  const [draft, setDraft] = useState<string>(String(activeWindowHours))
+
+  useEffect(() => {
+    setDraft(String(activeWindowHours))
+  }, [activeWindowHours])
+
+  const commit = useCallback(() => {
+    const parsed = parseInt(draft, 10)
+    const next = Number.isFinite(parsed) ? Math.max(1, parsed) : activeWindowHours
+    setDraft(String(next))
+    if (next !== activeWindowHours) {
+      void setActiveWindowHours(next)
+    }
+  }, [draft, activeWindowHours, setActiveWindowHours])
+
+  return (
+    <div
+      className="flex items-center justify-between py-2 border-b border-[var(--color-border)]"
+      data-settings-id="general.active-window-hours"
+    >
+      <div className="flex-1 min-w-0 mr-3">
+        <span className="text-xs text-[var(--color-text-secondary)]">
+          Keep workspaces Active for
+        </span>
+        <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+          How long a workspace stays in the sidebar&apos;s Active section after
+          you last interacted with it. Minimum 1 hour.
+        </p>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.currentTarget.blur()
+            }
+          }}
+          className="w-16 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag text-center"
+        />
+        <span className="text-[10px] text-[var(--color-text-muted)]">hours</span>
       </div>
     </div>
   )

@@ -220,6 +220,31 @@ describe('projects store — Plan B host-aware migration', () => {
     expect(emitMock).not.toHaveBeenCalledWith('sync:projects')
   })
 
+  // P1.B — clicking a project in the icon rail (setActiveProject) must
+  // reset its 24h Active window by touching lastInteractionAt. Before the
+  // fix only setActiveWorkspace did this, so a bare project click never
+  // surfaced the workspace in the Active Bar.
+  it('setActiveProject touches lastInteractionAt for the clicked project (POSTs touch-interaction)', () => {
+    // Use a project id not touched elsewhere in this file — touchInteraction
+    // is debounced 5min via a module-level map shared across tests.
+    const p = mkProject('p-click') as unknown as ProjectWithWorkspaces
+    p.workspaces = [{ id: 'w1' } as never]
+    useProjectsStore.setState({
+      projects: [p],
+      activeProjectId: null,
+      activeWorkspaceId: null,
+    })
+    daemonCliPost.mockResolvedValue({ success: true })
+
+    useProjectsStore.getState().setActiveProject('p-click')
+
+    // touchInteraction (debounced) writes the new lastInteractionAt
+    // optimistically AND POSTs to the daemon.
+    const updated = (useProjectsStore.getState().projects as ProjectWithWorkspaces[])[0]
+    expect(updated.lastInteractionAt).not.toBeNull()
+    expect(daemonCliPost).toHaveBeenCalledWith('projects/touch-interaction', { id: 'p-click' })
+  })
+
   it('a failed mutation does NOT emit sync', async () => {
     daemonCliPost.mockRejectedValueOnce(new Error('daemon down'))
     daemonCliGet.mockResolvedValue([])

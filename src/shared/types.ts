@@ -89,6 +89,12 @@ export interface AppSettingsResponse {
   // Optional: the daemon's `/cli/settings/get` includes this flag, but
   // older snapshots / partial responses may omit it. Read defensively.
   keepDaemonOnQuit?: boolean
+  // P1.C — how long (hours) a workspace stays in the Active Bar after the
+  // user last interacted with it (rule 2). Optional: older settings.json
+  // snapshots omit it, so readers default to 24. Persisted via the
+  // daemon's deep-merge of `settings.json` (no Rust struct field needed —
+  // the JSON store keeps unknown keys verbatim).
+  activeWindowHours?: number
 }
 
 export interface EditorSettingsBackend {

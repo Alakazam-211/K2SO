@@ -13,7 +13,7 @@ import { useProjectsStore } from './projects'
 import { usePresetsStore, parseCommand } from './presets'
 import { useSettingsStore } from './settings'
 import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants'
-import { agentChatId, worktreeChatId } from '@/lib/terminal-id'
+import { agentChatId, worktreeChatId, parseTerminalId } from '@/lib/terminal-id'
 // #625 — reset agent pane state on a host switch.
 import { onActiveHostChange } from '@/stores/connect-host'
 
@@ -100,6 +100,7 @@ interface ActiveAgentsState {
   getProjectStatus: (projectId: string) => PaneStatus
   recordOutput: (terminalId: string) => void
   recordTitleActivity: (paneId: string, isWorking: boolean) => void
+  bindPaneProject: (paneId: string, projectId: string) => void
   handleLifecycleEvent: (paneId: string, tabId: string, eventType: string) => void
   addBackgroundSpawn: (spawn: BackgroundSpawn) => void
   removeBackgroundSpawn: (id: string) => void
@@ -212,14 +213,47 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
     // says 'working' but no project owns the spinner.
     if (isWorking && !paneProjectMap.has(paneId)) {
       const ps = useProjectsStore.getState()
-      if (ps.activeProjectId) {
+      // P1.A — a pinned-Chat pane (terminalId `agent-chat:<projectId>`)
+      // must attribute its working state to ITS OWN project, not to
+      // whatever workspace the user happens to be viewing when the first
+      // braille tick fires. The pinned Chat has no lifecycle hook, so this
+      // title-activity path was the only binder — and it latched to
+      // `activeProjectId`, which mis-bound the spinner whenever the user
+      // was looking at a different workspace. Parse the paneId: if it's an
+      // agent-chat id, use its embedded projectId; only fall back to
+      // `activeProjectId` for non-agent-chat panes (e.g. plain Cmd+T
+      // terminals that legitimately belong to the foreground workspace).
+      const parsed = parseTerminalId(paneId)
+      const ownProjectId =
+        parsed?.kind === 'agent_chat' ? parsed.projectId : null
+      const boundProjectId = ownProjectId ?? ps.activeProjectId
+      if (boundProjectId) {
         const newPaneProjectMap = new Map(paneProjectMap)
-        newPaneProjectMap.set(paneId, ps.activeProjectId)
+        newPaneProjectMap.set(paneId, boundProjectId)
         set({ paneProjectMap: newPaneProjectMap })
         // Also touches lastInteractionAt → 24h Active Bar tenure.
-        ps.touchInteraction(ps.activeProjectId)
+        ps.touchInteraction(boundProjectId)
       }
     }
+  },
+
+  /**
+   * P1.A — register a pane→project mapping UPFRONT, before any
+   * title-activity signal can race. Called by AgentChatPane on mount so
+   * the pinned-Chat pane's `paneProjectMap` entry exists the moment its
+   * PTY is live; this guarantees `getProjectStatus(ownProject)` lights
+   * the spinner on the correct workspace even if the first braille tick
+   * fires while the user is viewing a different workspace. Idempotent:
+   * never overwrites an existing binding (a lifecycle 'start' hook may
+   * have already bound a more-specific project for the same pane).
+   */
+  bindPaneProject: (paneId: string, projectId: string) => {
+    if (!paneId || !projectId) return
+    const { paneProjectMap } = get()
+    if (paneProjectMap.get(paneId) === projectId) return
+    const newPaneProjectMap = new Map(paneProjectMap)
+    newPaneProjectMap.set(paneId, projectId)
+    set({ paneProjectMap: newPaneProjectMap })
   },
 
   handleLifecycleEvent: (paneId: string, _tabId: string, eventType: string) => {

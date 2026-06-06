@@ -443,6 +443,13 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         tabsStore.restoreWorkspace(newKey, cwd)
         ensurePinnedAgentTabForMode(project.agentMode, project.path)
       }
+
+      // P1.B — clicking a project in the icon rail is a real interaction:
+      // reset its 24h Active window and surface it in the Active Bar.
+      // `setActiveWorkspace` already did this; `setActiveProject` (the
+      // project-icon-rail click) did not, so a click alone never kept the
+      // workspace Active. touchInteraction is debounced to 5min/project.
+      get().touchInteraction(id)
     }
   },
 

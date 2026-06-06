@@ -73,6 +73,11 @@ fn default_agent() -> String {
     "claude".to_string()
 }
 
+/// P1.C — default Active-Bar tenure window: 24 hours.
+fn default_active_window_hours() -> u32 {
+    24
+}
+
 fn default_left_panel_tab() -> String {
     "files".to_string()
 }
@@ -185,6 +190,15 @@ pub struct AppSettings {
     pub last_active_project_id: Option<String>,
     #[serde(default)]
     pub last_active_workspace_id: Option<String>,
+    /// P1.C — how many hours a workspace stays in the Active Bar after the
+    /// user last interacted with it (Active-Bar rule 2). Persisted here so
+    /// both `ActiveBar` and a future reaper read one source of truth.
+    /// A typed field is required: `AppSettings` round-trips through
+    /// `serde_json::from_value` on every `load`/`update`, which silently
+    /// drops keys with no matching field — an untyped key would never
+    /// persist. Defaults to 24 for old settings.json snapshots.
+    #[serde(default = "default_active_window_hours")]
+    pub active_window_hours: u32,
     #[serde(default)]
     pub editor: EditorSettings,
     #[serde(default)]
@@ -374,6 +388,7 @@ impl Default for AppSettings {
             claude_auth_auto_refresh: false,
             last_active_project_id: None,
             last_active_workspace_id: None,
+            active_window_hours: default_active_window_hours(),
             editor: EditorSettings::default(),
             companion: CompanionSettings::default(),
             wake_scheduler: WakeSchedulerSettings::default(),

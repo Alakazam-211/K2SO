@@ -46,6 +46,11 @@ interface SettingsState {
   // Claude Auth auto-refresh (background scheduler)
   claudeAuthAutoRefresh: boolean
 
+  // P1.C — how long (hours) a workspace stays in the Active Bar after the
+  // user last interacted with it (Active-Bar rule 2). Read by ActiveBar
+  // (and a future reaper). Default 24, min 1.
+  activeWindowHours: number
+
   // Editor settings
   editor: EditorSettingsBackend
 
@@ -79,10 +84,19 @@ interface SettingsState {
   updateProjectSetting: (projectId: string, key: string, value: string) => void
   setAiAssistantEnabled: (enabled: boolean) => void
   setClaudeAuthAutoRefresh: (enabled: boolean) => void
+  setActiveWindowHours: (hours: number) => void
   updateEditorSettings: (partial: Partial<EditorSettingsBackend>) => void
   setDefaultAgent: (agent: string) => void
   resetAllSettings: () => void
   fetchSettings: () => Promise<void>
+}
+
+/** P1.C — Active-Bar tenure window default (hours) and floor. Mirrors the
+ *  daemon's `default_active_window_hours()` (24) and the min-1 UI clamp. */
+export const DEFAULT_ACTIVE_WINDOW_HOURS = 24
+export function clampActiveWindowHours(h: number): number {
+  if (!Number.isFinite(h)) return DEFAULT_ACTIVE_WINDOW_HOURS
+  return Math.max(1, Math.floor(h))
 }
 
 const DEFAULT_TERMINAL: TerminalSettings = {
@@ -138,6 +152,7 @@ async function persistAndApply(
       defaultAgent: result.defaultAgent ?? 'claude',
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
+      activeWindowHours: clampActiveWindowHours(result.activeWindowHours ?? DEFAULT_ACTIVE_WINDOW_HOURS),
       editor: mergeEditorDefaults(result.editor),
       lastActiveProjectId: result.lastActiveProjectId ?? null,
       lastActiveWorkspaceId: result.lastActiveWorkspaceId ?? null,
@@ -157,6 +172,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   aiAssistantEnabled: true,
   agenticSystemsEnabled: false,
   claudeAuthAutoRefresh: false,
+  activeWindowHours: DEFAULT_ACTIVE_WINDOW_HOURS,
   editor: { ...DEFAULT_EDITOR },
   defaultAgent: 'claude',
   initialProjectId: null,
@@ -266,6 +282,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  setActiveWindowHours: async (hours: number) => {
+    const prev = get().activeWindowHours
+    const next = clampActiveWindowHours(hours)
+    set({ activeWindowHours: next })
+    try {
+      await persistAndApply(set, { activeWindowHours: next })
+    } catch (err) {
+      console.error('[settings] Failed to persist active window hours:', err)
+      set({ activeWindowHours: prev })
+    }
+  },
+
   updateEditorSettings: async (partial: Partial<EditorSettingsBackend>) => {
     const prev = get().editor
     const merged = { ...prev, ...partial }
@@ -311,6 +339,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       defaultAgent: result.defaultAgent ?? 'claude',
       agenticSystemsEnabled: result.agenticSystemsEnabled ?? false,
       claudeAuthAutoRefresh: result.claudeAuthAutoRefresh ?? false,
+      activeWindowHours: clampActiveWindowHours(result.activeWindowHours ?? DEFAULT_ACTIVE_WINDOW_HOURS),
       editor: mergeEditorDefaults(result.editor),
       lastActiveProjectId: result.lastActiveProjectId ?? null,
       lastActiveWorkspaceId: result.lastActiveWorkspaceId ?? null,

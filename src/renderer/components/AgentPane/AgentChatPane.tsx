@@ -9,6 +9,7 @@ import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { agentDisplayName, resumeChatArgs } from '@/lib/workspace-agent'
+import { useActiveAgentsStore } from '@/stores/active-agents'
 
 interface AgentChatPaneProps {
   agentName: string
@@ -81,6 +82,18 @@ interface AgentChatTerminalProps {
 function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionId }: AgentChatTerminalProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalIdRef = useRef(agentChatId(projectId, agentName))
+
+  // P1.A — bind this pinned-Chat pane to ITS OWN project UPFRONT, before
+  // any terminal-title braille tick can race. The pinned Chat has no agent
+  // lifecycle hook, so the title-activity path is the only binder; without
+  // this pre-registration its working state could latch onto whatever
+  // workspace the user was viewing when the first tick fired (mis-bound
+  // spinner). `bindPaneProject` is idempotent and never clobbers a
+  // lifecycle-bound entry. Keyed on the canonical terminalId so it matches
+  // the paneId carried by the title/lifecycle signals.
+  useEffect(() => {
+    useActiveAgentsStore.getState().bindPaneProject(terminalIdRef.current, projectId)
+  }, [projectId])
   const [launchConfig, setLaunchConfig] = useState<{
     command: string
     args: string[]

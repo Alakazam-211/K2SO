@@ -4,6 +4,7 @@ import { useTabsStore } from '@/stores/tabs'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
+import { useSettingsStore, clampActiveWindowHours } from '@/stores/settings'
 import { emit } from '@tauri-apps/api/event'
 // Plan B — project mutations are host-aware daemon data: route through
 // the `/cli/projects/*` HTTP layer. `projects_update` re-emits
@@ -18,6 +19,23 @@ import { KeyCombo } from '@/components/KeySymbol'
 import type { ProjectWithWorkspaces } from '@/stores/projects'
 
 const TWENTY_FOUR_HOURS = 24 * 60 * 60
+
+/**
+ * P1.C — Active-Bar rule 2 predicate, extracted so it's unit-testable and
+ * reads the user-configured window. `lastInteractionAt` and `nowSecs` are
+ * unix SECONDS (matching the rest of this module); `windowHours` is the
+ * configured tenure (default 24, min 1). Returns true while the workspace
+ * is still inside its post-interaction Active window.
+ */
+export function isWithinActiveWindow(
+  lastInteractionAt: number | null | undefined,
+  nowSecs: number,
+  windowHours: number,
+): boolean {
+  if (!lastInteractionAt) return false
+  const windowSecs = clampActiveWindowHours(windowHours) * 60 * 60
+  return nowSecs - lastInteractionAt < windowSecs
+}
 
 /**
  * In-memory map of project IDs → unix-second timestamp at which they
@@ -117,6 +135,7 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
   const backgroundWorkspaces = useTabsStore((s) => s.backgroundWorkspaces)
   const hasActiveAgents = useActiveAgentsStore((s) => s.hasActiveAgents())
   const paneStatuses = useActiveAgentsStore((s) => s.paneStatuses)
+  const activeWindowHours = useSettingsStore((s) => s.activeWindowHours)
 
   // Refresh the 24h check periodically (every 60s)
   const [tick, setTick] = useState(0)
@@ -172,9 +191,10 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
       // wins over a stale dismiss).
       if (p.manuallyActive) return true
 
-      // 2. Recently interacted (within 24h, set when agent message sent).
-      // Also an explicit user signal — wins over dismiss.
-      if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
+      // 2. Recently interacted (within the configurable Active window,
+      // set when agent message sent / workspace activated). Also an
+      // explicit user signal — wins over dismiss.
+      if (isWithinActiveWindow(p.lastInteractionAt, now, activeWindowHours)) return true
 
       // Explicit dismiss in this session overrides the auto-include
       // rules below. Without this gate, dismissing the workspace the
@@ -222,7 +242,7 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
     }
 
     return result
-  }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick])
+  }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick, activeWindowHours])
 }
 
 function ActiveBarItem({
@@ -427,6 +447,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   const projects = useProjectsStore.getState().projects
   const activeProjectId = useProjectsStore.getState().activeProjectId
   const backgroundWorkspaces = useTabsStore.getState().backgroundWorkspaces
+  const activeWindowHours = useSettingsStore.getState().activeWindowHours
   const now = Math.floor(Date.now() / 1000)
 
   // Honor the same 24h TTLs as the hook version. Without these
@@ -439,7 +460,7 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
     // Active. Same rationale as the hook above: 1-0 shortcuts should
     // work on the workspaces the user is actually using.
     if (p.manuallyActive) return true
-    if (p.lastInteractionAt && (now - p.lastInteractionAt) < TWENTY_FOUR_HOURS) return true
+    if (isWithinActiveWindow(p.lastInteractionAt, now, activeWindowHours)) return true
     if (_dismissedProjects.has(p.id)) return false
     if (p.id === activeProjectId) return true
     if (Object.keys(backgroundWorkspaces).some((k) => k.startsWith(`${p.id}:`))) return true
