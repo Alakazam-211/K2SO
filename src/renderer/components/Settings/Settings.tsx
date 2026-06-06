@@ -4,7 +4,8 @@ import type { SettingsSection } from '@/stores/settings'
 import { SectionErrorBoundary } from './SectionErrorBoundary'
 import { SettingsSearchModal } from './SettingsSearchModal'
 import type { SettingEntry } from './searchManifest'
-import { GeneralSection, GENERAL_MANIFEST } from './sections/GeneralSection'
+import { GeneralSection, GeneralRemoteHostPanel, GENERAL_MANIFEST } from './sections/GeneralSection'
+import { useConnectHostStore } from '@/stores/connect-host'
 import { TerminalSection, TERMINAL_MANIFEST } from './sections/TerminalSection'
 import { CodeEditorSettingsSection, CODE_EDITOR_MANIFEST } from './sections/CodeEditorSettingsSection'
 import { EditorsAgentsSection, EDITORS_AGENTS_MANIFEST } from './sections/EditorsAgentsSection'
@@ -58,6 +59,10 @@ export default function Settings(): React.JSX.Element {
   const activeSection = useSettingsStore((s) => s.activeSection)
   const setSection = useSettingsStore((s) => s.setSection)
   const closeSettings = useSettingsStore((s) => s.closeSettings)
+  // General splits into a half/half pane (host controls on the right, full-
+  // height divider) ONLY when connected to a remote host — same shell idiom
+  // as k2-connect/connections below.
+  const isRemote = useConnectHostStore((s) => s.activeHost) !== 'local'
   const [searchOpen, setSearchOpen] = useState(false)
 
   // Flat manifest across every section — filtered by agenticSystemsEnabled
@@ -188,6 +193,7 @@ export default function Settings(): React.JSX.Element {
       {/* Content area */}
       <div
         className={`flex-1 min-h-0 relative ${
+          activeSection === 'general' ||
           activeSection === 'projects' ||
           activeSection === 'k2-connect' ||
           activeSection === 'connections'
@@ -197,7 +203,29 @@ export default function Settings(): React.JSX.Element {
               : 'overflow-y-auto p-6'
         }`}
       >
-        {activeSection === 'general' && <GeneralSection />}
+        {activeSection === 'general' && (
+          /* General always sits in the LEFT half (half-width). The RIGHT half
+             carries the host-only controls + a full-height divider ONLY when
+             connected to a remote host; when local it's an empty pane with no
+             divider (General just stays half-width). Mirrors the k2-connect /
+             connections half/half shell layout below. */
+          <div className="flex h-full min-h-0">
+            <div className="flex-1 min-w-0 overflow-y-auto p-6">
+              <GeneralSection />
+            </div>
+            <div
+              className={`flex-1 min-w-0 overflow-y-auto p-6 ${
+                isRemote ? 'border-l border-[var(--color-border)]' : ''
+              }`}
+            >
+              {isRemote && (
+                <SectionErrorBoundary>
+                  <GeneralRemoteHostPanel />
+                </SectionErrorBoundary>
+              )}
+            </div>
+          </div>
+        )}
         {activeSection === 'terminal' && <TerminalSection />}
         {activeSection === 'code-editor' && <CodeEditorSettingsSection />}
         {activeSection === 'editors-agents' && <EditorsAgentsSection />}

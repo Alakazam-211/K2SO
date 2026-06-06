@@ -79,18 +79,17 @@ export function GeneralSection(): React.JSX.Element {
     }
   }, [handleCheckUpdate])
 
-  // When connected to a REMOTE host, the host-only controls (restart +
-  // update) move into a right-hand column with a divider. When local, the
-  // page is a single column with no divider — looks totally normal.
-  const activeHost = useConnectHostStore((s) => s.activeHost)
-  const isRemote = activeHost !== 'local'
-
+  // The Settings shell ALWAYS renders General in the LEFT pane of a half/half
+  // split, so it fills its half-width pane (w-full). The RIGHT pane shows the
+  // host-only Restart + Update controls (<GeneralRemoteHostPanel/>) with a
+  // full-height divider ONLY when connected to a remote host; when local the
+  // right pane is empty and the divider is hidden — General just stays at
+  // half-width. (See Settings.tsx.)
   return (
-    <div className={isRemote ? 'max-w-5xl' : 'max-w-xl'}>
+    <div className="w-full">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-4">General</h2>
 
-      <div className={isRemote ? 'flex items-start gap-6' : undefined}>
-        <div className="flex-1 min-w-0 space-y-4">
+      <div className="space-y-4">
         {/* Version & Update */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">App Version</span>
@@ -253,19 +252,23 @@ export function GeneralSection(): React.JSX.Element {
             </button>
           )}
         </div>
-        </div>
-        {/* Right column — REMOTE HOST controls. Renders ONLY when connected
-            to a remote host, with a left divider; absent (no divider, single
-            column) when local, so the page looks normal on your own Mac.
-            Restart = #661, Update = P4/Shape A. Never mistakable for "this
-            Mac" (local update = App Version above; local restart = K2SO
-            Server row). */}
-        {isRemote && (
-          <div className="w-[360px] flex-shrink-0 space-y-4 border-l border-[var(--color-border)] pl-6">
-            <RestartHostRow />
-            <UpdateHostRow />
-          </div>
-        )}
+      </div>
+    </div>
+  )
+}
+
+// Right-pane companion to the General section, rendered by the Settings shell
+// ONLY when connected to a remote host (half/half split, full-height divider —
+// see Settings.tsx). Holds the host-only controls: Restart (#661) + Update
+// (P4 / Shape A). Never mistakable for "this Mac" — local update lives in the
+// App Version row, local restart in the K2SO Server row, both in the left pane.
+export function GeneralRemoteHostPanel(): React.JSX.Element {
+  return (
+    <div className="w-full">
+      <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-4">Connected host</h2>
+      <div className="space-y-4">
+        <RestartHostRow />
+        <UpdateHostRow />
       </div>
     </div>
   )
@@ -1125,7 +1128,12 @@ function UpdateHostRow(): React.JSX.Element | null {
                 title={canUpdate ? undefined : 'Only the host owner or an admin can update this host'}
                 className="px-3 py-1 text-[11px] font-medium text-amber-200 bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 transition-colors no-drag cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Download
+                {/* Bundled-app hosts (Shape A) update in one shot — the Tauri
+                    updater downloads + installs + relaunches, there's no
+                    separate staged "Install & restart" step — so the button is
+                    "Update Host", not "Download". Standalone (Shape B) hosts
+                    keep the two-step Download → Install & restart flow. */}
+                {check?.installKind === 'bundled-app' ? 'Update Host' : 'Download'}
               </button>
             ) : (
               <button
