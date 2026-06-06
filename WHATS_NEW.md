@@ -3,6 +3,29 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.34 — Active bar that tells the truth (and uses less RAM)
+
+- **"Active" now means *alive or recently worked*, not *what you're looking
+  at*.** Workspaces you haven't touched in a while age out of Active on their
+  own, and their background sessions get cleaned up — so K2 stops quietly
+  holding hundreds of MB for workspaces you walked away from days ago.
+- **Tune how long Active sticks around.** General settings has a new
+  **"Keep workspaces Active for [N] hours"** — lower it for more aggressive
+  cleanup, raise it to keep sessions warm longer.
+- **At-a-glance status on every Active item:** a small **green square** when
+  the workspace has a live session (grey when none), the **braille spinner**
+  when it's working, and an **EKG icon** when it has an enabled heartbeat (i.e.
+  it can run on its own). **Pinned** workspaces float to the top, separated
+  from the rest.
+- **The pinned Chat tab shows when it's working** — its icon turns into a
+  spinner while the agent is busy, then back when it's done.
+- **Heartbeat indicators are honest now.** A workspace only shows the heartbeat
+  icon when it actually has an enabled heartbeat — fixed a case where a
+  workspace with every heartbeat turned off still looked self-driving (and held
+  its session open forever).
+- **Squared-off status dots** in the server switcher, matching the rest of the
+  UI. Plus K2 Connect settings polish and a reordered Settings list.
+
 ## 0.39.33 — Remote reboot + remote updates (beta)
 
 - **Restart a machine you're connected to — from the app or the terminal.** A
