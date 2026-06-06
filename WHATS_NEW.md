@@ -3,6 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.37 — Settings layout polish for connected hosts
+
+- **"Update Host" button.** Updating a connected machine is one click that
+  downloads, installs, and relaunches it — so the button now says **"Update
+  Host"** (it was "Download," which implied a separate install step that
+  doesn't apply to app hosts).
+- **General settings reads cleaner when connected to a host.** It now splits
+  into two equal halves with a full-height divider — your general settings on
+  the left, the connected host's Restart + Update controls on the right. On
+  your own Mac it's a single half-width column with no divider.
+
 ## 0.39.36 — Reconnecting after a host restart just works
 
 - **No more "invalid token" dead-ends after updating or restarting a host.**
