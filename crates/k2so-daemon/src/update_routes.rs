@@ -141,6 +141,11 @@ pub struct CheckResult {
     pub notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Install topology of THIS host (`standalone` | `bundled-app` |
+    /// `unknown`) so the renderer can route the remote-update mechanism
+    /// (Shape B binary swap vs Shape A app-updater trigger). PRD §3.1.
+    #[serde(rename = "installKind")]
+    pub install_kind: String,
 }
 
 /// Compare two dotted version strings (`x.y.z`) numerically, longest-
@@ -176,6 +181,7 @@ pub fn decide_check(current: &str, manifest: &DaemonManifest) -> CheckResult {
         available: newer && artifact.is_some(),
         notes: manifest.notes.clone(),
         url: artifact.map(|a| a.url.clone()),
+        install_kind: crate::boot_status::install_kind().to_string(),
     }
 }
 
@@ -363,9 +369,14 @@ fn set_phase(job_id: &str, phase: Phase) {
 
 /// Mark a job `failed` with an error message. Terminal.
 fn fail_job(job_id: &str, err: impl Into<String>) {
+    let err = err.into();
+    // Surface the real failure reason server-side: the host log used to be
+    // silent on update failures (the root cause of the 0.39.34 sig bug going
+    // undiagnosed). This logs on EVERY failure path before the job flips.
+    k2so_core::log_debug!("[daemon] P3 update/download — job {job_id} FAILED: {err}");
     update_job(job_id, |j| {
         j.phase = Phase::Failed;
-        j.error = Some(err.into());
+        j.error = Some(err);
     });
 }
 
@@ -518,6 +529,10 @@ pub fn handle_start(body: &[u8]) -> CliResponse {
 /// worker thread spawned by [`handle_start`].
 fn run_download_stage(job_id: &str, artifact: &Artifact) {
     set_phase(job_id, Phase::Downloading);
+    k2so_core::log_debug!(
+        "[daemon] P3 update/download — job {job_id} downloading binary {}",
+        artifact.url
+    );
     let bin = match fetch_bytes(&artifact.url) {
         Ok(b) => b,
         Err(e) => return fail_job(job_id, format!("download binary: {e}")),
@@ -526,6 +541,10 @@ fn run_download_stage(job_id: &str, artifact: &Artifact) {
         j.bytes = Some(bin.len() as u64);
         j.progress = Some(1.0);
     });
+    k2so_core::log_debug!(
+        "[daemon] P3 update/download — job {job_id} downloading sig {}",
+        artifact.sig
+    );
     let sig = match fetch_bytes(&artifact.sig) {
         Ok(b) => b,
         Err(e) => return fail_job(job_id, format!("download sig: {e}")),
@@ -538,11 +557,13 @@ fn run_download_stage(job_id: &str, artifact: &Artifact) {
     // ── MANDATORY minisign verify against the EMBEDDED pubkey ──
     // A mismatch is a HARD abort: no sha256, no staging, no swap.
     set_phase(job_id, Phase::Verifying);
+    k2so_core::log_debug!("[daemon] P3 update/download — job {job_id} verifying minisign");
     if let Err(e) = verify_minisign(UPDATER_PUBKEY_B64, &sig_str, &bin) {
         return fail_job(job_id, format!("signature verify FAILED — aborting: {e}"));
     }
     // sha256 is the second integrity layer; only reached AFTER the
     // signature already validated.
+    k2so_core::log_debug!("[daemon] P3 update/download — job {job_id} verifying sha256");
     if !verify_sha256(&bin, &artifact.sha256) {
         return fail_job(job_id, "sha256 mismatch — aborting");
     }
@@ -565,6 +586,10 @@ fn run_download_stage(job_id: &str, artifact: &Artifact) {
         j.phase = Phase::Staged;
         j.staged_path = Some(staged.clone());
     });
+    k2so_core::log_debug!(
+        "[daemon] P3 update/download — job {job_id} staged at {}",
+        staged.display()
+    );
 }
 
 /// Build the status payload for `GET /cli/daemon/update/status?job_id=`.
@@ -859,6 +884,9 @@ fn manifest_url() -> String {
 fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
+        // GitHub release assets 302 → a CDN host; follow redirects so the
+        // .sig / binary URLs resolve to their final location.
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
     let resp = client
@@ -930,6 +958,30 @@ mod tests {
         assert_eq!(a.sha256, "abc123");
         assert!(a.url.ends_with("k2so-daemon-macos-aarch64"));
         assert!(a.sig.ends_with(".sig"));
+    }
+
+    #[test]
+    fn manifest_sig_is_a_url_not_inline_signature() {
+        // CONTRACT LOCK (0.39.34 root-cause regression): the daemon
+        // downloads `artifact.sig` as a URL (fetch_bytes). The manifest
+        // MUST therefore carry a URL in `sig`, never the inline base64
+        // minisign blob. release.sh once wrote the inline content here,
+        // which the downloader handed to reqwest → invalid-URL builder
+        // error → every self-update failed at "download sig". If a future
+        // change reverts to inline, this fails.
+        let m = DaemonManifest::parse(SAMPLE_MANIFEST.as_bytes()).expect("parse");
+        for (key, a) in &m.artifacts {
+            assert!(
+                a.sig.starts_with("http://") || a.sig.starts_with("https://"),
+                "artifact {key} sig must be a URL (downloaded by fetch_bytes), got: {}",
+                a.sig
+            );
+            assert!(
+                a.sig.ends_with(".sig"),
+                "artifact {key} sig URL should point at the .sig asset, got: {}",
+                a.sig
+            );
+        }
     }
 
     #[test]

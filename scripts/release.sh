@@ -297,7 +297,7 @@ echo "  latest.json generated."
 #     "artifacts": {
 #       "<platform-key>": {
 #         "url":    "https://github.com/.../releases/download/v<ver>/<asset>",
-#         "sig":    "<base64 minisign signature string>",
+#         "sig":    "<URL to the .sig asset>",
 #         "sha256": "<hex>"
 #       }, ...
 #     }
@@ -320,7 +320,6 @@ bunx @tauri-apps/cli@2 signer sign \
     "$DIST_DIR/$MAC_ASSET" \
     --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
     --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
-MAC_SIG=$(cat "$DIST_DIR/${MAC_ASSET}.sig")
 MAC_SHA256=$(shasum -a 256 "$DIST_DIR/$MAC_ASSET" | awk '{print $1}')
 echo "  macos-aarch64 daemon built, signed, hashed."
 
@@ -330,7 +329,7 @@ DL_BASE="https://github.com/Alakazam-211/K2SO/releases/download/${TAG}"
 ARTIFACTS_JSON=$(cat <<JSON
     "macos-aarch64": {
       "url": "${DL_BASE}/${MAC_ASSET}",
-      "sig": "${MAC_SIG}",
+      "sig": "${DL_BASE}/${MAC_ASSET}.sig",
       "sha256": "${MAC_SHA256}"
     }
 JSON
@@ -340,12 +339,11 @@ JSON
 for LX in "linux-x86_64" "linux-aarch64"; do
     LX_ASSET="k2so-daemon-${LX}"
     if [ -f "$DIST_DIR/$LX_ASSET" ] && [ -f "$DIST_DIR/${LX_ASSET}.sig" ]; then
-        LX_SIG=$(cat "$DIST_DIR/${LX_ASSET}.sig")
         LX_SHA256=$(shasum -a 256 "$DIST_DIR/$LX_ASSET" | awk '{print $1}')
         ARTIFACTS_JSON="${ARTIFACTS_JSON},
     \"${LX}\": {
       \"url\": \"${DL_BASE}/${LX_ASSET}\",
-      \"sig\": \"${LX_SIG}\",
+      \"sig\": \"${DL_BASE}/${LX_ASSET}.sig\",
       \"sha256\": \"${LX_SHA256}\"
     }"
         echo "  Merged CI artifact: ${LX_ASSET}."

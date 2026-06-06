@@ -104,9 +104,65 @@ pub fn detail() -> String {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Install-topology detection (remote-update routing — PRD §3.1)
+// ─────────────────────────────────────────────────────────────────────
+
+/// The host's install topology, surfaced on `/boot-status` and
+/// `update/check` so the renderer can route the remote-update mechanism:
+/// `"bundled-app"`   → daemon runs inside a notarized `K2SO.app` bundle
+///                     (Shape A — remote-trigger the app's Tauri updater).
+/// `"standalone"`    → a bare `k2so-daemon` binary (Shape B — binary swap).
+/// `"unknown"`       → `current_exe()` could not be resolved.
+///
+/// Reads `std::env::current_exe()` and classifies its path. The pure
+/// classification lives in [`classify_install_kind`] for unit-testing.
+pub fn install_kind() -> &'static str {
+    match std::env::current_exe() {
+        Ok(p) => classify_install_kind(&p.to_string_lossy()),
+        Err(_) => "unknown",
+    }
+}
+
+/// Pure path-classifier behind [`install_kind`]. A macOS bundle runs the
+/// daemon at `…/K2SO.app/Contents/MacOS/k2so-daemon`, so the presence of
+/// `.app/Contents/MacOS/` in the path means a bundled host; anything else
+/// is a standalone binary.
+pub fn classify_install_kind(exe_path: &str) -> &'static str {
+    if exe_path.contains(".app/Contents/MacOS/") {
+        "bundled-app"
+    } else {
+        "standalone"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_install_kind_bundled_vs_standalone() {
+        assert_eq!(
+            classify_install_kind("/Applications/K2SO.app/Contents/MacOS/k2so-daemon"),
+            "bundled-app"
+        );
+        assert_eq!(
+            classify_install_kind("/usr/local/bin/k2so-daemon"),
+            "standalone"
+        );
+        // A daemon staged inside a user's home bundle is still bundled.
+        assert_eq!(
+            classify_install_kind(
+                "/Users/rosson/Applications/K2SO.app/Contents/MacOS/k2so-daemon"
+            ),
+            "bundled-app"
+        );
+        // Linux standalone path.
+        assert_eq!(
+            classify_install_kind("/opt/k2so/k2so-daemon"),
+            "standalone"
+        );
+    }
 
     // These mutate process-global state, so they live in ONE test to
     // run serially and not race the shared AtomicU8 / RwLock across

@@ -469,6 +469,9 @@ async fn handle_one_request(
                 "protocol": crate::boot_status::PROTOCOL,
                 "phase": crate::boot_status::phase_str(),
                 "detail": crate::boot_status::detail(),
+                // Install topology (standalone | bundled-app | unknown) so the
+                // renderer can route the remote-update mechanism (PRD §3.1).
+                "installKind": crate::boot_status::install_kind(),
             })
             .to_string();
             super::http::send_response(&mut *stream, "200 OK", "application/json", &body).await;
