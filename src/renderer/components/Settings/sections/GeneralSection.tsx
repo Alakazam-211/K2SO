@@ -79,11 +79,18 @@ export function GeneralSection(): React.JSX.Element {
     }
   }, [handleCheckUpdate])
 
+  // When connected to a REMOTE host, the host-only controls (restart +
+  // update) move into a right-hand column with a divider. When local, the
+  // page is a single column with no divider — looks totally normal.
+  const activeHost = useConnectHostStore((s) => s.activeHost)
+  const isRemote = activeHost !== 'local'
+
   return (
-    <div className="max-w-xl">
+    <div className={isRemote ? 'max-w-5xl' : 'max-w-xl'}>
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-4">General</h2>
 
-      <div className="space-y-4">
+      <div className={isRemote ? 'flex items-start gap-6' : undefined}>
+        <div className="flex-1 min-w-0 space-y-4">
         {/* Version & Update */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
           <span className="text-xs text-[var(--color-text-secondary)]">App Version</span>
@@ -209,18 +216,6 @@ export function GeneralSection(): React.JSX.Element {
             icon so users always have visibility into what's running. */}
         <KeepDaemonOnQuitRow />
 
-        {/* Restart the REMOTE host you're connected to over K2 Connect
-            (#661). Renders ONLY when the active host is a remote so it can
-            never be mistaken for "restart my Mac" — the local-Mac restart
-            lives in the K2SO Server (DaemonRow) above. */}
-        <RestartHostRow />
-
-        {/* Update the REMOTE host you're connected to over K2 Connect (P4).
-            Renders ONLY when the active host is a remote so it can never be
-            mistaken for "update my Mac" — the local-Mac update lives in the
-            "App Version" auto-updater area at the top of this section. */}
-        <UpdateHostRow />
-
         {/* AI Workspace Assistant (Cmd+L) — core feature, belongs in General */}
         <LocalLLMSettings />
 
@@ -258,6 +253,19 @@ export function GeneralSection(): React.JSX.Element {
             </button>
           )}
         </div>
+        </div>
+        {/* Right column — REMOTE HOST controls. Renders ONLY when connected
+            to a remote host, with a left divider; absent (no divider, single
+            column) when local, so the page looks normal on your own Mac.
+            Restart = #661, Update = P4/Shape A. Never mistakable for "this
+            Mac" (local update = App Version above; local restart = K2SO
+            Server row). */}
+        {isRemote && (
+          <div className="w-[360px] flex-shrink-0 space-y-4 border-l border-[var(--color-border)] pl-6">
+            <RestartHostRow />
+            <UpdateHostRow />
+          </div>
+        )}
       </div>
     </div>
   )
