@@ -3,6 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.36 — Reconnecting after a host restart just works
+
+- **No more "invalid token" dead-ends after updating or restarting a host.**
+  When a machine you're connected to restarts (e.g. right after a remote
+  update), its sign-in can expire. K2 now checks your session the moment it
+  reconnects and, if it's expired, **prompts you to sign back in** — instead of
+  silently opening a broken workspace where the file tree, chat history, and
+  terminals all fail with "invalid or missing auth token." One re-auth instead
+  of having to remove and re-add the connection. (A momentary network blip
+  never logs you out — only a genuinely expired session does.)
+
 ## 0.39.35 — Remote updates that actually work (both kinds of host)
 
 - **Updating a machine you're connected to now works end-to-end.** A signing-
