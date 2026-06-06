@@ -8,7 +8,12 @@
 //     (a remote daemon may run a different marketing version).
 
 import { describe, it, expect } from 'vitest'
-import { localPairedPolicy, remoteHostPolicy, shouldSurfaceRemoteDrop } from './ConnectionGate'
+import {
+  localPairedPolicy,
+  remoteHostPolicy,
+  shouldSurfaceRemoteDrop,
+  classifyWhoamiStatus,
+} from './ConnectionGate'
 
 const status = (over: Partial<{ version: string; protocol: number; phase: string; detail: string }> = {}) => ({
   version: '0.39.15',
@@ -95,5 +100,41 @@ describe('shouldSurfaceRemoteDrop (debounced drop)', () => {
 
   it('zero fails (just connected / recovered) is never a drop', () => {
     expect(shouldSurfaceRemoteDrop(0)).toBe(false)
+  })
+})
+
+// 0.39.36 — stale connect-session reconnect fix. Connect-user sessions are
+// in-memory in the daemon, so a host restart wipes them while /boot-status
+// still answers 200 'ready'. After the policy accepts a token-bearing
+// REMOTE host, the gate probes the session with whoami and acts on this
+// classification: an authoritative 401/403 ⇒ dead (expire + re-auth); a
+// transport blip (null) or a non-auth server hiccup ⇒ 'unknown' (do NOT
+// nuke a good session — mount and let the normal path sort it out).
+describe('classifyWhoamiStatus (stale-session probe)', () => {
+  it('treats 403 as a DEAD session (wiped by a host restart)', () => {
+    expect(classifyWhoamiStatus(403)).toBe('dead')
+  })
+
+  it('treats 401 as a DEAD session (expired/unauthorized)', () => {
+    expect(classifyWhoamiStatus(401)).toBe('dead')
+  })
+
+  it('treats 200 as an ALIVE session (mount)', () => {
+    expect(classifyWhoamiStatus(200)).toBe('alive')
+  })
+
+  it('treats other 2xx as alive', () => {
+    expect(classifyWhoamiStatus(204)).toBe('alive')
+  })
+
+  it('treats a transport error/timeout (null) as UNKNOWN — never expires', () => {
+    // A network blip must NOT nuke a good session — proceed to mount.
+    expect(classifyWhoamiStatus(null)).toBe('unknown')
+  })
+
+  it('treats a non-auth server hiccup (5xx/404) as UNKNOWN — not an authoritative dead token', () => {
+    expect(classifyWhoamiStatus(500)).toBe('unknown')
+    expect(classifyWhoamiStatus(502)).toBe('unknown')
+    expect(classifyWhoamiStatus(404)).toBe('unknown')
   })
 })

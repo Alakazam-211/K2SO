@@ -80,6 +80,11 @@ const REMOTE_DROP_THRESHOLD = 2
  *  the local 2s because a tunnel round-trip is inherently higher-latency;
  *  a tight 2s would flag transient slowness as a drop. */
 const REMOTE_BOOT_STATUS_TIMEOUT_MS = 4000
+/** Timeout for the REMOTE connect-session validity probe (whoami). Short
+ *  + bounded so a network hiccup can't hang the gate; on a NON-403
+ *  transport error we treat the session as 'unknown' (a blip, not dead)
+ *  and proceed to mount rather than nuking a good session. */
+const REMOTE_WHOAMI_TIMEOUT_MS = 4000
 
 /** Debounce rule for a connected-remote drop: given the running count of
  *  CONSECUTIVE failed health-polls, should we surface the reconnect banner
@@ -213,6 +218,75 @@ async function fetchBootStatus(timeoutMs = 2000): Promise<DaemonBootStatus | nul
     // ~/.k2so/daemon.port (covers a kickstart-assigned port change).
     invalidateDaemonWs()
     return null
+  }
+}
+
+/**
+ * 0.39.36 — stale connect-session reconnect fix.
+ *
+ * Connect-user login sessions are IN-MEMORY in the daemon
+ * (connect_users.rs: a `OnceLock<Mutex<HashMap<token, Session>>>`), so a
+ * daemon restart (host update / reboot / crash) WIPES them. `/boot-status`
+ * is a PUBLIC route — it answers 200 'ready' regardless of session
+ * validity — so the remote policy would happily 'accept' a host whose
+ * token now points at a dead session. The app then mounts and every
+ * authenticated `/cli/*` route 403s ("Invalid or missing auth token") →
+ * a broken app (no file tree, no chat history, no terminal). The fix:
+ * after the policy accepts a REMOTE host that HAS a token, probe the
+ * session with `GET /cli/auth/whoami?token=…`; a 401/403 means the
+ * session is dead → expire it (drop token) and surface RemoteSignIn for a
+ * one-time re-auth instead of mounting a broken app.
+ */
+
+/** Outcome of the connect-session validity probe. */
+type SessionProbe =
+  | 'alive' // whoami 2xx — the session is valid; mount.
+  | 'dead' // whoami 401/403 — the session is gone; re-auth.
+  | 'unknown' // transport error / timeout — a network blip, NOT a dead
+//             token; do NOT nuke the session. Proceed (mount) and let the
+//             normal health-poll / a later real 403 sort it out.
+
+/**
+ * Map a whoami HTTP status (or null for a transport error/timeout) to a
+ * session verdict. Pulled out as a pure fn so the "403 ⇒ dead vs blip ⇒
+ * unknown" rule is unit-testable without the React/Tauri-bound effect.
+ *
+ *   - 401 / 403  → 'dead'    (stale/expired in-memory session — re-auth)
+ *   - any 2xx    → 'alive'   (valid session — mount)
+ *   - null       → 'unknown' (timeout/unreachable — a blip; do NOT expire)
+ *   - other non-2xx (5xx/404/…) → 'unknown' (server hiccup, not an
+ *     authoritative "your token is dead" — don't nuke a good session on it)
+ */
+export function classifyWhoamiStatus(httpStatus: number | null): SessionProbe {
+  if (httpStatus === null) return 'unknown'
+  if (httpStatus === 401 || httpStatus === 403) return 'dead'
+  if (httpStatus >= 200 && httpStatus < 300) return 'alive'
+  return 'unknown'
+}
+
+/**
+ * Probe the ACTIVE remote host's connect-session via
+ * `GET /cli/auth/whoami?token=…` (host-aware: getDaemonWs resolves the
+ * active host's hostname/port/token). Returns:
+ *   - 'dead'    on an authoritative 401/403 (session wiped by a restart),
+ *   - 'alive'   on 2xx,
+ *   - 'unknown' on a transport error/timeout or non-auth non-2xx (a blip).
+ *
+ * Time-bounded by REMOTE_WHOAMI_TIMEOUT_MS so a network hiccup can never
+ * hang the gate. Caller only acts on 'dead'.
+ */
+async function probeRemoteSession(): Promise<SessionProbe> {
+  try {
+    const creds = await getDaemonWs()
+    const resp = await fetch(
+      `${daemonHttpBase(creds)}/cli/auth/whoami?token=${creds.token}`,
+      { method: 'GET', signal: AbortSignal.timeout(REMOTE_WHOAMI_TIMEOUT_MS) },
+    )
+    return classifyWhoamiStatus(resp.status)
+  } catch {
+    // Network error / timeout / abort — a blip, not an authoritative
+    // "dead token". Do NOT expire the session on this.
+    return 'unknown'
   }
 }
 
@@ -351,7 +425,42 @@ export function ConnectionGate(): React.ReactElement {
         isRemote ? REMOTE_BOOT_STATUS_TIMEOUT_MS : 2000,
       )
       if (cancelled) return
-      const next = policy.decide(status)
+      let next = policy.decide(status)
+      // 0.39.36: a REMOTE host's /boot-status accepting only proves the
+      // daemon is up + the right protocol — NOT that this client's
+      // in-memory connect-session survived the daemon's last restart. On
+      // the FIRST accept of a token-bearing remote, validate the session
+      // with a cheap host-aware whoami probe BEFORE mounting. A dead
+      // (401/403) session → expire the token + drop to RemoteSignIn rather
+      // than mounting an app where every /cli/* call 403s. A transport
+      // blip ('unknown') is NOT treated as dead — we proceed to mount. We
+      // probe only on the first accept (acceptedOnce false): once mounted,
+      // the ongoing health-poll + real /cli/* 401 handlers own expiry, so
+      // a transient 403 mid-session never nukes a working app here.
+      if (
+        next.kind === 'accept' &&
+        isRemote &&
+        !acceptedOnce &&
+        !remoteNeedsAuth
+      ) {
+        const active = useConnectHostStore.getState().activeHost
+        const hasToken =
+          active !== 'local' && !!active.token && active.token.length > 0
+        if (hasToken) {
+          const probe = await probeRemoteSession()
+          if (cancelled) return
+          if (probe === 'dead') {
+            // Session was wiped (host restart/update/crash). Drop the dead
+            // token + raise RemoteSignIn for a one-time re-auth. Re-key as
+            // a wait so we don't fall through to the mount path below; the
+            // effect re-runs on the resulting token change. `hasToken`
+            // already narrowed `active` to a ConnectHost.
+            useConnectHostStore.getState().expireSession(active.id)
+            next = { kind: 'wait', reason: 'remote-session-expired' }
+          }
+          // 'alive' / 'unknown' → keep the accept and mount as normal.
+        }
+      }
       // Debounced-drop path: a REMOTE host that has already connected this
       // effect-run (post-accept health-poll) must not surface a single
       // blipped poll. Below REMOTE_DROP_THRESHOLD consecutive fails we keep
