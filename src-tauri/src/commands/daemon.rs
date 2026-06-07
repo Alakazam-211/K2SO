@@ -240,6 +240,17 @@ pub fn daemon_ws_url() -> DaemonWsUrlResponse {
             reason: "home directory unavailable".to_string(),
         };
     };
+    daemon_ws_url_in(&home)
+}
+
+/// Resolve the WebSocket URL response from an explicit home directory.
+///
+/// Split out from `daemon_ws_url()` so tests can point the lookup at a
+/// temp dir they fully control rather than the live `~/.k2so`. The real
+/// directory can be mutated by a running agent-heartbeat daemon between
+/// a test's existence-check and its assertion (TOCTOU), which made the
+/// old `ws_url_not_installed_when_files_missing` test flaky.
+fn daemon_ws_url_in(home: &std::path::Path) -> DaemonWsUrlResponse {
     let port_path = home.join(".k2so/heartbeat.port");
     let token_path = home.join(".k2so/heartbeat.token");
 
@@ -330,19 +341,30 @@ mod tests {
 
     #[test]
     fn ws_url_not_installed_when_files_missing() {
-        // Mirror of daemon_status_with_no_files: only assert when
-        // the env cooperates (no daemon installed). Otherwise skip
-        // — CI machines may have a daemon running.
-        let k2so_dir = dirs::home_dir().unwrap().join(".k2so");
-        let port_file = k2so_dir.join("heartbeat.port");
-        let token_file = k2so_dir.join("heartbeat.token");
-        if port_file.exists() || token_file.exists() {
-            eprintln!(
-                "[test] heartbeat files present; skipping NotInstalled assertion"
-            );
-            return;
-        }
-        match daemon_ws_url() {
+        // Point the lookup at a fresh temp dir we fully control, so the
+        // result can't depend on the live `~/.k2so` — a running
+        // agent-heartbeat daemon can create/refresh `heartbeat.{port,token}`
+        // between an existence-check and the assertion (TOCTOU), which is
+        // exactly the flake this test used to hit. A brand-new temp dir
+        // has no `.k2so/heartbeat.*`, so `daemon_ws_url_in` must report
+        // NotInstalled deterministically regardless of any live daemon.
+        let unique = format!(
+            "k2so-ws-url-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_home = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&temp_home).expect("create temp home");
+
+        let result = daemon_ws_url_in(&temp_home);
+
+        // Clean up before asserting so a panic doesn't leak the temp dir.
+        let _ = std::fs::remove_dir_all(&temp_home);
+
+        match result {
             DaemonWsUrlResponse::NotInstalled { .. } => {}
             other => panic!("expected NotInstalled, got {other:?}"),
         }
