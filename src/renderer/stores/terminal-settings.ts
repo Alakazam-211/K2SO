@@ -159,15 +159,21 @@ async function initTerminalZoomListeners(): Promise<void> {
   try {
     const { listen } = await import('@tauri-apps/api/event')
 
-    listen('terminal:zoom-in', () => {
+    // GH#639: `await` each `listen()` so the promise it returns (which
+    // REJECTS in the headless test env — no Tauri window) funnels into
+    // this function's returned promise instead of escaping as an
+    // unhandled rejection that flips vitest's exit code. Same fix as
+    // `initWorkspaceOpsListeners` in tabs.ts; this module is pulled in
+    // transitively by tabs.test.ts, so its rejections surface there too.
+    await listen('terminal:zoom-in', () => {
       useTerminalSettingsStore.getState().incrementFontSize()
     })
 
-    listen('terminal:zoom-out', () => {
+    await listen('terminal:zoom-out', () => {
       useTerminalSettingsStore.getState().decrementFontSize()
     })
 
-    listen('terminal:zoom-reset', () => {
+    await listen('terminal:zoom-reset', () => {
       useTerminalSettingsStore.getState().resetFontSize()
     })
   } catch {
@@ -175,5 +181,7 @@ async function initTerminalZoomListeners(): Promise<void> {
   }
 }
 
-// Initialize listeners on import
-initTerminalZoomListeners()
+// Initialize listeners on import. GH#639: swallow the rejection the
+// awaited `listen()` calls produce in the headless test env so it never
+// escapes as an unhandled rejection (which flips vitest's exit code).
+void initTerminalZoomListeners().catch(() => {})

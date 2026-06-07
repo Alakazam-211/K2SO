@@ -30,9 +30,15 @@ vi.mock('@tauri-apps/api/event', () => ({
 // we can model "the daemon holds a live agent-chat:<projectId> PTY for a
 // HIDDEN, aged-out workspace the renderer never opened".
 let runningPtys: Array<{ terminalId: string; cwd: string; command: string | null }> = []
+// GH#22 — `/cli/agents/running` carries `subscriberCount` per v2 session
+// (REAL attached-client counts). The pinned-chat session's `agentName`
+// IS the bare projectId. Per-test-controllable so we can model a remote
+// client attached to a workspace's pinned chat.
+let agentsRunning: Array<{ agentName: string; subscriberCount: number }> = []
 vi.mock('@/lib/daemon-cli', () => ({
   daemonCliGet: vi.fn(async (route: string) => {
     if (route === 'terminal/list-running') return runningPtys
+    if (route === 'agents/running') return agentsRunning
     return []
   }),
   daemonCliPost: vi.fn(async () => ({})),
@@ -150,6 +156,7 @@ describe('#P2 age-out sweep (renderer)', () => {
     vi.stubGlobal('fetch', fetchSpy)
     __clearPendingChatReapsForTests()
     runningPtys = []
+    agentsRunning = []
     useTabsStore.setState({ backgroundWorkspaces: {}, tabs: [] })
   })
 
@@ -289,6 +296,7 @@ describe('#P2 age-out daemon sweep (renderer) — reaches hidden workspaces', ()
     vi.stubGlobal('fetch', fetchSpy)
     __clearPendingChatReapsForTests()
     runningPtys = []
+    agentsRunning = []
     // Crucially: NO backgroundWorkspaces snapshot and NO live tabs — the
     // hidden workspace was never opened in this renderer session. The old
     // snapshot-fed sweep would find nothing to reap; the daemon list is
@@ -382,5 +390,76 @@ describe('#P2 age-out daemon sweep (renderer) — reaches hidden workspaces', ()
     vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS)
     await vi.runAllTimersAsync()
     expect(closedAgentNames.length).toBe(0)
+  })
+
+  // ── GH#22 — never reap a session a CLIENT is attached to ───────────────
+
+  it('GH#22: does NOT schedule a reap for an aged-out workspace whose pinned chat has an attached client (subscriberCount > 0)', async () => {
+    const projectId = 'proj-ATTACHED'
+    const projectPath = '/work/proj-ATTACHED'
+    // The daemon holds a live chat PTY AND a remote client is attached
+    // (subscriberCount = 1) — e.g. a K2 Connect client just opened this
+    // long-dormant workspace's pinned chat on the host.
+    runningPtys = [
+      { terminalId: agentChatId(projectId, ''), cwd: projectPath, command: 'claude' },
+    ]
+    agentsRunning = [{ agentName: projectId, subscriberCount: 1 }]
+
+    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon({
+      [projectId]: meta({ projectPath }),
+    })
+
+    // The attached-client gate must skip scheduling entirely.
+    expect(__hasPendingChatReapForTests(projectId)).toBe(false)
+
+    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS * 2)
+    await vi.runAllTimersAsync()
+    expect(closedAgentNames.length).toBe(0)
+  })
+
+  it('GH#22: still reaps an aged-out workspace whose pinned chat has NO attached client (subscriberCount === 0)', async () => {
+    const projectId = 'proj-DORMANT'
+    const projectPath = '/work/proj-DORMANT'
+    runningPtys = [
+      { terminalId: agentChatId(projectId, ''), cwd: projectPath, command: 'claude' },
+    ]
+    // Live PTY, but nobody attached — the normal reap should proceed.
+    agentsRunning = [{ agentName: projectId, subscriberCount: 0 }]
+
+    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon({
+      [projectId]: meta({ projectPath }),
+    })
+    expect(__hasPendingChatReapForTests(projectId)).toBe(true)
+
+    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS)
+    await vi.runAllTimersAsync()
+    expect(closedAgentNames).toContain(projectId)
+  })
+
+  it('GH#22: fire-time re-check ABORTS the reap when a client attaches DURING the 15s grace', async () => {
+    const projectId = 'proj-RACE'
+    const projectPath = '/work/proj-RACE'
+    runningPtys = [
+      { terminalId: agentChatId(projectId, ''), cwd: projectPath, command: 'claude' },
+    ]
+    // At sweep time: nobody attached → the reap is scheduled.
+    agentsRunning = [{ agentName: projectId, subscriberCount: 0 }]
+
+    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon({
+      [projectId]: meta({ projectPath }),
+    })
+    expect(__hasPendingChatReapForTests(projectId)).toBe(true)
+
+    // A remote client attaches WITHIN the grace window — the live
+    // subscriberCount is now > 0.
+    agentsRunning = [{ agentName: projectId, subscriberCount: 1 }]
+
+    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS)
+    await vi.runAllTimersAsync()
+
+    // The fire-time re-check sees the attached client and aborts: no
+    // v2/close is fired against the session the client is viewing.
+    expect(closedAgentNames.length).toBe(0)
+    expect(__hasPendingChatReapForTests(projectId)).toBe(false)
   })
 })

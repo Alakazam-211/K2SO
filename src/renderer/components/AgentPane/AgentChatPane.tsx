@@ -296,7 +296,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
       return
     }
     try {
-      useTabsStore.getState().stampAgentSessionId(agentName, projectPath, newSessionId)
+      useTabsStore.getState().stampAgentSessionId(agentName, projectPath, newSessionId, projectId)
     } catch (err) {
       console.warn('[AgentChatPane] stampAgentSessionId failed:', err)
     }
@@ -312,7 +312,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     const stampSessionId = (sid: string | null | undefined): void => {
       if (!sid) return
       try {
-        useTabsStore.getState().stampAgentSessionId(agentName, projectPath, sid)
+        useTabsStore.getState().stampAgentSessionId(agentName, projectPath, sid, projectId)
       } catch (err) {
         console.warn('[AgentChatPane] stampAgentSessionId failed:', err)
       }

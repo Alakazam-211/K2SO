@@ -281,6 +281,38 @@ function closeTerminalForRenderer(data: TerminalItemData): void {
   }
 }
 
+/**
+ * GH#22 — read the live attached-client count for a pinned-chat
+ * workspace from `/cli/agents/running`. The pinned-chat v2 session
+ * registers under the bare projectId as its `agentName`
+ * (AgentChatPane's `attachAgentName={projectId}`), so we match on
+ * `agentName === projectId`. Returns the max `subscriberCount` across
+ * any session sharing that name, or 0 if none / on error.
+ *
+ * Used at reap fire-time: if a client (remote K2 Connect viewer or the
+ * host) attached during the 15s grace, the count is > 0 and the reap
+ * must ABORT — closing the session would sever that live viewer.
+ *
+ * Fails CLOSED on error: returns -1 so the caller can choose to keep the
+ * PTY warm rather than risk reaping a session whose attachment state we
+ * couldn't read.
+ */
+async function liveSubscriberCountForProject(projectId: string): Promise<number> {
+  try {
+    const agents = await daemonCliGet<Array<{ agentName?: string; subscriberCount?: number }>>('agents/running')
+    let max = 0
+    for (const a of agents ?? []) {
+      if (!a || a.agentName !== projectId) continue
+      const c = typeof a.subscriberCount === 'number' ? a.subscriberCount : 0
+      if (c > max) max = c
+    }
+    return max
+  } catch (e) {
+    console.warn('[tabs] agents/running attachment re-check failed:', e)
+    return -1
+  }
+}
+
 async function closeV2Session(agentName: string): Promise<void> {
   try {
     const creds = await getDaemonWs()
@@ -623,8 +655,16 @@ interface TabsState {
    *  a restored hint or from `k2so_agents_resume_chat_args`). The
    *  serialized layout becomes the renderer-side canonical record,
    *  surviving daemon DB races + crash windows. See
-   *  `.k2so/prds/canonical-lane-restore.md`. */
-  stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string) => void
+   *  `.k2so/prds/canonical-lane-restore.md`.
+   *
+   *  GH#608: `ownerProjectId` is the canonical id of the workspace whose
+   *  pinned chat spawned this session (AgentChatPane resolves it
+   *  synchronously from the projects store). `state.tabs` only ever holds
+   *  the ACTIVE workspace's tabs, so a stamp originating from a stale /
+   *  background chat pane (same agentName+projectPath, different
+   *  workspace) must NOT land on the active workspace's chat item. The
+   *  stamp is dropped unless `ownerProjectId` is the active project. */
+  stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string, ownerProjectId: string) => void
   openAgentPane: (agentName: string, projectPath: string, title?: string) => void
   /** Open a tab bound to a specific heartbeat's chat session, or focus
    *  the existing tab if one is already open. Resolves the launch
@@ -1556,8 +1596,19 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     })
   },
 
-  stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string) => {
+  stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string, ownerProjectId: string) => {
     if (!sessionId) return
+    // GH#608: only stamp when the calling chat pane OWNS the active
+    // workspace's tabs. Matching on (agentName, projectPath) alone let a
+    // session from one workspace land on a DIFFERENT workspace's pinned
+    // chat item whenever the two shared an agentName + projectPath —
+    // restoring the wrong chat history. `state.tabs` always belongs to the
+    // active workspace, so the owner check IS the active-project check.
+    // A stale/background pane (ownerProjectId !== active) is dropped here;
+    // when its workspace becomes active again the live AgentChatPane
+    // re-stamps with the correct owner.
+    const activeProjectId = currentActiveProjectId()
+    if (ownerProjectId && activeProjectId && ownerProjectId !== activeProjectId) return
     let mutated = false
     set((state) => {
       const next = state.tabs.map((tab) => {
@@ -3724,7 +3775,20 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       // only then reap. If we can't find a sessionId there's nothing
       // resumable to protect — reap straight away.
       const sessionId = findChatSessionIdForProject(get(), projectId)
-      const reap = () => {
+      const reap = async (): Promise<void> => {
+        // GH#22 fire-time re-check — a client (remote K2 Connect viewer
+        // or the host) may have ATTACHED during the 15s grace. Re-query
+        // the live attached-client count just before closing; if anyone
+        // is attached now, ABORT the reap — closing the v2 session would
+        // sever that live viewer's session. (The daemon's v2/close also
+        // guards this as belt-and-suspenders, but the renderer must not
+        // even fire against an attached session.) On a read error the
+        // helper returns -1 → we keep the PTY warm (fail closed).
+        const subs = await liveSubscriberCountForProject(projectId)
+        if (subs !== 0) {
+          console.warn(`[tabs] dismiss-reap: aborting reap for ${projectId} — ${subs < 0 ? 'attachment re-check failed' : `${subs} client(s) attached`}`)
+          return
+        }
         // Reuse the canonical teardown path: the pinned chat's v2
         // session is registered under the bare projectId agent_name
         // (AgentChatPane passes `attachAgentName={projectId}`), so
@@ -3733,11 +3797,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         // kill()). That chokepoint also clears the heartbeat row's
         // active_terminal_id, so the next heartbeat fire resumes
         // (Branch 3) instead of injecting into a dead PTY.
-        void closeV2Session(projectId)
+        await closeV2Session(projectId)
       }
       if (sessionId) {
         setChatSession(projectPath, sessionId)
-          .then(reap)
+          .then(() => reap())
           .catch((e) => {
             // Persist failed — DO NOT reap. Without a saved session_id
             // the resume path has no target; keeping the PTY warm is
@@ -3745,7 +3809,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             console.warn('[tabs] dismiss-reap: set-chat-session failed, keeping chat PTY alive:', e)
           })
       } else {
-        reap()
+        void reap()
       }
     }, DISMISS_REAP_GRACE_MS)
 
@@ -3811,6 +3875,37 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       return
     }
 
+    // GH#22 — never reap a session a CLIENT is attached to. `terminal/
+    // list-running` carries no attachment info, so fetch `/cli/agents/
+    // running` alongside it: that response reports `subscriberCount` per
+    // v2 session (REAL attached-client counts — a remote K2 Connect
+    // client or the host viewing the pinned chat). The pinned-chat v2
+    // session registers under the bare projectId as its agent_name
+    // (AgentChatPane's `attachAgentName={projectId}`), so we key the
+    // count by `agentName`. A workspace with subscriberCount > 0 has a
+    // live viewer — reaping it would kill that viewer's session, so we
+    // must NOT even schedule the reap.
+    let subscriberByProjectId = new Map<string, number>()
+    try {
+      const agents = await daemonCliGet<Array<{ agentName?: string; subscriberCount?: number }>>('agents/running')
+      const map = new Map<string, number>()
+      for (const a of agents ?? []) {
+        if (!a || typeof a.agentName !== 'string') continue
+        // Coalesce: the pinned-chat agent_name IS the projectId, so the
+        // max subscriberCount across any session sharing that name wins.
+        const prev = map.get(a.agentName) ?? 0
+        const next = typeof a.subscriberCount === 'number' ? a.subscriberCount : 0
+        map.set(a.agentName, Math.max(prev, next))
+      }
+      subscriberByProjectId = map
+    } catch (e) {
+      // Couldn't read attachment state — fail SAFE: skip the whole sweep
+      // rather than risk reaping an attached session. The next tick
+      // retries; a dormant chat surviving one extra cycle is harmless.
+      console.warn('[tabs] age-out daemon sweep: agents/running failed, skipping sweep:', e)
+      return
+    }
+
     const fgId = currentActiveProjectId()
     // De-dupe: a workspace can hold more than one chat-shaped PTY
     // (legacy + bare-pid). One reap per projectId.
@@ -3837,6 +3932,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       if (meta.manuallyActive) continue
       if (meta.heartbeatEnabled) continue
       if (projectId === fgId) continue
+
+      // GH#22 keep-warm gate: a client (remote or host) is attached to
+      // this workspace's pinned chat RIGHT NOW. Reaping would sever that
+      // live session — skip.
+      if ((subscriberByProjectId.get(projectId) ?? 0) > 0) continue
 
       // The live PTY IS the proof there's something to reap (no renderer
       // snapshot required), so we skip the `findChatSessionIdForProject`
@@ -4444,7 +4544,13 @@ async function initWorkspaceOpsListeners(): Promise<void> {
     const store = useTabsStore
 
     // workspace:split-pane -> split an existing pane in a tab
-    listen<WsSplitPanePayload>('workspace:split-pane', (event) => {
+    //
+    // GH#639: every `listen()` returns a promise that REJECTS in the
+    // headless test env (no Tauri window). Awaiting each one funnels
+    // those rejections into THIS function's returned promise (caught by
+    // the surrounding try/catch + the call-site `.catch()`), instead of
+    // surfacing ~11 unhandled rejections that flip vitest's exit code.
+    await listen<WsSplitPanePayload>('workspace:split-pane', (event) => {
       const { tabId, paneId, direction } = event.payload
       const newPaneGroupId = crypto.randomUUID()
       const newPane: TerminalPaneData = {
@@ -4462,13 +4568,13 @@ async function initWorkspaceOpsListeners(): Promise<void> {
     })
 
     // workspace:close-pane -> remove a paneGroup from a tab
-    listen<WsClosePanePayload>('workspace:close-pane', (event) => {
+    await listen<WsClosePanePayload>('workspace:close-pane', (event) => {
       const { tabId, paneId } = event.payload
       store.getState().removePaneFromTab(tabId, paneId)
     })
 
     // workspace:open-document -> add a file-viewer item to the paneGroup
-    listen<WsOpenDocumentPayload>('workspace:open-document', (event) => {
+    await listen<WsOpenDocumentPayload>('workspace:open-document', (event) => {
       const { tabId, paneId, filePath } = event.payload
       const state = store.getState()
       const tab = state.tabs.find((t) => t.id === tabId)
@@ -4490,7 +4596,7 @@ async function initWorkspaceOpsListeners(): Promise<void> {
     })
 
     // workspace:open-terminal -> add a terminal item or create a new paneGroup
-    listen<WsOpenTerminalPayload>('workspace:open-terminal', (event) => {
+    await listen<WsOpenTerminalPayload>('workspace:open-terminal', (event) => {
       const { tabId, paneId, cwd, command } = event.payload
       const state = store.getState()
       const tab = state.tabs.find((t) => t.id === tabId)
@@ -4537,19 +4643,19 @@ async function initWorkspaceOpsListeners(): Promise<void> {
     })
 
     // workspace:new-tab -> create a new tab
-    listen<WsNewTabPayload>('workspace:new-tab', (event) => {
+    await listen<WsNewTabPayload>('workspace:new-tab', (event) => {
       const { cwd } = event.payload
       store.getState().addTab(cwd)
     })
 
     // workspace:close-tab -> close a tab
-    listen<WsCloseTabPayload>('workspace:close-tab', (event) => {
+    await listen<WsCloseTabPayload>('workspace:close-tab', (event) => {
       const { tabId } = event.payload
       store.getState().removeTab(tabId)
     })
 
     // workspace:arrange -> build a full layout from a descriptor
-    listen<LayoutDescriptor>('workspace:arrange', (event) => {
+    await listen<LayoutDescriptor>('workspace:arrange', (event) => {
       const descriptor = event.payload
       const state = store.getState()
 
@@ -4588,8 +4694,10 @@ async function initWorkspaceOpsListeners(): Promise<void> {
   }
 }
 
-// Initialize listeners on import
-initWorkspaceOpsListeners()
+// Initialize listeners on import. GH#639: swallow the rejection the
+// awaited `listen()` calls produce in the headless test env so it never
+// escapes as an unhandled rejection (which flips vitest's exit code).
+void initWorkspaceOpsListeners().catch(() => {})
 
 // Load persisted workspace sessions from DB on import
 useTabsStore.getState().loadWorkspaceSessionsFromDb()

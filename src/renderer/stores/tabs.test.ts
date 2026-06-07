@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useTabsStore, ensurePinnedAgentTabForMode, type AgentItemData } from './tabs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { useTabsStore, ensurePinnedAgentTabForMode, registerActiveProjectIdGetter, type AgentItemData } from './tabs'
 
 // ensurePinnedAgentTabForMode resolves the agent name via Tauri
 // `invoke`. Stub it so the async resolution completes deterministically
@@ -285,6 +285,71 @@ describe('ensurePinnedAgentTabForMode active-workspace guard', () => {
     const item = Array.from(sys[0].paneGroups.values())[0]?.items[0]
     expect(item?.type).toBe('agent')
     expect((item!.data as AgentItemData).projectPath).toBe('/tmp/workspaceA')
+  })
+})
+
+describe('stampAgentSessionId owner guard (GH#608)', () => {
+  // GH#608 — two workspaces sharing the same agentName + projectPath
+  // could cross-stamp: a session resolved by ONE workspace's chat pane
+  // landed on the OTHER workspace's pinned chat item, restoring the wrong
+  // chat history. The owner guard keys the stamp on the OWNING workspace
+  // (ownerProjectId === the active project, since `state.tabs` always
+  // holds the active workspace's tabs).
+
+  function seedChatTab(agentName: string, projectPath: string): void {
+    useTabsStore.setState({
+      tabs: [
+        {
+          id: 'tab-chat',
+          title: 'Chat',
+          mosaicTree: 'pg-1',
+          isSystemAgent: true,
+          paneGroups: new Map([
+            ['pg-1', {
+              items: [
+                {
+                  id: 'item-chat',
+                  type: 'agent',
+                  data: { agentName, projectPath, section: 'chat' },
+                  pinned: true,
+                },
+              ],
+              activeItemIndex: 0,
+            }],
+          ]),
+        } as never,
+      ],
+      activeTabId: 'tab-chat',
+    })
+  }
+
+  function chatSessionId(): string | undefined {
+    const item = Array.from(useTabsStore.getState().tabs[0].paneGroups.values())[0].items[0]
+    return (item.data as AgentItemData).sessionId
+  }
+
+  beforeEach(() => {
+    reset()
+    registerActiveProjectIdGetter(() => 'proj-ACTIVE')
+  })
+
+  afterEach(() => {
+    registerActiveProjectIdGetter(() => null)
+  })
+
+  it('stamps the chat item when the owning project IS the active project', () => {
+    seedChatTab('shared-agent', '/shared/path')
+    useTabsStore.getState().stampAgentSessionId('shared-agent', '/shared/path', 'session-OWNED', 'proj-ACTIVE')
+    expect(chatSessionId()).toBe('session-OWNED')
+  })
+
+  it('DROPS the stamp when the owning project is NOT the active project', () => {
+    // The tabs in the store belong to proj-ACTIVE. A stale/background
+    // chat pane OWNED by a DIFFERENT workspace (same agentName +
+    // projectPath) must not write its session onto the active tab.
+    seedChatTab('shared-agent', '/shared/path')
+    useTabsStore.getState().stampAgentSessionId('shared-agent', '/shared/path', 'session-FOREIGN', 'proj-OTHER')
+    expect(chatSessionId()).toBeUndefined()
   })
 })
 
