@@ -74,6 +74,32 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
 
   const [pendingClose, setPendingClose] = useState<{ tabId: string; agents: ReturnType<typeof useActiveAgentsStore.getState>['getAgentsInTab'] } | null>(null)
 
+  // ── Inline tab rename (#653, manual half) ──
+  // `editingTabId` holds the id of the regular tab whose label is
+  // currently swapped for an <input>. Entered via the "Rename Tab"
+  // context-menu item or a double-click on the label; committed on
+  // Enter/blur, cancelled on Escape. setTabTitle already no-ops on
+  // system-agent tabs and persists the title — this is purely the UI.
+  const [editingTabId, setEditingTabId] = useState<string | null>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  const commitRename = useCallback((tabId: string): void => {
+    const value = renameInputRef.current?.value.trim() ?? ''
+    // Empty → keep the old title (no-op rename), just exit edit mode.
+    if (value) useTabsStore.getState().setTabTitle(tabId, value)
+    setEditingTabId(null)
+  }, [])
+
+  // Focus + select the rename input whenever edit mode opens.
+  useEffect(() => {
+    if (!editingTabId) return
+    const el = renameInputRef.current
+    if (el) {
+      el.focus()
+      el.select()
+    }
+  }, [editingTabId])
+
   // ── Tab reorder state ──
   const [reorderDragIndex, setReorderDragIndex] = useState<number | null>(null)
   const [reorderDropIndex, setReorderDropIndex] = useState<number | null>(null)
@@ -253,6 +279,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     }
 
     const menuItems = [
+      { id: 'rename', label: 'Rename Tab' },
       { id: 'open-terminal', label: `Open in ${defaultTerminal}` },
       ...(tabTerminalId ? [
         { id: 'copy-terminal-id', label: 'Copy Terminal ID' },
@@ -270,7 +297,11 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
     ]
 
     const clickedId = await showContextMenu(menuItems)
-    if (clickedId === 'close') {
+    if (clickedId === 'rename') {
+      // Enter inline-edit mode for this (regular) tab. The label→input
+      // swap and commit/cancel wiring live in the tab render branch.
+      setEditingTabId(tabId)
+    } else if (clickedId === 'close') {
       const agents = useActiveAgentsStore.getState().getAgentsInTab(tabId)
       if (agents.length > 0) {
         setPendingClose({ tabId, agents })
@@ -526,9 +557,43 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
 
                 return null
               })()}
-              <span className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}>
-                {tab.title}
-              </span>
+              {editingTabId === tab.id ? (
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  defaultValue={tab.title}
+                  // Stop the surrounding tab handlers (switch on click,
+                  // reorder/cross-group drag on mousedown) from firing
+                  // while the user interacts with the rename input.
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      commitRename(tab.id)
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault()
+                      setEditingTabId(null)
+                    }
+                  }}
+                  onBlur={() => commitRename(tab.id)}
+                  className="flex-1 min-w-0 px-1 py-0 text-xs leading-tight bg-[var(--color-bg-primary)] border border-[var(--color-accent)] text-[var(--color-text-primary)] outline-none"
+                />
+              ) : (
+                <span
+                  className={`truncate flex-1 ${isDirty ? 'italic' : ''}`}
+                  // Double-click the label to rename (regular tabs only —
+                  // system-agent tabs render in their own branch above).
+                  onDoubleClick={(e) => {
+                    e.stopPropagation()
+                    setEditingTabId(tab.id)
+                  }}
+                >
+                  {tab.title}
+                </span>
+              )}
               {/* Heartbeat tabs are "minimize, don't kill" — the
                   daemon-owned PTY keeps running so the heartbeat
                   keeps firing on schedule. Visually distinguish with
