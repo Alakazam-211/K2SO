@@ -458,24 +458,56 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
     }
 }
 
+/// Pure decision for whether `/cli/sessions/v2/close` is allowed to
+/// tear a session down.
+///
+/// GH#22: a remote (or local) client attached over the grid-WS keeps
+/// a live broadcast receiver on the session, so `subscriber_count > 0`
+/// means "someone is watching this session right now". The age-out
+/// reaper drives `/cli/sessions/v2/close`; if we let it unregister an
+/// attached session, the last-`Arc` drop SIGHUPs the child out from
+/// under the watching client. So when subscribers are attached we
+/// REFUSE — unless the caller explicitly passed `force` (the operator
+/// / deliberate-teardown escape hatch).
+///
+/// Returns `true` when the close should proceed, `false` when it must
+/// be refused as still-attached.
+fn close_allowed(subscriber_count: usize, force: bool) -> bool {
+    force || subscriber_count == 0
+}
+
 /// Handler for `POST /cli/sessions/v2/close`.
 ///
-/// Request body: `{"agent_name": "tab-<terminalId>"}`.
-/// Response: `{"closed": true|false}`.
+/// Request body: `{"agent_name": "tab-<terminalId>", "force": false}`.
+/// (`force` is optional, defaults to `false`.)
+/// Response: `{"closed": true|false[, "reason": "..."]}`.
 ///
 /// Unregisters the session from `v2_session_map`. The last `Arc`
 /// drop triggers `DaemonPtySession::drop`, which closes the PTY
 /// master channel; alacritty's IO thread then exits, the child
 /// receives SIGHUP, and the session is cleaned up.
 ///
-/// Called only on deliberate tab removal (see A6 wiring in
-/// `src/renderer/stores/tabs.ts::removeTab`). Component unmount
-/// does NOT call this; the session survives workspace swap + Tauri
-/// restart.
+/// **GH#22 reaper guard.** Before unregistering, we check the v2
+/// session's OWN broadcast subscriber count (the channel each grid-WS
+/// subscribes to on attach). If a client is still attached
+/// (`subscriber_count > 0`) we DO NOT kill the session — we return
+/// `{"closed": false, "reason": "session still has attached clients"}`
+/// instead. This is defense-in-depth so NO reaper path (the renderer's
+/// age-out reaper or any other caller) can reap a session a client is
+/// watching, which is exactly what killed remote PTY sessions over
+/// K2 Connect. Deliberate teardown can bypass the guard with
+/// `"force": true`.
+///
+/// Called on deliberate tab removal (see A6 wiring in
+/// `src/renderer/stores/tabs.ts::removeTab`) and by the age-out
+/// reaper. Component unmount does NOT call this; the session survives
+/// workspace swap + Tauri restart.
 pub fn handle_v2_close(body: &[u8]) -> HandlerResult {
     #[derive(serde::Deserialize)]
     struct CloseRequest {
         agent_name: String,
+        #[serde(default)]
+        force: bool,
     }
 
     let req: CloseRequest = match serde_json::from_slice(body) {
@@ -490,6 +522,29 @@ pub fn handle_v2_close(body: &[u8]) -> HandlerResult {
             }
         }
     };
+
+    // GH#22 guard: refuse to reap a session a client is attached to.
+    // Look up first (without unregistering) so we can read the live
+    // subscriber count from the session's own broadcast channel.
+    if let Some(session) = v2_session_map::lookup_by_agent_name(&req.agent_name) {
+        let subscribers = session.subscriber_count();
+        if !close_allowed(subscribers, req.force) {
+            log_debug!(
+                "[daemon/v2-close] REFUSED close for agent={} — {} attached subscriber(s), no force flag (GH#22 reaper guard)",
+                req.agent_name,
+                subscribers,
+            );
+            return HandlerResult {
+                status: "200 OK",
+                body: serde_json::json!({
+                    "closed": false,
+                    "reason": "session still has attached clients",
+                    "subscriberCount": subscribers,
+                })
+                .to_string(),
+            };
+        }
+    }
 
     let removed = v2_session_map::unregister(&req.agent_name).is_some();
     HandlerResult {
@@ -603,6 +658,31 @@ mod tests {
         let result = handle_v2_close(&body);
         assert_eq!(result.status, "200 OK");
         assert!(result.body.contains(r#""closed":false"#));
+    }
+
+    // GH#22 close-guard decision table (pure logic; no PTY needed).
+    // The spawn-backed end-to-end variant (real session + real grid-WS
+    // subscriber drives `subscriber_count`) lives in
+    // crates/k2so-daemon/tests/reaper_close_guard_integration.rs.
+    #[test]
+    fn close_allowed_proceeds_when_no_subscribers() {
+        // Nobody attached → safe to reap.
+        assert!(close_allowed(0, false));
+        assert!(close_allowed(0, true));
+    }
+
+    #[test]
+    fn close_allowed_refuses_attached_without_force() {
+        // A client is watching and no force flag → REFUSE.
+        assert!(!close_allowed(1, false));
+        assert!(!close_allowed(5, false));
+    }
+
+    #[test]
+    fn close_allowed_force_bypasses_attached_guard() {
+        // Deliberate teardown escape hatch overrides the guard.
+        assert!(close_allowed(1, true));
+        assert!(close_allowed(42, true));
     }
 
     // Full spawn-then-lookup + spawn-then-reuse tests live in

@@ -691,6 +691,25 @@ impl DaemonPtySession {
         self.events_tx.subscribe()
     }
 
+    /// Number of live subscribers currently attached to this
+    /// session's event broadcast.
+    ///
+    /// Each attached grid-WS connection
+    /// (`sessions_grid_ws::handle`) holds a `broadcast::Receiver`
+    /// obtained from [`subscribe_events`]; that receiver lives for
+    /// the duration of the WS connection and drops when the client
+    /// detaches. `broadcast::Sender::receiver_count` therefore
+    /// reports the real number of clients watching this session —
+    /// > 0 means "someone is attached", 0 means "nobody is looking".
+    ///
+    /// This is the authoritative "is a client attached?" signal the
+    /// age-out reaper consults before killing a session (GH#22): a
+    /// remote client attached over K2 Connect keeps a live receiver,
+    /// so the reaper must not reap a session with `subscriber_count() > 0`.
+    pub fn subscriber_count(&self) -> usize {
+        self.events_tx.receiver_count()
+    }
+
     /// Forcefully terminate AND reap the child process.
     ///
     /// **Why this exists.** Dropping the last `Arc<Self>` only closes

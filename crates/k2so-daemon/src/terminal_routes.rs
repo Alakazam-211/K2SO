@@ -595,17 +595,23 @@ pub fn handle_agents_running(_params: &HashMap<String, String>) -> CliResponse {
             continue;
         }
         // v2 sessions don't register in `k2so_core::session::registry`
-        // (only legacy session_stream_pty.rs does). For those, idle
-        // and subscriber counts surface as 0 — accurate enough for
-        // the listing endpoint, since v2's idle tracking lives in
-        // the alacritty Term update path, not the registry.
+        // (only legacy session_stream_pty.rs did). Idle tracking lives
+        // in the alacritty Term update path, not the registry, so idle
+        // surfaces as 0 here.
+        //
+        // subscriberCount, however, MUST be real (GH#22): the reaper
+        // and the renderer use it to tell whether a client is attached
+        // to a session. The registry lookup is ALWAYS 0 for v2 sessions
+        // (they never register there), so source it from the v2
+        // session's OWN broadcast channel — the exact channel each
+        // grid-WS subscribes to via `session.subscribe_events()` in
+        // sessions_grid_ws.rs. `receiver_count()` therefore counts the
+        // live attached viewers and drops to 0 when all clients detach.
         let session_id = session.session_id();
         let idle_ms = registry::lookup(&session_id)
             .map(|entry| entry.idle_for(now).as_millis() as u64)
             .unwrap_or(0);
-        let subscriber_count = registry::lookup(&session_id)
-            .map(|entry| entry.subscriber_count())
-            .unwrap_or(0);
+        let subscriber_count = session.subscriber_count();
         out.push(serde_json::json!({
             "terminalId": session_id.to_string(),
             "agentName": agent_name,

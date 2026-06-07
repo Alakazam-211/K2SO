@@ -87,6 +87,19 @@ impl LiveSession {
     pub fn is_child_alive(&self) -> bool {
         self.0.is_child_alive()
     }
+
+    /// Number of clients currently attached to this session's grid
+    /// broadcast (real-time viewers). Sourced from the v2 session's
+    /// OWN broadcast channel (`DaemonPtySession::subscriber_count`),
+    /// which is what the grid-WS subscribes to on attach — so this is
+    /// > 0 exactly when at least one client (local or remote) is
+    /// watching, and 0 when all clients have detached.
+    ///
+    /// This is the "is a client attached?" signal the age-out reaper
+    /// consults (GH#22): an attached session must not be reaped.
+    pub fn subscriber_count(&self) -> usize {
+        self.0.subscriber_count()
+    }
 }
 
 /// Look up an agent in the v2 session map.
