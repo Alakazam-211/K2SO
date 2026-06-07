@@ -33,6 +33,8 @@ export default function CloneToDialog(): React.JSX.Element | null {
   const host = useCloneToDialogStore((s) => s.host)
   const carrySecrets = useCloneToDialogStore((s) => s.carrySecrets)
   const setCarrySecrets = useCloneToDialogStore((s) => s.setCarrySecrets)
+  const includeAllHistory = useCloneToDialogStore((s) => s.includeAllHistory)
+  const setIncludeAllHistory = useCloneToDialogStore((s) => s.setIncludeAllHistory)
   const confirm = useCloneToDialogStore((s) => s.confirm)
   const stage = useCloneToDialogStore((s) => s.stage)
   const summary = useCloneToDialogStore((s) => s.summary)
@@ -128,6 +130,32 @@ export default function CloneToDialog(): React.JSX.Element | null {
               <p className="text-[11px] text-[var(--color-text-muted)] leading-relaxed pl-[22px]">
                 Carried securely over the encrypted connection between your machines.
                 Uncheck to scrub them — you’ll re-add them on the host.
+              </p>
+
+              <label className="flex items-start gap-2 cursor-pointer select-none no-drag">
+                <input
+                  type="checkbox"
+                  checked={includeAllHistory}
+                  onChange={(e) => setIncludeAllHistory(e.target.checked)}
+                  className="peer sr-only"
+                />
+                <span
+                  aria-hidden="true"
+                  className="mt-0.5 w-3.5 h-3.5 flex-shrink-0 flex items-center justify-center border transition-colors border-[var(--color-border)] bg-[var(--color-bg-elevated)] peer-checked:bg-[var(--color-accent)] peer-checked:border-[var(--color-accent)] peer-focus-visible:ring-1 peer-focus-visible:ring-[var(--color-accent)]"
+                >
+                  {includeAllHistory && (
+                    <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2.5 6.5 L5 9 L9.5 3.5" />
+                    </svg>
+                  )}
+                </span>
+                <span className="text-xs text-[var(--color-text-secondary)] leading-relaxed">
+                  Include all chat history
+                </span>
+              </label>
+              <p className="text-[11px] text-[var(--color-text-muted)] leading-relaxed pl-[22px]">
+                Migrates every Claude Code session transcript for this workspace.
+                Uncheck to carry only the most recent (live) session.
               </p>
             </div>
           )}

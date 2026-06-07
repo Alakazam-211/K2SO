@@ -40,6 +40,11 @@ interface CloneToDialogState {
   /** "Include secrets" toggle — default true (include). Read at confirm time
    *  and threaded into `cloneWorkspaceTo` → `clone/bundle` as carry_secrets. */
   carrySecrets: boolean
+  /** "Include all chat history" toggle — default true (include). Read at
+   *  confirm time and threaded into `cloneWorkspaceTo` → `clone/bundle` as
+   *  `live_only: !includeAllHistory`. Lets advanced users slim the bundle
+   *  down to just the live session (GitHub #21 — all history is the default). */
+  includeAllHistory: boolean
   stage: CloneStage
   /** Manifest summary, set once the bundle is built. */
   summary: CloneManifestSummary | null
@@ -50,17 +55,19 @@ interface CloneToDialogState {
   /** Runner that starts the orchestration; set by `start`, invoked by
    *  `confirm` with the chosen toggle value. Held so the dialog's Clone
    *  button can kick off the run without re-plumbing deps through the UI. */
-  onConfirm: ((carrySecrets: boolean) => void) | null
+  onConfirm: ((carrySecrets: boolean, includeAllHistory: boolean) => void) | null
 
   /** Open the modal at the 'options' phase for a given source + host. */
   start: (args: {
     projectPath: string
     projectName: string
     host: ConnectHost
-    onConfirm: (carrySecrets: boolean) => void
+    onConfirm: (carrySecrets: boolean, includeAllHistory: boolean) => void
   }) => void
   /** Toggle the "Include secrets" checkbox (options phase only). */
   setCarrySecrets: (carrySecrets: boolean) => void
+  /** Toggle the "Include all chat history" checkbox (options phase only). */
+  setIncludeAllHistory: (includeAllHistory: boolean) => void
   /** Proceed from the options panel: flip to 'running' and start the run. */
   confirm: () => void
   setStage: (stage: CloneStage) => void
@@ -86,6 +93,7 @@ const RESET = {
   projectName: null,
   host: null,
   carrySecrets: true,
+  includeAllHistory: true,
   stage: 'bundling' as CloneStage,
   summary: null,
   result: null,
@@ -105,16 +113,18 @@ export const useCloneToDialogStore = create<CloneToDialogState>((set, get) => ({
       projectName,
       host,
       carrySecrets: true,
+      includeAllHistory: true,
       onConfirm,
     }),
 
   setCarrySecrets: (carrySecrets) => set({ carrySecrets }),
+  setIncludeAllHistory: (includeAllHistory) => set({ includeAllHistory }),
 
   confirm: () => {
-    const { phase, onConfirm, carrySecrets } = get()
+    const { phase, onConfirm, carrySecrets, includeAllHistory } = get()
     if (phase !== 'options') return
     set({ phase: 'running', stage: 'bundling' })
-    onConfirm?.(carrySecrets)
+    onConfirm?.(carrySecrets, includeAllHistory)
   },
 
   setStage: (stage) => set({ stage }),

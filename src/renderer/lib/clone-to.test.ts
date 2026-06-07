@@ -143,10 +143,12 @@ describe('cloneWorkspaceTo — happy path', () => {
       'post:clone/unpack',
     ])
 
-    // Right args at each step. carry_secrets defaults to true (include).
+    // Right args at each step. carry_secrets + all-history both default to
+    // include (live_only defaults false).
     expect(spies.daemonCliPost).toHaveBeenNthCalledWith(1, 'clone/bundle', {
       project_path: '/Users/rosson/myworkspace',
       carry_secrets: true,
+      live_only: false,
     })
     expect(spies.readLocalFileBase64).toHaveBeenCalledWith(BUNDLE.bundle_path)
     expect(spies.pickHost).toHaveBeenCalledWith(DEST)
@@ -213,6 +215,7 @@ describe('cloneWorkspaceTo — carry_secrets toggle', () => {
     expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
       project_path: '/Users/rosson/myworkspace',
       carry_secrets: true,
+      live_only: false,
     })
   })
 
@@ -223,6 +226,7 @@ describe('cloneWorkspaceTo — carry_secrets toggle', () => {
     expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
       project_path: '/Users/rosson/myworkspace',
       carry_secrets: true,
+      live_only: false,
     })
   })
 
@@ -233,6 +237,42 @@ describe('cloneWorkspaceTo — carry_secrets toggle', () => {
     expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
       project_path: '/Users/rosson/myworkspace',
       carry_secrets: false,
+      live_only: false,
+    })
+  })
+})
+
+describe('cloneWorkspaceTo — include-all-history toggle (GitHub #21)', () => {
+  it('passes live_only: false (carry ALL history) by default', async () => {
+    const order: string[] = []
+    const { deps, spies } = makeDeps(order)
+    await cloneWorkspaceTo('/Users/rosson/myworkspace', DEST, deps)
+    expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
+      project_path: '/Users/rosson/myworkspace',
+      carry_secrets: true,
+      live_only: false,
+    })
+  })
+
+  it('passes live_only: false when all-history is explicitly opted in', async () => {
+    const order: string[] = []
+    const { deps, spies } = makeDeps(order)
+    await cloneWorkspaceTo('/Users/rosson/myworkspace', DEST, deps, {}, true, true)
+    expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
+      project_path: '/Users/rosson/myworkspace',
+      carry_secrets: true,
+      live_only: false,
+    })
+  })
+
+  it('passes live_only: true when the all-history toggle is unchecked', async () => {
+    const order: string[] = []
+    const { deps, spies } = makeDeps(order)
+    await cloneWorkspaceTo('/Users/rosson/myworkspace', DEST, deps, {}, true, false)
+    expect(spies.daemonCliPost).toHaveBeenCalledWith('clone/bundle', {
+      project_path: '/Users/rosson/myworkspace',
+      carry_secrets: true,
+      live_only: true,
     })
   })
 })

@@ -44,7 +44,7 @@ describe('startCloneTo → runClone post-clone refresh', () => {
     const onConfirm = useCloneToDialogStore.getState().onConfirm
     expect(onConfirm).toBeTruthy()
 
-    onConfirm?.(true)
+    onConfirm?.(true, true)
     await flush()
 
     expect(cloneWorkspaceTo).toHaveBeenCalledTimes(1)
@@ -56,7 +56,7 @@ describe('startCloneTo → runClone post-clone refresh', () => {
     startCloneTo('/local/ws', 'ws', HOST)
     const onConfirm = useCloneToDialogStore.getState().onConfirm
 
-    onConfirm?.(true)
+    onConfirm?.(true, true)
     await flush()
 
     expect(fetchProjects).not.toHaveBeenCalled()

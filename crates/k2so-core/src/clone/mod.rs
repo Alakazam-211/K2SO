@@ -70,7 +70,9 @@ pub enum DestinationClass {
 pub struct CloneOptions {
     /// Include EVERY `<session-id>.jsonl` under the slug dir (and worktree
     /// `<slug>-<branch>/` variants), not just the newest-mtime live one.
-    /// Default `false` — the live session only.
+    /// Default `true` — Clone-to is a true migration tool, so ALL chat
+    /// history travels by default (GitHub #21). Set `false` to slim the
+    /// bundle down to just the newest-mtime live session.
     pub include_all_history: bool,
 
     /// Carry secrets over the (encrypted) link instead of scrubbing them.
@@ -89,7 +91,7 @@ pub struct CloneOptions {
 impl Default for CloneOptions {
     fn default() -> Self {
         Self {
-            include_all_history: false,
+            include_all_history: true,
             carry_secrets: false,
             home_override: None,
         }

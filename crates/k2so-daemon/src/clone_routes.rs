@@ -26,9 +26,13 @@ use serde::Deserialize;
 struct BundleBody {
     /// Absolute source workspace path on this machine.
     project_path: String,
-    /// Include EVERY session transcript, not just the live one.
+    /// Slim the bundle down to the newest-mtime LIVE session only, instead
+    /// of carrying EVERY session transcript. Absent (the default) ⇒ `false`
+    /// ⇒ all history travels — Clone-to is a true migration tool out of the
+    /// box (GitHub #21). The renderer's "Include all chat history" checkbox
+    /// maps to `!live_only` (checked = carry all).
     #[serde(default)]
-    include_all_history: bool,
+    live_only: bool,
     /// Carry secrets over the (encrypted) link instead of scrubbing them.
     #[serde(default)]
     carry_secrets: bool,
@@ -47,7 +51,7 @@ pub fn handle_clone_bundle(body: &[u8]) -> CliResponse {
     };
 
     let opts = clone::CloneOptions {
-        include_all_history: b.include_all_history,
+        include_all_history: !b.live_only,
         carry_secrets: b.carry_secrets,
         home_override: None,
     };
@@ -109,7 +113,7 @@ pub fn handle_clone_bundle(body: &[u8]) -> CliResponse {
                 "entry_count": entry_count,
                 "scrubbed_secret_count": scrubbed_count,
                 "size_bytes": size,
-                "include_all_history": b.include_all_history,
+                "include_all_history": !b.live_only,
                 "carry_secrets": b.carry_secrets,
             }
         })

@@ -202,9 +202,15 @@ fn slug_and_locations_resolve_at_slug_dir() {
     assert!(mem.contains("b.md"), "memory/b.md present");
     assert_eq!(mem.len(), 3, "exactly MEMORY.md + a.md + b.md");
 
-    // sessions resolved under the slug dir (rel includes the slug prefix)
+    // sessions resolved under the slug dir (rel includes the slug prefix).
+    // Default opts now include ALL history (GitHub #21): 2 slug-dir sessions
+    // + 1 worktree variant.
     let sessions = rel_paths(&inv, DestinationClass::Session);
-    assert_eq!(sessions.len(), 1, "live-only → one session, got {sessions:?}");
+    assert_eq!(
+        sessions.len(),
+        3,
+        "default = all history → 2 slug-dir + 1 worktree session, got {sessions:?}"
+    );
 }
 
 #[test]
@@ -285,7 +291,10 @@ fn node_modules_excluded_workspace_and_nested_but_git_kept() {
 #[test]
 fn live_only_picks_newest_session() {
     let fx = build_fixture();
-    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+    // Opt OUT of the all-history default to get the slim live-only bundle.
+    let mut o = opts(&fx.home);
+    o.include_all_history = false;
+    let inv = inventory(&fx.project.to_string_lossy(), o).unwrap();
     let sessions = rel_paths(&inv, DestinationClass::Session);
     assert_eq!(sessions.len(), 1);
     let only = sessions.iter().next().unwrap();
@@ -355,7 +364,8 @@ fn manifest_entries_have_correct_classes() {
     assert_eq!(m.source_slug, fx.slug);
     assert_eq!(m.created_at, "2026-06-05T00:00:00Z");
     assert!(!m.carry_secrets);
-    assert!(!m.include_all_history);
+    // Default opts now carry all history (GitHub #21).
+    assert!(m.include_all_history);
 
     // every class present
     let has = |c: DestinationClass| m.entries.iter().any(|e| e.class == c);
@@ -424,6 +434,68 @@ fn bundle_round_trips_secrets_absent_by_default() {
     let readme = extract.join("workspace/README.md");
     let body = fs::read_to_string(readme).unwrap();
     assert!(body.contains("project docs"));
+}
+
+/// GitHub #21 regression: the DEFAULT bundle (no opt-out) must carry EVERY
+/// session `.jsonl` — both slug-dir sessions AND the worktree variant —
+/// through tar, not just the newest live one. A workspace with multiple
+/// sessions is the migration case the default now serves.
+#[test]
+fn default_bundle_carries_all_sessions_through_tar() {
+    let fx = build_fixture();
+    // Plain default opts — the all-history default is what we're verifying.
+    let inv = inventory(&fx.project.to_string_lossy(), opts(&fx.home)).unwrap();
+
+    let out = fx._root.path().join("all-sessions-bundle.tar.gz");
+    build_bundle(
+        &inv,
+        &opts(&fx.home),
+        "2026-06-05T00:00:00Z".to_string(),
+        None,
+        &out,
+    )
+    .unwrap();
+
+    let extract = fx._root.path().join("all-sessions-extract");
+    fs::create_dir_all(&extract).unwrap();
+    let names = untar(&out, &extract);
+
+    let session_files: Vec<&String> = names
+        .iter()
+        .filter(|n| n.starts_with("sessions/") && n.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(
+        session_files.len(),
+        3,
+        "default bundle carries all 3 sessions (2 slug-dir + 1 worktree), got {session_files:?}"
+    );
+    // Both slug-dir sessions present (the OLD one was previously dropped).
+    assert!(
+        names
+            .iter()
+            .any(|n| n.ends_with("11111111-1111-1111-1111-111111111111.jsonl")),
+        "older slug-dir session must be bundled, got {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.ends_with("22222222-2222-2222-2222-222222222222.jsonl")),
+        "newest slug-dir session must be bundled, got {names:?}"
+    );
+    // The worktree-variant session is bundled too.
+    assert!(
+        names
+            .iter()
+            .any(|n| n.ends_with("33333333-3333-3333-3333-333333333333.jsonl")),
+        "worktree-variant session must be bundled, got {names:?}"
+    );
+
+    // The manifest records the all-history default.
+    let m = read_manifest_from_bundle(&out).unwrap();
+    assert!(
+        m.include_all_history,
+        "manifest must record all-history as the default"
+    );
 }
 
 /// Regression: a symlink that points at a DIRECTORY inside the workspace

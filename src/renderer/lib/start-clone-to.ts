@@ -37,8 +37,8 @@ export function startCloneTo(
     projectPath,
     projectName,
     host,
-    onConfirm: (carrySecrets) => {
-      void runClone(projectPath, host, deps, carrySecrets)
+    onConfirm: (carrySecrets, includeAllHistory) => {
+      void runClone(projectPath, host, deps, carrySecrets, includeAllHistory)
     },
   })
 }
@@ -49,6 +49,7 @@ async function runClone(
   host: ConnectHost,
   deps: CloneDeps,
   carrySecrets: boolean,
+  includeAllHistory: boolean,
 ): Promise<void> {
   try {
     await cloneWorkspaceTo(
@@ -62,6 +63,7 @@ async function runClone(
         onError: (message) => useCloneToDialogStore.getState().setError(message),
       },
       carrySecrets,
+      includeAllHistory,
     )
     // The clone unpacked + registered the workspace on the remote daemon, but
     // the renderer's project list (already pointed at that host) won't reflect

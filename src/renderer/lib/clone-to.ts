@@ -169,6 +169,15 @@ export async function cloneWorkspaceTo(
    * call as `carry_secrets`.
    */
   carrySecrets = true,
+  /**
+   * Whether to carry ALL Claude Code chat history (every session `.jsonl`),
+   * not just the newest-mtime live one. Default `true` (include): Clone-to
+   * is a true workspace-migration tool, so the full transcript history
+   * travels by default (GitHub #21). When `false`, the daemon slims the
+   * bundle down to just the live session. Threaded into the `clone/bundle`
+   * call as `live_only` (the daemon's inverse-of-this flag).
+   */
+  includeAllHistory = true,
 ): Promise<CloneUnpackResult> {
   const { onStage, onBundled, onDone, onError } = hooks
   try {
@@ -177,6 +186,7 @@ export async function cloneWorkspaceTo(
     const bundle = await deps.daemonCliPost<CloneBundleResult>('clone/bundle', {
       project_path: projectPath,
       carry_secrets: carrySecrets,
+      live_only: !includeAllHistory,
     })
     if (!bundle?.bundle_path) {
       throw new Error('Bundle step returned no bundle_path.')
