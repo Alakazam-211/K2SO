@@ -764,13 +764,11 @@ export default function App(): React.JSX.Element {
     return (
       <>
         <div className="flex h-full w-full flex-col overflow-hidden bg-[var(--color-bg)]">
-          <div
-            className="h-[38px] flex-shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-surface)]"
-            data-tauri-drag-region
-            onMouseDown={() => {
-              import('@tauri-apps/api/window').then(m => m.getCurrentWindow().startDragging())
-            }}
-          />
+          {/* Settings renders its OWN top-bar (traffic-light spacer + "K2
+              <Server>" + switcher, #686). No separate empty drag strip here —
+              it stacked a second bar above Settings' top-bar, dropping "K2
+              <Server>" onto a row below the traffic lights instead of beside
+              them. Settings' top-bar is itself a drag region. */}
           <div className="flex-1 min-h-0">
             <Settings />
           </div>
