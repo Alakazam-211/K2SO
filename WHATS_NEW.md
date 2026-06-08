@@ -3,6 +3,19 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.42 — Tabs behave when two clients share a server
+
+- **No more tab/terminal flicker with multiple clients.** When two windows — or
+  two people — were connected to the same server, tab-order sync could spiral
+  into a fast loop that constantly rebuilt the tabs and reloaded the terminals
+  (and the pinned chat). Tab order now syncs cleanly and quietly.
+- **Reordering a tab just moves the tab.** Adopting another client's reorder no
+  longer rebuilds the panes — your terminals and pinned chat stay put instead of
+  reloading.
+- **Your selected tab is yours.** Which tab you're looking at is now per-client:
+  a teammate reordering tabs or switching their view no longer drags yours along.
+  Each person explores the workspace freely.
+
 ## 0.39.41 — Pinned chats remember exactly where they were
 
 - **Your pinned chat resumes the same conversation, every time.** The workspace's
