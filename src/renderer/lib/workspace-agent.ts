@@ -66,6 +66,12 @@ export interface ResumeChatArgs {
   args: string[]
   cwd: string
   resumeSession?: string
+  /** `true` when the daemon resolved an EXISTING `workspace_sessions.session_id`
+   *  whose JSONL is on disk (resumable). `false` when it pre-allocated a fresh
+   *  UUID because no usable saved session existed. Cold-boot revive uses this
+   *  to decide whether the daemon's canonical session should override the
+   *  renderer's layout hint (GH#679). */
+  resumedExisting?: boolean
 }
 
 /** Resolve the `claude --resume <session>` (or fresh `claude`) launch args
@@ -74,4 +80,32 @@ export async function resumeChatArgs(projectPath: string): Promise<ResumeChatArg
   return daemonCliGet<ResumeChatArgs>('workspace/resume-chat-args', {
     project: projectPath,
   })
+}
+
+/** GH#679 — cold-boot revive reconciliation. Given the layout-restored
+ *  sessionId hint and the daemon's canonical `resume-chat-args` response
+ *  (which reads `workspace_sessions.session_id` from SQLite), decide which
+ *  session the pinned chat should actually resume.
+ *
+ *  SQLite is the source of truth: when the daemon resolved an EXISTING
+ *  resumable session (`resumedExisting`) that DIFFERS from the layout hint,
+ *  the daemon's session wins. Otherwise (no canonical response, a freshly
+ *  pre-allocated UUID, or an identical session) the layout hint is kept —
+ *  preserving the renderer-canonical offline / DB-race resilience the
+ *  canonical-lane-restore PRD was built for.
+ *
+ *  Pure + side-effect-free so the decision is unit-testable without
+ *  rendering AgentChatPane. */
+export function reconcileColdBootSession(
+  layoutHint: string,
+  canonical: ResumeChatArgs | null,
+): string {
+  if (
+    canonical?.resumedExisting &&
+    canonical.resumeSession &&
+    canonical.resumeSession !== layoutHint
+  ) {
+    return canonical.resumeSession
+  }
+  return layoutHint
 }

@@ -19,6 +19,8 @@ import {
   agentDisplayName,
   setAgentDisplayName,
   resumeChatArgs,
+  reconcileColdBootSession,
+  type ResumeChatArgs,
 } from './workspace-agent'
 
 describe('workspace-agent — Plan B host-aware migration', () => {
@@ -67,5 +69,46 @@ describe('workspace-agent — Plan B host-aware migration', () => {
   it('propagates a daemon error (display-name read)', async () => {
     daemonCliGet.mockRejectedValueOnce(new Error('daemon down'))
     await expect(agentDisplayName('/work/proj')).rejects.toThrow('daemon down')
+  })
+})
+
+describe('reconcileColdBootSession (GH#679 — SQLite-canonical cold-boot revive)', () => {
+  const ca = (over: Partial<ResumeChatArgs>): ResumeChatArgs => ({
+    command: 'claude',
+    args: [],
+    cwd: '/work/proj',
+    ...over,
+  })
+
+  it('SQLite session OVERRIDES the layout hint when it is a different resumable session', () => {
+    // The dropdown wrote `sqlite-new` to workspace_sessions, but the layout
+    // JSON still carries the pre-switch `layout-old`. On cold boot SQLite wins.
+    const result = reconcileColdBootSession(
+      'layout-old',
+      ca({ resumeSession: 'sqlite-new', resumedExisting: true }),
+    )
+    expect(result).toBe('sqlite-new')
+  })
+
+  it('keeps the layout hint when SQLite matches it (no-op)', () => {
+    const result = reconcileColdBootSession(
+      'same-sid',
+      ca({ resumeSession: 'same-sid', resumedExisting: true }),
+    )
+    expect(result).toBe('same-sid')
+  })
+
+  it('keeps the layout hint when SQLite pre-allocated a FRESH UUID (resumedExisting=false)', () => {
+    // No usable saved session in SQLite — the daemon minted a new UUID. We
+    // must NOT discard the renderer-canonical layout hint for it.
+    const result = reconcileColdBootSession(
+      'layout-old',
+      ca({ resumeSession: 'fresh-uuid', resumedExisting: false }),
+    )
+    expect(result).toBe('layout-old')
+  })
+
+  it('keeps the layout hint when the daemon read failed (null canonical)', () => {
+    expect(reconcileColdBootSession('layout-old', null)).toBe('layout-old')
   })
 })

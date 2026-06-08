@@ -581,7 +581,9 @@ interface TabsState {
    *  the ACTIVE workspace's tabs, so a stamp originating from a stale /
    *  background chat pane (same agentName+projectPath, different
    *  workspace) must NOT land on the active workspace's chat item. The
-   *  stamp is dropped unless `ownerProjectId` is the active project. */
+   *  stamp is dropped unless `ownerProjectId` matches the project that
+   *  `activeWorkspaceKey` is bound to (GH#679 — was the cross-store
+   *  projects-active id, which raced and dropped legit stamps). */
   stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string, ownerProjectId: string) => void
   openAgentPane: (agentName: string, projectPath: string, title?: string) => void
   /** Open a tab bound to a specific heartbeat's chat session, or focus
@@ -1479,16 +1481,30 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   stampAgentSessionId: (agentName: string, projectPath: string, sessionId: string, ownerProjectId: string) => {
     if (!sessionId) return
-    // GH#608: only stamp when the calling chat pane OWNS the active
-    // workspace's tabs. Matching on (agentName, projectPath) alone let a
+    // GH#608: only stamp when the calling chat pane OWNS the tabs currently
+    // in `state.tabs`. Matching on (agentName, projectPath) alone let a
     // session from one workspace land on a DIFFERENT workspace's pinned
     // chat item whenever the two shared an agentName + projectPath —
-    // restoring the wrong chat history. `state.tabs` always belongs to the
-    // active workspace, so the owner check IS the active-project check.
-    // A stale/background pane (ownerProjectId !== active) is dropped here;
-    // when its workspace becomes active again the live AgentChatPane
-    // re-stamps with the correct owner.
-    const activeProjectId = currentActiveProjectId()
+    // restoring the wrong chat history.
+    //
+    // GH#679 regression fix: the original guard compared `ownerProjectId`
+    // against the PROJECTS store's `currentActiveProjectId()`. That reads a
+    // SEPARATE store that can lag the tab set during host-switch /
+    // projects re-fetch / multi-window flows, so a legitimate
+    // same-workspace stamp got silently dropped and the chat-history
+    // dropdown looked dead (the DB session updated but the live PTY never
+    // swapped). The authoritative "whose tabs are these" identity lives
+    // HERE in tabs.ts: `activeWorkspaceKey` ("projectId:workspaceId") is
+    // set in lockstep with the tabs loaded by loadLayoutForWorkspace /
+    // restoreWorkspace — no cross-store race. Compare against its project
+    // portion. (Falls back to the projects-store getter only when
+    // activeWorkspaceKey is unset, e.g. a vitest unit that never restores a
+    // workspace.) When activeProjectId can't be resolved at all we let the
+    // stamp through — `state.tabs` is the active workspace's by construction.
+    const activeWorkspaceKey = get().activeWorkspaceKey
+    const activeProjectId = activeWorkspaceKey
+      ? activeWorkspaceKey.split(':')[0]
+      : currentActiveProjectId()
     if (ownerProjectId && activeProjectId && ownerProjectId !== activeProjectId) return
     let mutated = false
     set((state) => {

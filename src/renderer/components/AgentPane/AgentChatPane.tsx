@@ -8,7 +8,7 @@ import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { daemonCliGet } from '@/lib/daemon-cli'
-import { agentDisplayName, resumeChatArgs } from '@/lib/workspace-agent'
+import { agentDisplayName, resumeChatArgs, reconcileColdBootSession } from '@/lib/workspace-agent'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 
 interface AgentChatPaneProps {
@@ -320,14 +320,40 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     const resolve = async (): Promise<void> => {
       const myTerminalId = terminalIdRef.current
 
-      // 0.37.12 — Step 0: if the serialized layout restored a
-      // sessionId hint, use it directly. Skips the
-      // k2so_agents_resume_chat_args daemon roundtrip that can race
-      // or land on the wrong workspace_sessions row post-crash.
-      // The TerminalPane spawn that follows registers under the
-      // canonical project_id agent_name; the auto-stamp hook then
-      // updates workspace_sessions to match. Renderer is canonical.
+      // 0.37.12 / GH#679 — Step 0: the serialized layout carries a
+      // sessionId hint, but `workspace_sessions.session_id` in SQLite is
+      // the SOURCE OF TRUTH (the dropdown's set-chat-session and every
+      // daemon-side spawn write it). On cold boot we RECONCILE the layout
+      // hint against the daemon's canonical session and let SQLite win
+      // when it has a resumable session that differs from the hint —
+      // otherwise a stale layout snapshot (e.g. saved before the dropdown
+      // switched, or a crash window) would resume the wrong conversation.
+      //
+      // We still skip the roundtrip's failure modes gracefully: if the
+      // daemon read fails or returns a freshly pre-allocated UUID
+      // (resumedExisting === false, i.e. SQLite had nothing usable), we
+      // KEEP the layout hint — preserving the offline / DB-race
+      // resilience the renderer-canonical design (canonical-lane-restore
+      // PRD) was built for.
       if (restoredSessionId && !cancelled) {
+        let effectiveSessionId = restoredSessionId
+        try {
+          const canonical = await resumeChatArgs(projectPath)
+          effectiveSessionId = reconcileColdBootSession(restoredSessionId, canonical)
+          if (effectiveSessionId !== restoredSessionId) {
+            console.info(
+              '[AgentChatPane] cold-boot revive: SQLite session',
+              effectiveSessionId,
+              'overrides layout hint',
+              restoredSessionId,
+            )
+          }
+        } catch (err) {
+          // Daemon unreachable / route error — fall back to the layout
+          // hint (renderer-canonical resilience). Do NOT block revive.
+          console.warn('[AgentChatPane] cold-boot SQLite reconcile failed, using layout hint:', err)
+        }
+        if (cancelled) return
         // `claude --resume <X>` reloads an existing conversation;
         // matches what k2so_agents_resume_chat_args would have
         // returned for a workspace whose chat session has fired
@@ -335,7 +361,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
         // defaults across the rest of K2SO.
         setLaunchConfig({
           command: 'claude',
-          args: ['--dangerously-skip-permissions', '--resume', restoredSessionId],
+          args: ['--dangerously-skip-permissions', '--resume', effectiveSessionId],
           cwd: projectPath,
         })
         daemonCliGet('agents/lock', {
@@ -344,7 +370,9 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           terminal_id: myTerminalId,
           owner: 'user',
         }).catch(() => {})
-        stampSessionId(restoredSessionId)
+        // Re-stamp so the layout converges on the reconciled session
+        // (no-op when effectiveSessionId === restoredSessionId).
+        stampSessionId(effectiveSessionId)
         setReady(true)
         return
       }

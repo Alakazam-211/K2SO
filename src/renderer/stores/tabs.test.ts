@@ -296,7 +296,7 @@ describe('stampAgentSessionId owner guard (GH#608)', () => {
   // (ownerProjectId === the active project, since `state.tabs` always
   // holds the active workspace's tabs).
 
-  function seedChatTab(agentName: string, projectPath: string): void {
+  function seedChatTab(agentName: string, projectPath: string, activeProjectId = 'proj-ACTIVE'): void {
     useTabsStore.setState({
       tabs: [
         {
@@ -320,6 +320,9 @@ describe('stampAgentSessionId owner guard (GH#608)', () => {
         } as never,
       ],
       activeTabId: 'tab-chat',
+      // GH#679 — the guard now keys on activeWorkspaceKey (set in lockstep
+      // with the loaded tabs), not the cross-store projects-active id.
+      activeWorkspaceKey: `${activeProjectId}:ws-1`,
     })
   }
 
@@ -350,6 +353,29 @@ describe('stampAgentSessionId owner guard (GH#608)', () => {
     seedChatTab('shared-agent', '/shared/path')
     useTabsStore.getState().stampAgentSessionId('shared-agent', '/shared/path', 'session-FOREIGN', 'proj-OTHER')
     expect(chatSessionId()).toBeUndefined()
+  })
+
+  it('GH#679: stamps via activeWorkspaceKey even when the projects-store getter is STALE', () => {
+    // Regression: the dropdown switch wrote the new session to SQLite but
+    // the live PTY never swapped because the old guard compared against
+    // the cross-store projects-active id, which lagged the tab set during
+    // host-switch / re-fetch flows and silently dropped the legit stamp.
+    // The tabs in the store belong to proj-ACTIVE (activeWorkspaceKey);
+    // a STALE projects getter pointing elsewhere must NOT block the stamp.
+    seedChatTab('shared-agent', '/shared/path', 'proj-ACTIVE')
+    registerActiveProjectIdGetter(() => 'proj-STALE')
+    useTabsStore.getState().stampAgentSessionId('shared-agent', '/shared/path', 'session-SWITCHED', 'proj-ACTIVE')
+    expect(chatSessionId()).toBe('session-SWITCHED')
+  })
+
+  it('GH#679: falls back to the projects getter when activeWorkspaceKey is unset', () => {
+    // Pure-unit path (no workspace restored). seedChatTab sets the key, so
+    // clear it to exercise the fallback branch — the projects getter
+    // (proj-ACTIVE from beforeEach) then authorizes the stamp.
+    seedChatTab('shared-agent', '/shared/path')
+    useTabsStore.setState({ activeWorkspaceKey: null })
+    useTabsStore.getState().stampAgentSessionId('shared-agent', '/shared/path', 'session-FALLBACK', 'proj-ACTIVE')
+    expect(chatSessionId()).toBe('session-FALLBACK')
   })
 })
 
