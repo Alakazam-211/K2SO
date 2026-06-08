@@ -7,9 +7,11 @@ import { useTabsStore } from '@/stores/tabs'
 import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { agentDisplayName, resumeChatArgs, reconcileColdBootSession, type ColdBootDecision } from '@/lib/workspace-agent'
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import { useServerSupports } from '@/lib/server-capabilities'
+import { subscribeToWorkspaceSessionEvents } from '@/stores/session-events'
 import {
   initialBreakerState,
   recordSpawn,
@@ -30,7 +32,14 @@ interface AgentChatPaneProps {
    *  launch config directly so the same session resumes immediately.
    *  Renderer holds the canonical record; the daemon's auto-stamp
    *  hook reconciles DB state on the next spawn. See
-   *  `.k2so/prds/canonical-lane-restore.md`. */
+   *  `.k2so/prds/canonical-lane-restore.md`.
+   *
+   *  0.39.39 (#683) — in the DAEMON-OWNED path this is downgraded to a
+   *  NON-AUTHORITATIVE offline hint (PRD §4.5 / D3): it's forwarded to
+   *  `ensure-pinned-chat` so an unreachable daemon could still resolve
+   *  it, but the daemon reads `workspace_sessions` canonically and wins
+   *  whenever it's reachable. It only drives the renderer's resolve loop
+   *  in the capability-gated FALLBACK path. */
   restoredSessionId?: string
 }
 
@@ -43,6 +52,22 @@ interface AgentChatPaneProps {
  * Terminal id is project-namespaced (`agent-chat:<project_id>:<agent>`)
  * so two workspaces sharing an agent name don't collide on a single
  * PTY — see `.k2so/prds/heartbeats-sidebar-audit.md` Phase 1.
+ *
+ * ── 0.39.39 (#683) daemon-owned pinned-chat lifecycle ──────────────
+ * `.k2so/prds/daemon-owned-pinned-chat.md`. The DAEMON now owns the
+ * pinned-chat session lifecycle (find-or-spawn, resume/fresh decision,
+ * refresh, dropdown-switch respawn). The renderer asks the daemon to
+ * `ensure-pinned-chat`, attaches the grid-WS, and renders. This kills
+ * the renderer-side resolve loop — and with it the self-retrigger guard
+ * + spawn-loop circuit breaker, which only existed to bound that loop.
+ *
+ * Capability-gated on `daemon-pinned-chat` (FEATURES, 0.39.39). When the
+ * active host supports it (always true for `local`) → the new
+ * daemon-owned path runs (NO breaker). When it does NOT (an older /
+ * remote daemon without the `ensure-pinned-chat` route) → we fall back
+ * to the pre-0.39.39 renderer-orchestrated path WITH the self-retrigger
+ * guard + circuit breaker intact (the band-aids still protect the only
+ * code path that can still loop).
  */
 export function AgentChatPane({ agentName, projectPath, restoredSessionId }: AgentChatPaneProps): React.JSX.Element {
   // Resolve project id synchronously from the projects store; the chat tab
@@ -51,6 +76,10 @@ export function AgentChatPane({ agentName, projectPath, restoredSessionId }: Age
   const projectId = useProjectsStore((s) => {
     return s.projects.find((p) => p.path === projectPath)?.id ?? null
   })
+
+  // Capability gate (#683 / PRD §6). Subscribes so a host switch
+  // (local↔remote) flips the path live. `local` always supports it.
+  const daemonOwnsChat = useServerSupports('daemon-pinned-chat')
 
   if (!projectId) {
     return (
@@ -71,9 +100,22 @@ export function AgentChatPane({ agentName, projectPath, restoredSessionId }: Age
   // (post-unification, one agent per workspace, agent name is
   // metadata not address). The agent name doesn't need to be in
   // the React key.
-  return (
-    <AgentChatTerminal
-      key={projectId}
+  //
+  // 0.39.39: the React key ALSO folds in `daemonOwnsChat` so a
+  // capability flip remounts cleanly into the other implementation
+  // (no shared-hook-order hazard between the two component bodies).
+  const key = `${projectId}:${daemonOwnsChat ? 'daemon' : 'legacy'}`
+  return daemonOwnsChat ? (
+    <AgentChatTerminalDaemon
+      key={key}
+      agentName={agentName}
+      projectId={projectId}
+      projectPath={projectPath}
+      restoredSessionId={restoredSessionId}
+    />
+  ) : (
+    <AgentChatTerminalLegacy
+      key={key}
       agentName={agentName}
       projectId={projectId}
       projectPath={projectPath}
@@ -89,18 +131,504 @@ interface AgentChatTerminalProps {
   restoredSessionId?: string
 }
 
-function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionId }: AgentChatTerminalProps): React.JSX.Element {
+// ── Shared header: display name, history dropdown, refresh button ─────────
+//
+// Both the daemon-owned and legacy implementations render the same chrome.
+// Extracting it keeps the two bodies focused on their (very different)
+// lifecycle logic. The dropdown / refresh handlers are injected so each
+// path wires them to its own respawn mechanism.
+
+interface ChatHeaderProps {
+  displayName: string
+  projectPath: string
+  currentSessionId: string | null
+  onRefresh: () => void
+  refreshing: boolean
+  onSwitchSession: (newSessionId: string) => void
+}
+
+interface HistorySession {
+  sessionId: string
+  title: string
+  timestamp: number
+  messageCount: number
+}
+
+function ChatHeader({
+  displayName,
+  projectPath,
+  currentSessionId,
+  onRefresh,
+  refreshing,
+  onSwitchSession,
+}: ChatHeaderProps): React.JSX.Element {
+  const [historySessions, setHistorySessions] = useState<HistorySession[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+
+  // 0.37.12 — fetch chat history for the dropdown title + popover list.
+  // Runs on mount, when the current session changes (title converges
+  // after the first message), and when the popover opens.
+  useEffect(() => {
+    let cancelled = false
+    void daemonCliGet<Array<{
+      sessionId: string
+      title: string
+      timestamp: number
+      messageCount: number
+      provider: string
+    }>>('chat/list', { project_path: projectPath })
+      .then((rows) => {
+        if (cancelled) return
+        const claudeOnly = rows
+          .filter((r) => r.provider === 'claude' || !r.provider)
+          .sort((a, b) => b.timestamp - a.timestamp)
+        setHistorySessions(claudeOnly)
+      })
+      .catch((err) => {
+        console.warn('[AgentChatPane] chat/list failed:', err)
+      })
+    return () => { cancelled = true }
+  }, [projectPath, currentSessionId, historyOpen])
+
+  const currentChatTitle = useMemo<string>(() => {
+    if (!currentSessionId) return 'New chat'
+    const found = historySessions.find((s) => s.sessionId === currentSessionId)
+    if (found?.title) return found.title
+    return 'New chat'
+  }, [historySessions, currentSessionId])
+
+  return (
+    <div className="px-3 py-2 border-b border-[var(--color-border)] flex-shrink-0 flex items-center gap-3 relative">
+      <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate flex-shrink-0">
+        {displayName}
+      </span>
+      {/* spacer pushes the dropdown + refresh to the right. */}
+      <div className="flex-1" />
+      {/* 0.37.12 — chat-history dropdown. Lets the user switch the
+          pinned chat to a different past session (escape hatch for
+          orphaned/deleted sessions or just to revisit). */}
+      <button
+        type="button"
+        onClick={() => setHistoryOpen((v) => !v)}
+        title="Switch pinned chat to a different past Claude session"
+        aria-label="Switch pinned chat session"
+        aria-haspopup="listbox"
+        aria-expanded={historyOpen}
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors no-drag cursor-pointer min-w-0"
+      >
+        <span className="truncate max-w-[28ch]">{currentChatTitle}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="flex-shrink-0">
+          <path d={historyOpen ? 'M18 15l-6-6-6 6' : 'M6 9l6 6 6-6'} />
+        </svg>
+      </button>
+      {historyOpen && (
+        <div
+          role="listbox"
+          className="absolute right-12 top-full mt-1 z-20 w-[36ch] max-h-[60vh] overflow-y-auto bg-[var(--color-bg-elevated)] border border-[var(--color-border)] shadow-2xl py-1"
+        >
+          {historySessions.length === 0 ? (
+            <div className="px-3 py-2 text-[10px] text-[var(--color-text-muted)]">
+              No past sessions yet.
+            </div>
+          ) : (
+            historySessions.map((s) => {
+              const isCurrent = s.sessionId === currentSessionId
+              return (
+                <button
+                  key={s.sessionId}
+                  type="button"
+                  role="option"
+                  aria-selected={isCurrent}
+                  onClick={() => {
+                    setHistoryOpen(false)
+                    onSwitchSession(s.sessionId)
+                  }}
+                  className={`w-full text-left px-3 py-1.5 text-[11px] flex items-center gap-2 transition-colors no-drag cursor-pointer ${
+                    isCurrent
+                      ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
+                      : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                  }`}
+                >
+                  <span className="flex-1 truncate">{s.title || 'Untitled chat'}</span>
+                  <span className="flex-shrink-0 text-[9px] text-[var(--color-text-muted)] opacity-70">
+                    {s.messageCount}
+                  </span>
+                  {isCurrent && (
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="flex-shrink-0 text-[var(--color-accent)]">
+                      <path d="M5 12l5 5 9-11" />
+                    </svg>
+                  )}
+                </button>
+              )
+            })
+          )}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={refreshing}
+        title="Restart chat session — kills the current Claude process and spawns a fresh resume. Use after typing `exit` or when the session is unresponsive."
+        aria-label="Refresh chat session"
+        className="inline-flex items-center justify-center h-5 w-5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+      >
+        {/* Inline SVG keeps this self-contained (no icon-lib dep). */}
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={refreshing ? 'animate-spin' : ''}
+          aria-hidden="true"
+        >
+          <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+          <path d="M3 3v5h5" />
+          <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+          <path d="M16 16h5v5" />
+        </svg>
+      </button>
+    </div>
+  )
+}
+
+// Shared hook: resolve the AGENT.md `display_name:` (falls back to the
+// technical agent name). Used by both implementations.
+function useDisplayName(projectPath: string, agentName: string): string {
+  const [displayName, setDisplayName] = useState<string>(agentName)
+  useEffect(() => {
+    let cancelled = false
+    agentDisplayName(projectPath)
+      .then((n) => { if (!cancelled && n) setDisplayName(n) })
+      .catch(() => { /* keep agentName as fallback */ })
+    return () => { cancelled = true }
+  }, [projectPath, agentName])
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+    listen('sync:projects', () => {
+      agentDisplayName(projectPath)
+        .then((n) => { if (n) setDisplayName(n) })
+        .catch(() => {})
+    }).then((u) => { if (cancelled) u(); else unlisten = u })
+    return () => { cancelled = true; unlisten?.() }
+  }, [projectPath])
+  return displayName
+}
+
+// ── Wire types for ensure-pinned-chat (FROZEN CONTRACT, #683) ────────────
+//
+// POST /cli/workspace/ensure-pinned-chat ← { project, forceRespawn? }
+// → { sessionId, claudeSessionId, resumedExisting, command, args,
+//     cols, rows, reused }
+interface EnsurePinnedChatResponse {
+  sessionId: string
+  claudeSessionId: string
+  resumedExisting: boolean
+  command: string
+  args: string[]
+  cols: number
+  rows: number
+  reused: boolean
+}
+
+async function ensurePinnedChat(
+  projectPath: string,
+  opts?: { forceRespawn?: boolean; restoredSessionId?: string },
+): Promise<EnsurePinnedChatResponse> {
+  // host-aware POST (daemonCliPost). The daemon is authoritative;
+  // restoredSessionId rides along ONLY as an offline hint (PRD §4.5 / D3).
+  return daemonCliPost<EnsurePinnedChatResponse>('workspace/ensure-pinned-chat', {
+    project: projectPath,
+    ...(opts?.forceRespawn ? { forceRespawn: true } : {}),
+    ...(opts?.restoredSessionId ? { restoredSessionId: opts.restoredSessionId } : {}),
+  })
+}
+
+/**
+ * 0.39.39 (#683) — DAEMON-OWNED pinned-chat lifecycle.
+ *
+ * The daemon owns spawn/resume/refresh/switch. This component:
+ *  - mount       → POST ensure-pinned-chat {project} → attach grid-WS
+ *  - refresh     → POST ensure-pinned-chat {project, forceRespawn:true};
+ *                  re-attach on the daemon's `SessionAdded` broadcast
+ *  - switch      → set-chat-session (persist) then ensure(forceRespawn:true)
+ *  - SessionAdded(this workspace)   → re-attach (the daemon respawned)
+ *  - SessionRemoved(this workspace) → show idle (NO auto-respawn)
+ *
+ * No resolve loop, no `stampSessionId`, no `restoredSessionId`-driven
+ * re-resolve, no self-retrigger guard, NO circuit breaker — those only
+ * existed to bound a loop the daemon-owned model removes by construction.
+ *
+ * TerminalPane attaches by registering its v2 session under the canonical
+ * workspace key (`attachAgentName={projectId}`). Since `ensure-pinned-chat`
+ * spawns under THAT SAME key, TerminalPane's idempotent `/cli/sessions/
+ * v2/spawn` (no command/args) reuses the daemon-spawned PTY rather than
+ * creating a new one — that's the "attach". A bumped `attachNonce` forces
+ * a clean re-attach after a forceRespawn / SessionAdded.
+ */
+function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSessionId }: AgentChatTerminalProps): React.JSX.Element {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const terminalIdRef = useRef(agentChatId(projectId, agentName))
+  const displayName = useDisplayName(projectPath, agentName)
+
+  // P1.A — bind this pinned-Chat pane to ITS OWN project upfront (see the
+  // legacy body for the full rationale). Idempotent.
+  useEffect(() => {
+    useActiveAgentsStore.getState().bindPaneProject(terminalIdRef.current, projectId)
+  }, [projectId])
+
+  // Resolve phase. `ensuring` → first ensure in flight; `ready` → the
+  // daemon confirmed a live session and we render TerminalPane; `idle` →
+  // the daemon reported the session removed (e.g. user typed `exit`) — we
+  // show the idle pane with a Retry button and DO NOT auto-respawn;
+  // `error` → ensure failed.
+  type Phase =
+    | { kind: 'ensuring' }
+    | { kind: 'ready'; sessionId: string; claudeSessionId: string }
+    | { kind: 'idle' }
+    | { kind: 'error'; message: string }
+  const [phase, setPhase] = useState<Phase>({ kind: 'ensuring' })
+  const [refreshing, setRefreshing] = useState(false)
+  // Bumped to force TerminalPane to re-attach (remount) after a daemon
+  // respawn (refresh / dropdown switch / SessionAdded). The daemon kills
+  // the old PTY + spawns a new one under the same key; a fresh TerminalPane
+  // re-runs its idempotent spawn POST and binds to the NEW PTY.
+  const [attachNonce, setAttachNonce] = useState(0)
+
+  // The claude session id currently pinned (from the last ensure / the
+  // SessionAdded event). Drives the dropdown highlight + title lookup.
+  const claudeSessionId =
+    phase.kind === 'ready' ? phase.claudeSessionId : null
+
+  // ── ensure() — the one daemon RPC this component leans on ────────────
+  // Idempotent on the daemon side. `forceRespawn` kills + respawns. The
+  // SessionAdded broadcast re-attaches; but we also adopt the ensure
+  // RESPONSE directly so a cold mount renders without waiting for the WS.
+  const ensure = useCallback(
+    async (forceRespawn: boolean): Promise<void> => {
+      try {
+        const res = await ensurePinnedChat(projectPath, {
+          forceRespawn,
+          // Offline hint only (D3) — daemon wins when reachable.
+          restoredSessionId,
+        })
+        setPhase({
+          kind: 'ready',
+          sessionId: res.sessionId,
+          claudeSessionId: res.claudeSessionId,
+        })
+        // A respawn produced a NEW PTY; force TerminalPane to re-attach so
+        // it binds to it (the SessionAdded broadcast double-covers this —
+        // both routes bump the nonce idempotently).
+        if (forceRespawn) setAttachNonce((n) => n + 1)
+      } catch (err) {
+        console.error('[AgentChatPane] ensure-pinned-chat failed:', err)
+        setPhase({
+          kind: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    },
+    [projectPath, restoredSessionId],
+  )
+
+  // Mount → ensure (find-or-spawn; daemon resolves resume vs fresh). Cold
+  // boot / relaunch-revive is just this call: the daemon reads
+  // workspace_sessions canonically (#679 preserved).
+  useEffect(() => {
+    void ensure(false)
+    // Only on (re)mount per workspace. `ensure` is stable across
+    // restoredSessionId churn for THIS workspace; we deliberately don't
+    // re-ensure when the offline hint changes (daemon is authoritative).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath])
+
+  // Subscribe to the daemon's session lifecycle for THIS workspace.
+  //   SessionAdded(agent_name === projectId) → re-attach (daemon respawned
+  //     on refresh / switch / k2so msg find-or-spawn).
+  //   SessionRemoved(agent_name === projectId) → show idle. NO auto-respawn
+  //     (PRD §4: the daemon never auto-spawns a pinned chat).
+  useEffect(() => {
+    const unsubscribe = subscribeToWorkspaceSessionEvents(projectPath, {
+      onAdded: (event) => {
+        if (event.agent_name !== projectId) return
+        setPhase({
+          kind: 'ready',
+          sessionId: event.session_id,
+          claudeSessionId: event.session_id,
+        })
+        setAttachNonce((n) => n + 1)
+      },
+      onRemoved: (event) => {
+        if (event.agent_name !== projectId) return
+        setPhase({ kind: 'idle' })
+      },
+    })
+    return unsubscribe
+  }, [projectPath, projectId])
+
+  // Refresh → forceRespawn. The daemon kills + respawns; we re-attach via
+  // the ensure response AND the SessionAdded broadcast.
+  const handleRefresh = useCallback(async (): Promise<void> => {
+    if (refreshing) return
+    setRefreshing(true)
+    setPhase({ kind: 'ensuring' })
+    await ensure(true)
+    setRefreshing(false)
+  }, [refreshing, ensure])
+
+  // Dropdown switch → persist via set-chat-session, then forceRespawn so
+  // the daemon respawns on the newly-selected session.
+  const handleSwitchSession = useCallback(
+    async (newSessionId: string): Promise<void> => {
+      if (!newSessionId || newSessionId === claudeSessionId) return
+      setRefreshing(true)
+      setPhase({ kind: 'ensuring' })
+      try {
+        // HOST-AWARE persist of the pinned session (same route the legacy
+        // path uses). GET because the route reads query params.
+        await daemonCliGet('workspace/set-chat-session', {
+          project: projectPath,
+          session_id: newSessionId,
+        })
+      } catch (err) {
+        console.error('[AgentChatPane] switchToSession DB update failed:', err)
+        setRefreshing(false)
+        // Re-ensure so we don't strand the pane in `ensuring`.
+        void ensure(false)
+        return
+      }
+      await ensure(true)
+      setRefreshing(false)
+    },
+    [claudeSessionId, projectPath, ensure],
+  )
+
+  if (phase.kind === 'error') {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
+          Chat session failed to start
+        </div>
+        <div className="text-[11px] text-[var(--color-text-muted)] max-w-[40ch]">
+          {phase.message || 'The daemon could not start the chat session.'}
+        </div>
+        <RetryButton onClick={handleRefresh} refreshing={refreshing} />
+      </div>
+    )
+  }
+
+  if (phase.kind === 'idle') {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
+          Chat session ended
+        </div>
+        <div className="text-[11px] text-[var(--color-text-muted)] max-w-[40ch]">
+          The chat process exited. Click Retry to start a fresh session.
+        </div>
+        <RetryButton onClick={handleRefresh} refreshing={refreshing} />
+      </div>
+    )
+  }
+
+  if (phase.kind === 'ensuring') {
+    return (
+      <div className="flex items-center justify-center h-full text-xs text-[var(--color-text-muted)]">
+        Loading session…
+      </div>
+    )
+  }
+
+  // phase.kind === 'ready'
+  return (
+    <div ref={containerRef} className="h-full flex flex-col bg-[var(--color-bg)] overflow-hidden">
+      <ChatHeader
+        displayName={displayName}
+        projectPath={projectPath}
+        currentSessionId={claudeSessionId}
+        onRefresh={() => void handleRefresh()}
+        refreshing={refreshing}
+        onSwitchSession={(sid) => void handleSwitchSession(sid)}
+      />
+      <div className="flex-1 min-h-0">
+        <TerminalPane
+          // Remount on each daemon respawn so TerminalPane re-attaches to
+          // the NEW PTY under the canonical key.
+          key={attachNonce}
+          terminalId={terminalIdRef.current}
+          cwd={projectPath}
+          // NO command/args — the daemon already spawned the PTY in
+          // ensure-pinned-chat. TerminalPane's idempotent /cli/sessions/
+          // v2/spawn (keyed on attachAgentName) ATTACHES to it rather than
+          // spawning fresh. The renderer no longer builds claude args.
+          attachAgentName={projectId}
+          seedLabel={displayName}
+          lockLabel={true}
+          // 0.39.39: NO onChildExit breaker wiring on the daemon-owned
+          // path. Exit is observed by the DAEMON, which broadcasts
+          // SessionRemoved → the subscription above flips us to idle. No
+          // renderer-side breaker because there's no renderer respawn loop
+          // to bound.
+        />
+      </div>
+    </div>
+  )
+}
+
+// Small shared retry button used by the daemon-owned error/idle panes.
+function RetryButton({ onClick, refreshing }: { onClick: () => void; refreshing: boolean }): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={refreshing}
+      className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-medium bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)]/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors no-drag cursor-pointer"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={refreshing ? 'animate-spin' : ''}
+        aria-hidden="true"
+      >
+        <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+        <path d="M3 3v5h5" />
+        <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+        <path d="M16 16h5v5" />
+      </svg>
+      Retry
+    </button>
+  )
+}
+
+/**
+ * PRE-0.39.39 renderer-orchestrated pinned-chat path — the FALLBACK used
+ * when the active host does NOT support `daemon-pinned-chat` (an older or
+ * remote daemon without the `ensure-pinned-chat` route). UNCHANGED from
+ * the 0.39.38 implementation: the renderer resolves resume vs fresh,
+ * builds claude args, spawns via TerminalPane, stamps the session id back,
+ * and is protected by the #682 self-retrigger guard + circuit breaker.
+ *
+ * Kept verbatim (rather than deleted) BECAUSE this path is the only one
+ * that can still loop, so the band-aids must stay attached to it. The
+ * daemon-owned path above has neither the loop nor the band-aids.
+ */
+function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSessionId }: AgentChatTerminalProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalIdRef = useRef(agentChatId(projectId, agentName))
 
-  // P1.A — bind this pinned-Chat pane to ITS OWN project UPFRONT, before
-  // any terminal-title braille tick can race. The pinned Chat has no agent
-  // lifecycle hook, so the title-activity path is the only binder; without
-  // this pre-registration its working state could latch onto whatever
-  // workspace the user was viewing when the first tick fired (mis-bound
-  // spinner). `bindPaneProject` is idempotent and never clobbers a
-  // lifecycle-bound entry. Keyed on the canonical terminalId so it matches
-  // the paneId carried by the title/lifecycle signals.
   useEffect(() => {
     useActiveAgentsStore.getState().bindPaneProject(terminalIdRef.current, projectId)
   }, [projectId])
@@ -110,36 +638,14 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     cwd: string
   } | null>(null)
   const [ready, setReady] = useState(false)
-  // K2SO #682 — spawn-loop circuit breaker. When `claude` exits almost
-  // immediately N times in a row (e.g. `--session-id <dup>` → "already in
-  // use" → exit 1, or a phantom `--resume`), we STOP auto-respawning and
-  // show an error state with the refresh button as the manual retry. The
-  // decision logic is the pure `chat-spawn-breaker` module; this ref holds
-  // the running state (a ref, not state, so updating it from the exit
-  // callback never re-runs the resolve effect — that re-run is the very
-  // loop we're breaking). `breakerTripped` mirrors `.tripped` into render
-  // state so the UI can switch to the error pane.
+  // K2SO #682 — spawn-loop circuit breaker (see chat-spawn-breaker.ts).
   const breakerRef = useRef<BreakerState>(initialBreakerState())
   const [breakerTripped, setBreakerTripped] = useState(false)
-  // K2SO #682 — self-retrigger guard. The resolve effect stamps the
-  // session id it just launched onto the layout item; that flows back in
-  // as the `restoredSessionId` prop, changing a resolve-effect dependency
-  // and RE-RUNNING the effect — which would spawn again. We record what we
-  // last resolved (the refreshNonce/projectPath we resolved FOR + the
-  // session id we resolved TO); when the effect re-fires and the ONLY thing
-  // that changed is `restoredSessionId` becoming the value we just stamped,
-  // we bail (no-op). A real workspace switch (projectPath / new mount) or a
-  // user refresh (refreshNonce++) still resolves, because those keys differ.
+  // K2SO #682 — self-retrigger guard memo.
   const lastResolvedRef = useRef<ResolveMemo | null>(null)
-  // 0.37.4: friendly label from AGENT.md `display_name:` (falls back
-  // to the technical agent name on first paint, then upgrades).
-  const [displayName, setDisplayName] = useState<string>(agentName)
+  const displayName = useDisplayName(projectPath, agentName)
 
-  // 0.37.12 — chat-history dropdown state. Lets the user switch the
-  // pinned chat to a different past session (escape hatch when a
-  // chat was deleted, when restoration landed on the wrong session,
-  // or just to revisit an earlier conversation). See
-  // `.k2so/prds/canonical-lane-restore.md`.
+  // 0.37.12 — chat-history dropdown state.
   const [historySessions, setHistorySessions] = useState<Array<{
     sessionId: string
     title: string
@@ -147,10 +653,8 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     messageCount: number
   }>>([])
   const [historyOpen, setHistoryOpen] = useState(false)
-  // The Claude session id currently driving the live PTY — derived
-  // from launchConfig.args (`--resume <X>` or `--session-id <X>`).
-  // Used to highlight the matching dropdown entry and look up the
-  // display title.
+  // The Claude session id currently driving the live PTY — derived from
+  // launchConfig.args (`--resume <X>` or `--session-id <X>`).
   const currentSessionId = useMemo<string | null>(() => {
     const args = launchConfig?.args
     if (!args) return null
@@ -162,40 +666,12 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     return null
   }, [launchConfig])
 
-  useEffect(() => {
-    let cancelled = false
-    agentDisplayName(projectPath)
-      .then((n) => { if (!cancelled && n) setDisplayName(n) })
-      .catch(() => { /* keep agentName as fallback */ })
-    return () => { cancelled = true }
-  }, [projectPath, agentName])
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null
-    let cancelled = false
-    listen('sync:projects', () => {
-      agentDisplayName(projectPath)
-        .then((n) => { if (n) setDisplayName(n) })
-        .catch(() => {})
-    }).then((u) => { if (cancelled) u(); else unlisten = u })
-    return () => { cancelled = true; unlisten?.() }
-  }, [projectPath])
   // Bumped on every refresh-button click to force a clean remount of
-  // TerminalPane (key={refreshNonce}) and a re-run of the resolve
-  // effect. Used when the user typed `exit` and the Claude process
-  // ended — without a remount the dead PTY stays on screen.
-  //
-  // 0.38.0 commit 7 — Both the originating window AND every other
-  // viewer bump this via the `chat:refreshed` Tauri broadcast
-  // emitted by `k2so_chat_refresh_broadcast`. Keeps the pinned chat
-  // tab in sync after one window kills the daemon PTY.
+  // TerminalPane (key={refreshNonce}) and a re-run of the resolve effect.
   const [refreshNonce, setRefreshNonce] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
 
-  // Listen for chat:refreshed broadcasts. Every window's
-  // AgentChatPane mounts this listener; the payload's `projectPath`
-  // filters to the workspace the pane is rendering. Idempotent —
-  // a remount via refreshNonce++ is safe to repeat.
+  // Listen for chat:refreshed broadcasts (cross-window remount).
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | null = null
@@ -211,25 +687,12 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   const handleRefresh = useCallback(async (): Promise<void> => {
     if (refreshing) return
     setRefreshing(true)
-    // K2SO #682 — a manual refresh is the user's explicit "try again".
-    // Reset the spawn-loop breaker so the fresh spawn is allowed to run
-    // (and, if it fails, gets its own full N-strike budget). Also clear
-    // the self-retrigger memo so the upcoming resolve isn't skipped.
+    // K2SO #682 — reset the breaker + self-retrigger memo for an explicit
+    // "try again".
     breakerRef.current = resetBreaker()
     setBreakerTripped(false)
     lastResolvedRef.current = null
-    // Kill the daemon-owned PTY (best-effort). The unregister hook in
-    // v2_session_map clears agent_sessions.active_terminal_id and the
-    // child-exit observer fires for any still-alive process. If the
-    // session was already dead (user typed `exit`), the daemon's
-    // find-or-spawn on the next mount just spawns fresh.
-    //
-    // 0.37.5: pass the canonical workspace key — bare project_id —
-    // so we close THIS workspace's session. Pre-0.37.5 the key was
-    // `<projectId>:<agentName>`; the suffix was vestigial
-    // post-unification (one agent per workspace) and caused the
-    // renderer to compute the wrong key when its mode→name mapping
-    // disagreed with AGENT.md's `name:` field (C3PO 5c80bef1).
+    // Kill the daemon-owned PTY (best-effort).
     try {
       const creds = await getDaemonWs()
       await fetch(
@@ -237,23 +700,11 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          // force: this is a deliberate USER refresh/switch — the user IS the
-          // attached client, so the daemon's attached-client close-guard
-          // (GH#22 reaper defense) must be bypassed or the live PTY survives
-          // and the remount reattaches the OLD session instead of resuming
-          // the selected one. The reaper is daemon-side + canonical-Active
-          // driven; this renderer path is only ever user-initiated.
           body: JSON.stringify({ agent_name: projectId, force: true }),
         },
       ).catch(() => {})
     } catch { /* ignore — refresh proceeds either way */ }
 
-    // 0.38.0 commit 7 — broadcast cross-window. The `chat:refreshed`
-    // listener below also fires in THIS window and bumps the same
-    // refreshNonce. That double-bump is harmless (idempotent
-    // remount); routing both paths through the listener keeps the
-    // originating window and every other viewer on identical state
-    // machines.
     invoke('k2so_chat_refresh_broadcast', { projectPath })
       .catch((e) => console.warn('[chat-refresh] broadcast failed:', e))
 
@@ -262,22 +713,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     setRefreshing(false)
   }, [projectId, projectPath, agentName, refreshing])
 
-  // 0.37.12 — fetch chat history for the dropdown title display
-  // and the popover list. Runs on mount, when the current session
-  // changes (title converges after the user sends the first
-  // message — claude assigns titles dynamically based on
-  // conversation content), and when the popover opens (cheap
-  // re-fetch to catch any new sessions created via heartbeat fires
-  // or other paths).
-  //
-  // Phase 2.5 fix (finding #548): switched from the deleted Tauri
-  // `chat_history_list_for_project` command to the daemon's
-  // `/cli/chat/list` route. The Tauri shim was retired in Phase 2
-  // Unit 6 (`src-tauri/src/commands/mod.rs`); this pane was the
-  // last caller still routing through `invoke()` and was logging
-  // "Command chat_history_list_for_project not found" on every
-  // mount. Sibling pickers (ChatHistory, ReviewPanel) already
-  // call `daemonCliGet('chat/list', ...)` — this matches.
+  // 0.37.12 — fetch chat history for the dropdown title + popover list.
   useEffect(() => {
     let cancelled = false
     void daemonCliGet<Array<{
@@ -289,8 +725,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     }>>('chat/list', { project_path: projectPath })
       .then((rows) => {
         if (cancelled) return
-        // Sort by recency desc; show claude sessions only — other
-        // providers (codex, gemini, pi) have their own tabs/lanes.
         const claudeOnly = rows
           .filter((r) => r.provider === 'claude' || !r.provider)
           .sort((a, b) => b.timestamp - a.timestamp)
@@ -302,9 +736,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     return () => { cancelled = true }
   }, [projectPath, currentSessionId, historyOpen])
 
-  // Title display for the dropdown trigger: matched against historySessions.
-  // Falls back to a placeholder when the current session has no entry
-  // yet (brand-new chat — claude hasn't written its first turn).
   const currentChatTitle = useMemo<string>(() => {
     if (!currentSessionId) return 'New chat'
     const found = historySessions.find((s) => s.sessionId === currentSessionId)
@@ -312,10 +743,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     return 'New chat'
   }, [historySessions, currentSessionId])
 
-  // Switch the pinned chat tab to a different past session. Updates
-  // `workspace_sessions.session_id` via the daemon, stamps the new
-  // id on the local AgentItemData (so the next serialize captures
-  // it), then triggers a refresh so the live PTY swaps too.
+  // Switch the pinned chat tab to a different past session.
   const switchToSession = useCallback(async (newSessionId: string): Promise<void> => {
     if (!newSessionId || newSessionId === currentSessionId) {
       setHistoryOpen(false)
@@ -323,14 +751,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     }
     setHistoryOpen(false)
     try {
-      // HOST-AWARE: write the pinned session to the ACTIVE host's
-      // workspace_sessions DB (local or remote) via the daemon, not the
-      // local Tauri command — `invoke('workspace_session_set_session_id')`
-      // only ever hit the LOCAL daemon, so on a remote the dropdown silently
-      // failed to switch (the project path isn't registered locally). The
-      // `/cli/workspace/set-chat-session` route reads QUERY params and isn't
-      // POST-allowlisted, so it's a GET (same pattern as
-      // `workspace/set-agent-display-name`).
       await daemonCliGet('workspace/set-chat-session', {
         project: projectPath,
         session_id: newSessionId,
@@ -344,22 +764,11 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     } catch (err) {
       console.warn('[AgentChatPane] stampAgentSessionId failed:', err)
     }
-    // Trigger the same kill-and-remount path the refresh button uses
-    // so the live PTY drops and AgentChatPane re-resolves with the
-    // new restoredSessionId (passed in as a prop from the layout
-    // store, which we just updated via stampAgentSessionId).
     void handleRefresh()
-  }, [currentSessionId, projectPath, agentName, handleRefresh])
+  }, [currentSessionId, projectPath, agentName, projectId, handleRefresh])
 
   useEffect(() => {
-    // K2SO #682 — self-retrigger guard. Each resolve stamps the session id
-    // it just launched onto the layout item, which flows back as
-    // `restoredSessionId` and re-fires this effect. If the ONLY change is
-    // that `restoredSessionId` now equals the session we already resolved
-    // for THIS (refreshNonce, projectPath), this re-run is the self-loop —
-    // bail without spawning. A real workspace switch (different projectPath
-    // / fresh mount) or a user refresh (refreshNonce++) has a different key
-    // and proceeds normally.
+    // K2SO #682 — self-retrigger guard.
     if (
       isSelfRetrigger(lastResolvedRef.current, {
         refreshNonce,
@@ -370,16 +779,13 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
       return
     }
 
-    // K2SO #682 — breaker gate. Once tripped, refuse to spawn until a
-    // manual refresh resets it. This is what makes the breaker bound the
-    // loop regardless of which trigger re-fired this effect.
+    // K2SO #682 — breaker gate.
     if (breakerRef.current.tripped) {
       return
     }
 
     let cancelled = false
     const stampSessionId = (sid: string | null | undefined): void => {
-      // Remember what we resolved so a self-stamp-driven re-run is a no-op.
       lastResolvedRef.current = {
         refreshNonce,
         projectPath,
@@ -395,38 +801,19 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     const resolve = async (): Promise<void> => {
       const myTerminalId = terminalIdRef.current
 
-      // 0.37.12 / GH#679 / GH#681 — Step 0: the serialized layout carries a
-      // sessionId hint, but `workspace_sessions.session_id` in SQLite is
-      // the SOURCE OF TRUTH (the dropdown's set-chat-session and every
-      // daemon-side spawn write it). On cold boot we RECONCILE the layout
-      // hint against the daemon's canonical session.
-      //
-      // GH#681: Step 0 must only `--resume` a session that ACTUALLY
-      // EXISTS on disk — otherwise a pre-allocated UUID (stamped as the
-      // layout hint by a daemon `--session-id` spawn on a brand-new,
-      // never-chatted workspace) gets `--resume`d on the next remount and
-      // claude errors "No conversation found with session ID: <uuid>".
-      // The daemon already tells us via `resumedExisting`, so we gate on
-      // its decision rather than blindly resuming the hint:
-      //   - resume   → real prior conversation (GH#679 SQLite-canonical revive)
-      //   - fresh    → pre-allocated `--session-id <new>`; spawn verbatim, NEVER resume
-      //   - fallback → daemon unreachable; resume the layout hint (offline resilience)
+      // GH#679 / GH#681 — Step 0: reconcile the layout hint against the
+      // daemon's canonical session.
       if (restoredSessionId && !cancelled) {
         let decision: ColdBootDecision = { kind: 'fallback', sessionId: restoredSessionId }
         try {
           const canonical = await resumeChatArgs(projectPath)
           decision = reconcileColdBootSession(restoredSessionId, canonical)
         } catch (err) {
-          // Daemon unreachable / route error — fall back to the layout
-          // hint (renderer-canonical resilience). Do NOT block revive.
           console.warn('[AgentChatPane] cold-boot SQLite reconcile failed, using layout hint:', err)
         }
         if (cancelled) return
 
         if (decision.kind === 'fresh') {
-          // resumedExisting === false → brand-new / pre-allocated session.
-          // Spawn the daemon's `--session-id <new>` args verbatim so claude
-          // starts a CLEAN session pinned to the persisted id (no --resume).
           console.info(
             '[AgentChatPane] cold-boot fresh session (resumedExisting=false):',
             decision.sessionId,
@@ -438,9 +825,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
             cwd: projectPath,
           })
         } else {
-          // resume (real conversation) or fallback (daemon down) →
-          // `claude --resume <X>`. Skipping permissions matches workspace
-          // agent defaults across the rest of K2SO.
           if (decision.kind === 'resume' && decision.sessionId !== restoredSessionId) {
             console.info(
               '[AgentChatPane] cold-boot revive: SQLite session',
@@ -461,8 +845,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           terminal_id: myTerminalId,
           owner: 'user',
         }).catch(() => {})
-        // Re-stamp so the layout converges on the resolved session
-        // (no-op when it already equals restoredSessionId).
         stampSessionId(decision.sessionId)
         setReady(true)
         return
@@ -479,16 +861,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
       } catch { /* fall through */ }
 
       // Step 1b: Check the daemon for an existing session under this
-      // workspace's canonical key. When the user has closed Tauri,
-      // the daemon can keep the workspace agent's PTY alive
-      // (heartbeat fires, k2so msg injections, etc.). On Tauri
-      // reopen we want to attach to that existing PTY rather than
-      // spawn a fresh `claude --resume`.
-      //
-      // 0.37.5: lookup on the bare project_id canonical key.
-      // Pre-0.37.5 the key was `<projectId>:<agentName>`; that
-      // suffix was vestigial post-unification and caused renderer-
-      // side mismatches (C3PO 5c80bef1).
+      // workspace's canonical key.
       try {
         const json = await invoke<string>('k2so_session_lookup_by_agent', {
           agent: projectId,
@@ -511,24 +884,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
       } catch { /* informational only — fall through */ }
 
       // Step 2: Build a *bare resume* command for the chat tab.
-      //
-      // We deliberately do NOT use `k2so_agents_build_launch` here.
-      // build_launch is the wake-with-full-context path: it injects the
-      // agent's WAKEUP.md as the positional first user message and
-      // sometimes prefixes `/compact`. That's correct for an explicit
-      // "Launch agent" click or a scheduled heartbeat fire — the agent
-      // is supposed to wake up and triage. It is NOT correct for the
-      // Chat tab re-mounting on app relaunch (the daemon's PTY dies on
-      // K2SO upgrade → tab re-mounts → was firing a fresh wake every
-      // time, surprising users by auto-triaging without their consent).
-      //
-      // `k2so_agents_resume_chat_args` returns just
-      // `claude --resume <saved-session-id>` (or fresh `claude` if no
-      // saved session) — no system prompt, no WAKEUP body, no
-      // `/compact`.
       try {
-        // agentName is unused by the route (keyed purely on projectPath,
-        // matching the old proxy command which ignored it).
         const result = await resumeChatArgs(projectPath)
         if (!cancelled && result) {
           setLaunchConfig({
@@ -542,9 +898,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
             terminal_id: myTerminalId,
             owner: 'user',
           }).catch(() => {})
-          // 0.37.12 — stamp the resolved session id back onto the
-          // agent item so the next serializeTab captures it. Next
-          // close/reopen takes the fast path above.
           stampSessionId(result.resumeSession)
           setReady(true)
           return
@@ -571,14 +924,9 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     }
     resolve()
     return () => { cancelled = true }
-  }, [agentName, projectPath, refreshNonce, restoredSessionId])
+  }, [agentName, projectId, projectPath, refreshNonce, restoredSessionId])
 
-  // K2SO #682 — record the spawn timestamp for the circuit breaker the
-  // moment a launch config goes live (ready transitions true with a
-  // command to run). Keyed on refreshNonce so each remount-driven respawn
-  // re-stamps `spawnedAt`; the exit handler measures lifetime against it.
-  // A reattach to an already-alive PTY has no `command` (launchConfig is
-  // null), so it doesn't start the early-exit clock.
+  // K2SO #682 — record the spawn timestamp for the circuit breaker.
   useEffect(() => {
     if (ready && launchConfig?.command) {
       breakerRef.current = recordSpawn(breakerRef.current, Date.now())
@@ -587,19 +935,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   }, [ready, refreshNonce])
 
   // K2SO #682 — fold a child exit into the spawn-loop breaker.
-  //
-  // The breaker is a SAFETY NET that sits on top of whatever respawn
-  // TRIGGER exists (the resolve effect re-running — e.g. a self-stamp the
-  // guard above missed, or a future regression). It does NOT itself
-  // respawn; it COUNTS rapid early exits and, on the Nth, sets
-  // `breakerTripped`, which gates the resolve effect (it refuses to spawn
-  // while tripped). That converts an unbounded spawn→exit→respawn loop
-  // into a bounded N attempts + an error pane with the refresh button as
-  // the manual retry (which resets the breaker).
-  //
-  // A normal single exit (user typed `exit`, or a session that lived a
-  // while) is NON-early → resets the rapid count and never trips, so the
-  // pane just shows its exited/idle state as today.
   const handleChildExit = useCallback((exitCode: number | null): void => {
     const decision = recordExit(breakerRef.current, {
       now: Date.now(),
@@ -615,27 +950,6 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     }
   }, [])
 
-  // Session id detection used to live here — a 12×5s polling loop that
-  // called `chat_history_detect_active_session` to find the
-  // most-recently-modified .jsonl in the workspace's chat history dir
-  // and persist it as workspace_sessions.session_id.
-  //
-  // Removed in 0.37.0 because it conflated *every* JSONL in the
-  // workspace's history dir (including heartbeat fires) and would
-  // overwrite the pinned tab's session_id with whatever fired last.
-  // Symptom: clicking Launch on fast-test would couple the pinned
-  // tab to the heartbeat's session within ~5s of the next poll.
-  //
-  // Replacement: `k2so_agents_resume_chat_args` pre-allocates a UUID
-  // and persists it via `workspace_sessions.session_id` BEFORE claude
-  // starts, then passes `--session-id <UUID>` so claude uses it.
-  // v2_spawn's auto-stamp hook then writes `active_terminal_id` when
-  // the PTY registers. Daemon owns the truth; renderer doesn't poll.
-
-  // K2SO #682 — breaker tripped: the chat process exited repeatedly within
-  // seconds of each spawn. STOP auto-respawning (which would pile up
-  // hundreds of `claude` procs) and show an error state. The refresh
-  // button is the manual retry — `handleRefresh` resets the breaker.
   if (breakerTripped) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
@@ -646,32 +960,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           The chat process exited repeatedly right after starting, so K2SO
           stopped retrying to avoid a spawn loop. Click Retry to try again.
         </div>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          disabled={refreshing}
-          className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-medium bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)]/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors no-drag cursor-pointer"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={refreshing ? 'animate-spin' : ''}
-            aria-hidden="true"
-          >
-            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-            <path d="M16 16h5v5" />
-          </svg>
-          Retry
-        </button>
+        <RetryButton onClick={() => void handleRefresh()} refreshing={refreshing} />
       </div>
     )
   }
@@ -690,14 +979,7 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
         <span className="text-xs font-semibold text-[var(--color-text-primary)] truncate flex-shrink-0">
           {displayName}
         </span>
-        {/* spacer pushes the dropdown + refresh to the right. */}
         <div className="flex-1" />
-        {/* 0.37.12 — chat-history dropdown. Lets the user switch the
-            pinned chat to a different past session (escape hatch for
-            orphaned/deleted sessions or just to revisit). Title
-            display also serves as confirmation that the restored
-            session id is what's actually running. Sits to the LEFT
-            of the refresh button. */}
         <button
           type="button"
           onClick={() => setHistoryOpen((v) => !v)}
@@ -754,13 +1036,12 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
         )}
         <button
           type="button"
-          onClick={handleRefresh}
+          onClick={() => void handleRefresh()}
           disabled={refreshing}
           title="Restart chat session — kills the current Claude process and spawns a fresh resume. Use after typing `exit` or when the session is unresponsive."
           aria-label="Refresh chat session"
           className="inline-flex items-center justify-center h-5 w-5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
         >
-          {/* Inline SVG keeps this self-contained (no icon-lib dep). */}
           <svg
             xmlns="http://www.w3.org/2000/svg"
             width="14"
@@ -788,47 +1069,12 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           cwd={launchConfig?.cwd ?? projectPath}
           command={launchConfig?.command}
           args={launchConfig?.args}
-          // Register this v2 session under the workspace's canonical
-          // key — bare `projectId` (post-0.37.5).
-          //
-          // **0.37.5:** the canonical key dropped its `<agent_name>`
-          // suffix because post-unification there's at most one
-          // agent per workspace, and the suffix only created
-          // opportunities for the renderer to compute the wrong
-          // name (mode→legacy-sentinel hardcoding when AGENT.md said
-          // scout — see C3PO 5c80bef1, the SMS Bridge bug). The
-          // daemon's `canonical_session::canonical_key_for(pid)`
-          // helper is the single source of truth for the shape.
-          //
-          // What this still gets us:
-          //   1. Two workspaces with the same agent name don't
-          //      collide — they have distinct project_ids.
-          //   2. `k2so msg <workspace>` finds the right session
-          //      via the same project_id resolution.
-          //   3. Closing Tauri leaves the daemon-owned PTY alive;
-          //      reopening Tauri re-attaches via project_id.
-          //   4. The daemon's auto-launch (heartbeat headless
-          //      wake, awareness inject, ensure_canonical_session)
-          //      registers under the SAME bare-pid key, converging
-          //      every path on one PTY per workspace.
-          // Without this override, TerminalPane defaults to
-          // `tab-${terminalId}` — a renderer-only key the daemon
-          // never sees on system-driven spawns.
           attachAgentName={projectId}
-          // 0.37.4 Phase B — seed the label with the agent's
-          // display name and LOCK it so PTY title events (e.g.
-          // claude --resume's "Claude Code" emission) cannot
-          // overwrite. The daemon spawn helper for the canonical
-          // workspace+agent session also seeds from the
-          // display-name helper; this prop is the renderer-side
-          // mirror of the same intent for the tab-driven spawn
-          // path (when the renderer beats the daemon to spawning
-          // the canonical session).
           seedLabel={displayName}
           lockLabel={true}
-          // K2SO #682 — feed child-exit (code + timing via the breaker)
-          // into the spawn-loop circuit breaker so rapid repeated early
-          // exits stop auto-respawning instead of piling up procs.
+          // K2SO #682 — feed child-exit into the spawn-loop circuit breaker.
+          // ONLY the fallback path wires this: the daemon-owned path relies
+          // on the daemon's SessionRemoved broadcast for exit.
           onChildExit={handleChildExit}
         />
       </div>

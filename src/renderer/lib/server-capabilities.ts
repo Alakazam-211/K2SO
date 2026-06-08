@@ -57,6 +57,16 @@ export const FEATURES = {
    *  simply won't reap — accepted transitional degradation, since the
    *  renderer reaper was deleted in this release). */
   'canonical-active': '0.39.38',
+  /** POST /cli/workspace/ensure-pinned-chat — daemon-owned pinned-chat
+   *  session lifecycle (#683, .k2so/prds/daemon-owned-pinned-chat.md).
+   *  The daemon owns find-or-spawn + resume/fresh + refresh +
+   *  dropdown-switch respawn; the renderer asks it to `ensure`, attaches
+   *  the grid-WS, and renders. When SUPPORTED (always true for `local`)
+   *  AgentChatPane uses the daemon-owned path (NO renderer resolve loop,
+   *  NO self-retrigger guard / circuit breaker). When NOT (an older /
+   *  remote daemon lacking the route) it falls back to the pre-0.39.39
+   *  renderer-orchestrated path WITH the #682 band-aids intact. */
+  'daemon-pinned-chat': '0.39.39',
 } as const
 
 export type FeatureKey = keyof typeof FEATURES
