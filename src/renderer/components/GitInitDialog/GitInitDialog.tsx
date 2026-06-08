@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useGitInitDialogStore } from '../../stores/git-init-dialog'
 import { useProjectsStore } from '../../stores/projects'
-import { useTabsStore } from '../../stores/tabs'
+import { useTabsStore, ensurePinnedAgentTabForMode } from '../../stores/tabs'
 import { useFocusGroupsStore } from '../../stores/focus-groups'
 import { emit } from '@tauri-apps/api/event'
 // Plan B — project add / focus-group assign are host-aware daemon data:
@@ -77,7 +77,12 @@ export default function GitInitDialog(): React.JSX.Element | null {
       if (newWorkspaceId) {
         const cwd = newProject.workspaces[0]?.worktreePath ?? newProject.path ?? '~'
         const newKey = `${newProject.id}:${newWorkspaceId}`
-        useTabsStore.getState().restoreWorkspace(newKey, cwd)
+        // #681 (Bug A) — await restoreWorkspace, then ensure the pinned
+        // Chat + Inbox tabs (this git-init-open path previously created no
+        // pinned tabs at all, so a freshly git-init'd workspace opened
+        // with neither surface visible). Mirrors addProject.
+        await useTabsStore.getState().restoreWorkspace(newKey, cwd)
+        ensurePinnedAgentTabForMode(newProject.agentMode, newProject.path)
       } else {
         useTabsStore.getState().clearAllTabs()
       }

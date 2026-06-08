@@ -53,12 +53,24 @@ const addToast = vi.fn()
 vi.mock('./toast', () => ({
   useToastStore: { getState: () => ({ addToast }) },
 }))
+// #681 (Bug A) — restoreWorkspace is now async (Promise<void>); the open
+// paths await/chain it before ensurePinnedAgentTabForMode. The mock must
+// resolve so the `.then()` chain runs and so the ordering test can observe
+// ensure firing AFTER restore settles. `callOrder` records the sequence.
+const callOrder: string[] = []
+const restoreWorkspaceMock = vi.fn(() => {
+  callOrder.push('restore')
+  return Promise.resolve()
+})
+const ensurePinnedMock = vi.fn(() => {
+  callOrder.push('ensure')
+})
 vi.mock('./tabs', () => ({
   useTabsStore: {
     getState: () => ({
       stashWorkspace: vi.fn(),
       clearAllTabs: vi.fn(),
-      restoreWorkspace: vi.fn(),
+      restoreWorkspace: (...args: unknown[]) => restoreWorkspaceMock(...args),
       loadLayoutForWorkspace: vi.fn(),
       clearBackgroundWorkspace: vi.fn(),
       cancelWorkspaceChatReap: vi.fn(),
@@ -66,7 +78,7 @@ vi.mock('./tabs', () => ({
       backgroundWorkspaces: {},
     }),
   },
-  ensurePinnedAgentTabForMode: vi.fn(),
+  ensurePinnedAgentTabForMode: (...args: unknown[]) => ensurePinnedMock(...args),
   // #657 — projects.ts registers a lazy activeProjectId getter on the
   // tabs module at load time; the mock must expose the export so the
   // module-eval call resolves.
@@ -123,6 +135,9 @@ describe('projects store — Plan B host-aware migration', () => {
     daemonCliPost.mockReset()
     emitMock.mockClear()
     addToast.mockClear()
+    restoreWorkspaceMock.mockClear()
+    ensurePinnedMock.mockClear()
+    callOrder.length = 0
     resetStore()
   })
 
@@ -250,6 +265,57 @@ describe('projects store — Plan B host-aware migration', () => {
     const updated = (useProjectsStore.getState().projects as ProjectWithWorkspaces[])[0]
     expect(updated.lastInteractionAt).not.toBeNull()
     expect(daemonCliPost).toHaveBeenCalledWith('projects/touch-interaction', { id: 'p-click' })
+  })
+
+  // #681 (Bug A) — opening a brand-new workspace must ensure the pinned
+  // Chat + Inbox tabs only AFTER restoreWorkspace's (now async) slow-path
+  // layout load resolves. Before the fix the two raced (restoreWorkspace
+  // was fire-and-forget, then ensure ran synchronously), so on a never-
+  // opened workspace the pinned tabs didn't appear until a switch-away.
+  // We assert the ordering at the store level: restore THEN ensure, and
+  // ensure receives the project's agentMode + path.
+  it('setActiveWorkspace awaits restoreWorkspace BEFORE ensurePinnedAgentTabForMode (restore→ensure)', async () => {
+    const p = mkProject('p-aw') as unknown as ProjectWithWorkspaces
+    p.agentMode = 'manager'
+    p.workspaces = [{ id: 'w-aw', worktreePath: null } as never]
+    useProjectsStore.setState({
+      projects: [p],
+      activeProjectId: null,
+      activeWorkspaceId: null,
+    })
+    daemonCliPost.mockResolvedValue({ success: true })
+
+    useProjectsStore.getState().setActiveWorkspace('p-aw', 'w-aw')
+
+    // restore is invoked synchronously; ensure is deferred until the
+    // restore promise resolves (chained via .then). Flush microtasks.
+    expect(restoreWorkspaceMock).toHaveBeenCalledWith('p-aw:w-aw', '/tmp/p-aw')
+    expect(ensurePinnedMock).not.toHaveBeenCalled()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(ensurePinnedMock).toHaveBeenCalledWith('manager', '/tmp/p-aw')
+    expect(callOrder).toEqual(['restore', 'ensure'])
+  })
+
+  it('setActiveProject awaits restoreWorkspace BEFORE ensurePinnedAgentTabForMode (restore→ensure)', async () => {
+    const p = mkProject('p-ap2') as unknown as ProjectWithWorkspaces
+    p.agentMode = 'off'
+    p.workspaces = [{ id: 'w-ap2', worktreePath: null } as never]
+    useProjectsStore.setState({
+      projects: [p],
+      activeProjectId: null,
+      activeWorkspaceId: null,
+    })
+    daemonCliPost.mockResolvedValue({ success: true })
+
+    useProjectsStore.getState().setActiveProject('p-ap2')
+
+    expect(restoreWorkspaceMock).toHaveBeenCalledWith('p-ap2:w-ap2', '/tmp/p-ap2')
+    expect(ensurePinnedMock).not.toHaveBeenCalled()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(ensurePinnedMock).toHaveBeenCalledWith('off', '/tmp/p-ap2')
+    expect(callOrder).toEqual(['restore', 'ensure'])
   })
 
   it('a failed mutation does NOT emit sync', async () => {

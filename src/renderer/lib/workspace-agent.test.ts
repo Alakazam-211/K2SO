@@ -72,7 +72,7 @@ describe('workspace-agent — Plan B host-aware migration', () => {
   })
 })
 
-describe('reconcileColdBootSession (GH#679 — SQLite-canonical cold-boot revive)', () => {
+describe('reconcileColdBootSession (GH#679 revive + GH#681 no-phantom-resume)', () => {
   const ca = (over: Partial<ResumeChatArgs>): ResumeChatArgs => ({
     command: 'claude',
     args: [],
@@ -80,35 +80,52 @@ describe('reconcileColdBootSession (GH#679 — SQLite-canonical cold-boot revive
     ...over,
   })
 
-  it('SQLite session OVERRIDES the layout hint when it is a different resumable session', () => {
+  it('RESUMES the SQLite session when it is a different resumable conversation (GH#679)', () => {
     // The dropdown wrote `sqlite-new` to workspace_sessions, but the layout
     // JSON still carries the pre-switch `layout-old`. On cold boot SQLite wins.
     const result = reconcileColdBootSession(
       'layout-old',
       ca({ resumeSession: 'sqlite-new', resumedExisting: true }),
     )
-    expect(result).toBe('sqlite-new')
+    expect(result).toEqual({ kind: 'resume', sessionId: 'sqlite-new' })
   })
 
-  it('keeps the layout hint when SQLite matches it (no-op)', () => {
+  it('RESUMES the layout hint when SQLite matches it (no-op, real conversation)', () => {
     const result = reconcileColdBootSession(
       'same-sid',
       ca({ resumeSession: 'same-sid', resumedExisting: true }),
     )
-    expect(result).toBe('same-sid')
+    expect(result).toEqual({ kind: 'resume', sessionId: 'same-sid' })
   })
 
-  it('keeps the layout hint when SQLite pre-allocated a FRESH UUID (resumedExisting=false)', () => {
-    // No usable saved session in SQLite — the daemon minted a new UUID. We
-    // must NOT discard the renderer-canonical layout hint for it.
+  it('GH#681: does NOT --resume when SQLite pre-allocated a FRESH UUID (resumedExisting=false)', () => {
+    // Brand-new / never-chatted workspace: the daemon minted a new UUID and
+    // returned `--session-id <new>`. We must spawn those args verbatim, NOT
+    // --resume a session that has no conversation on disk.
     const result = reconcileColdBootSession(
-      'layout-old',
-      ca({ resumeSession: 'fresh-uuid', resumedExisting: false }),
+      'pre-allocated-uuid',
+      ca({
+        resumeSession: 'pre-allocated-uuid',
+        resumedExisting: false,
+        args: ['--dangerously-skip-permissions', '--session-id', 'pre-allocated-uuid'],
+      }),
     )
-    expect(result).toBe('layout-old')
+    expect(result).toEqual({
+      kind: 'fresh',
+      args: ['--dangerously-skip-permissions', '--session-id', 'pre-allocated-uuid'],
+      sessionId: 'pre-allocated-uuid',
+    })
+    // Hard guard: the resulting args must never contain --resume.
+    if (result.kind === 'fresh') {
+      expect(result.args).not.toContain('--resume')
+      expect(result.args).toContain('--session-id')
+    }
   })
 
-  it('keeps the layout hint when the daemon read failed (null canonical)', () => {
-    expect(reconcileColdBootSession('layout-old', null)).toBe('layout-old')
+  it('falls back to RESUMING the layout hint when the daemon read failed (null canonical)', () => {
+    expect(reconcileColdBootSession('layout-old', null)).toEqual({
+      kind: 'fallback',
+      sessionId: 'layout-old',
+    })
   })
 })

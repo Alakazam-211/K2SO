@@ -327,3 +327,49 @@ describe('#658 loadLayoutForWorkspace — awaited cold-boot ordering beats the e
     expect(chatTab()!.data.sessionId).toBe(SAVED_SESSION_ID)
   })
 })
+
+describe('#681 (Bug A) brand-new workspace — restoreWorkspace awaits load, ensure shows Chat+Inbox', () => {
+  beforeEach(() => {
+    reset()
+    h.state.resolveLayoutLoad = null
+    h.state.loadLayoutJson = null
+    daemonCliGet.mockClear()
+  })
+
+  it('restoreWorkspace (no live tabs, no saved layout) RESOLVES, then ensure surfaces pinned Chat+Inbox with Chat active', async () => {
+    // Brand-new / never-chatted workspace: no background tabs, no saved
+    // layout JSON (loadLayoutJson stays null → loadLayoutForWorkspace
+    // takes the launchDefaultAgent branch). Before the fix restoreWorkspace
+    // was fire-and-forget and the projects store ran ensure synchronously,
+    // racing the post-await default-agent + layout work — so the pinned
+    // tabs didn't appear until a switch-away.
+    const restorePromise = useTabsStore.getState().restoreWorkspace(KEY, CWD)
+
+    // The slow path is parked at `await workspace-layouts/load`. The key is
+    // already set synchronously so the active-workspace guards pass.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(useTabsStore.getState().activeWorkspaceKey).toBe(KEY)
+    expect(h.state.resolveLayoutLoad).not.toBeNull()
+
+    // Resolve the (null) layout load → launchDefaultAgent is invoked and
+    // restoreWorkspace's promise settles. The mirror of the projects
+    // store's `await restoreWorkspace(...).then(ensure)` ordering.
+    h.state.resolveLayoutLoad!()
+    await restorePromise
+
+    // Now ensure runs (as the projects store does after the await). The
+    // active view is still empty (default-agent spawn is a deferred
+    // setTimeout that bails once pinned tabs exist), so ensure adopts the
+    // Chat tab as active and creates both pinned surfaces.
+    useTabsStore.getState().ensureSystemAgentTabs('resolved-agent', CWD, 'Agent')
+
+    const tabs = useTabsStore.getState().tabs
+    const chat = tabs.find((t) => t.isSystemAgent && t.title === 'Chat')
+    const inbox = tabs.find((t) => t.isSystemAgent && t.title === 'Inbox')
+    expect(chat).toBeDefined()
+    expect(inbox).toBeDefined()
+    // Chat must be the active tab so it renders + spawns on first open.
+    expect(useTabsStore.getState().activeTabId).toBe(chat!.id)
+  })
+})

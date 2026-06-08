@@ -673,7 +673,7 @@ interface TabsState {
   // Background workspace management
   launchDefaultAgent: (key: string, cwd: string) => void
   stashWorkspace: (key: string) => void
-  restoreWorkspace: (key: string, cwd: string) => void
+  restoreWorkspace: (key: string, cwd: string) => Promise<void>
   serializeAllWorkspaces: (activeKey: string) => Promise<void>
   clearBackgroundWorkspace: (key: string) => void
   // #672 — the renderer reaper API (scheduleWorkspaceChatReap /
@@ -3529,7 +3529,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     })
   },
 
-  restoreWorkspace: (key: string, cwd: string) => {
+  restoreWorkspace: async (key: string, cwd: string): Promise<void> => {
     const state = get()
     const live = state.backgroundWorkspaces[key]
     if (live && (live.tabs.length > 0 || live.extraGroups.length > 0)) {
@@ -3577,10 +3577,20 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       get().clearAllTabs()
     }
 
-    // No live tabs — fall back to serialized layout (creates new PTYs)
+    // No live tabs — fall back to serialized layout (creates new PTYs).
+    //
+    // #681 (Bug A) — AWAIT the slow-path load so this promise resolves
+    // only AFTER `loadLayoutForWorkspace` has cleared the old tabs, set
+    // `activeWorkspaceKey`, and (for a brand-new workspace) kicked off
+    // `launchDefaultAgent`. The new-workspace open paths in the projects
+    // store (addProject / setActiveProject / setActiveWorkspace) await
+    // restoreWorkspace before calling `ensurePinnedAgentTabForMode`,
+    // mirroring the #658 cold-boot ordering: the pinned Chat + Inbox
+    // tabs are created deterministically AFTER the workspace key is set,
+    // so they appear on first open instead of only after a switch-away.
     const [projectId, workspaceId] = key.split(':')
     if (projectId && workspaceId) {
-      get().loadLayoutForWorkspace(projectId, workspaceId, cwd)
+      await get().loadLayoutForWorkspace(projectId, workspaceId, cwd)
     }
     // Pinned agent tab is ensured by the projects store after restoreWorkspace
   },

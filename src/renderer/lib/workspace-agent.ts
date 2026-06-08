@@ -82,30 +82,65 @@ export async function resumeChatArgs(projectPath: string): Promise<ResumeChatArg
   })
 }
 
-/** GH#679 — cold-boot revive reconciliation. Given the layout-restored
- *  sessionId hint and the daemon's canonical `resume-chat-args` response
- *  (which reads `workspace_sessions.session_id` from SQLite), decide which
- *  session the pinned chat should actually resume.
+/** The cold-boot Step-0 launch decision. The pinned chat must only
+ *  `--resume` a session that ACTUALLY EXISTS on disk; otherwise claude
+ *  errors with "No conversation found with session ID: <uuid>"
+ *  (GH#681). The daemon already knows the answer via `resumedExisting`,
+ *  so this decision encodes WHICH command shape to spawn:
  *
- *  SQLite is the source of truth: when the daemon resolved an EXISTING
- *  resumable session (`resumedExisting`) that DIFFERS from the layout hint,
- *  the daemon's session wins. Otherwise (no canonical response, a freshly
- *  pre-allocated UUID, or an identical session) the layout hint is kept —
- *  preserving the renderer-canonical offline / DB-race resilience the
- *  canonical-lane-restore PRD was built for.
+ *   - `resume`   → `claude --dangerously-skip-permissions --resume <sessionId>`
+ *                  (a real prior conversation — preserves GH#679 revive).
+ *   - `fresh`    → spawn the daemon's returned `args` verbatim
+ *                  (`--session-id <new>` — a clean NEW session pinned to
+ *                  the persisted UUID; NEVER `--resume`).
+ *   - `fallback` → daemon read failed; we couldn't verify the session.
+ *                  Resume the layout hint to preserve offline / DB-race
+ *                  resilience (the canonical-lane-restore design).
+ */
+export type ColdBootDecision =
+  | { kind: 'resume'; sessionId: string }
+  | { kind: 'fresh'; args: string[]; sessionId: string }
+  | { kind: 'fallback'; sessionId: string }
+
+/** GH#679 + GH#681 — cold-boot revive reconciliation. Given the
+ *  layout-restored sessionId hint and the daemon's canonical
+ *  `resume-chat-args` response (which reads `workspace_sessions.session_id`
+ *  from SQLite + checks the JSONL on disk), decide HOW the pinned chat
+ *  should launch.
+ *
+ *  `resumedExisting` is authoritative for whether we resume at all:
+ *
+ *   - `true`  → the daemon found a resumable conversation. Resume it
+ *               (SQLite wins over the layout hint when they differ — the
+ *               GH#679 dropdown-switch / crash-window revive).
+ *   - `false` → the daemon pre-allocated a FRESH UUID (no usable saved
+ *               session — e.g. a brand-new, never-chatted workspace).
+ *               We must NOT `--resume` it; spawn the daemon's
+ *               `--session-id <new>` args verbatim so claude starts a
+ *               clean session pinned to the persisted id (GH#681).
+ *   - `null`  → daemon unreachable. Fall back to resuming the layout
+ *               hint, preserving offline / DB-race resilience.
  *
  *  Pure + side-effect-free so the decision is unit-testable without
  *  rendering AgentChatPane. */
 export function reconcileColdBootSession(
   layoutHint: string,
   canonical: ResumeChatArgs | null,
-): string {
-  if (
-    canonical?.resumedExisting &&
-    canonical.resumeSession &&
-    canonical.resumeSession !== layoutHint
-  ) {
-    return canonical.resumeSession
+): ColdBootDecision {
+  if (!canonical) {
+    return { kind: 'fallback', sessionId: layoutHint }
   }
-  return layoutHint
+  if (canonical.resumedExisting) {
+    // A real prior conversation. SQLite wins when it differs from the
+    // layout hint; otherwise the hint and the canonical agree.
+    const sessionId = canonical.resumeSession || layoutHint
+    return { kind: 'resume', sessionId }
+  }
+  // resumedExisting === false → fresh pre-allocated session. Use the
+  // daemon's args directly (they are `--session-id <new>`). NEVER resume.
+  return {
+    kind: 'fresh',
+    args: canonical.args,
+    sessionId: canonical.resumeSession || layoutHint,
+  }
 }

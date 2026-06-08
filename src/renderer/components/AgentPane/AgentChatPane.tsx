@@ -8,7 +8,7 @@ import { TerminalPane } from '@/terminal-v2/TerminalPane'
 import { agentChatId } from '@/lib/terminal-id'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { daemonCliGet } from '@/lib/daemon-cli'
-import { agentDisplayName, resumeChatArgs, reconcileColdBootSession } from '@/lib/workspace-agent'
+import { agentDisplayName, resumeChatArgs, reconcileColdBootSession, type ColdBootDecision } from '@/lib/workspace-agent'
 import { useActiveAgentsStore } from '@/stores/active-agents'
 
 interface AgentChatPaneProps {
@@ -326,59 +326,75 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     const resolve = async (): Promise<void> => {
       const myTerminalId = terminalIdRef.current
 
-      // 0.37.12 / GH#679 — Step 0: the serialized layout carries a
+      // 0.37.12 / GH#679 / GH#681 — Step 0: the serialized layout carries a
       // sessionId hint, but `workspace_sessions.session_id` in SQLite is
       // the SOURCE OF TRUTH (the dropdown's set-chat-session and every
       // daemon-side spawn write it). On cold boot we RECONCILE the layout
-      // hint against the daemon's canonical session and let SQLite win
-      // when it has a resumable session that differs from the hint —
-      // otherwise a stale layout snapshot (e.g. saved before the dropdown
-      // switched, or a crash window) would resume the wrong conversation.
+      // hint against the daemon's canonical session.
       //
-      // We still skip the roundtrip's failure modes gracefully: if the
-      // daemon read fails or returns a freshly pre-allocated UUID
-      // (resumedExisting === false, i.e. SQLite had nothing usable), we
-      // KEEP the layout hint — preserving the offline / DB-race
-      // resilience the renderer-canonical design (canonical-lane-restore
-      // PRD) was built for.
+      // GH#681: Step 0 must only `--resume` a session that ACTUALLY
+      // EXISTS on disk — otherwise a pre-allocated UUID (stamped as the
+      // layout hint by a daemon `--session-id` spawn on a brand-new,
+      // never-chatted workspace) gets `--resume`d on the next remount and
+      // claude errors "No conversation found with session ID: <uuid>".
+      // The daemon already tells us via `resumedExisting`, so we gate on
+      // its decision rather than blindly resuming the hint:
+      //   - resume   → real prior conversation (GH#679 SQLite-canonical revive)
+      //   - fresh    → pre-allocated `--session-id <new>`; spawn verbatim, NEVER resume
+      //   - fallback → daemon unreachable; resume the layout hint (offline resilience)
       if (restoredSessionId && !cancelled) {
-        let effectiveSessionId = restoredSessionId
+        let decision: ColdBootDecision = { kind: 'fallback', sessionId: restoredSessionId }
         try {
           const canonical = await resumeChatArgs(projectPath)
-          effectiveSessionId = reconcileColdBootSession(restoredSessionId, canonical)
-          if (effectiveSessionId !== restoredSessionId) {
-            console.info(
-              '[AgentChatPane] cold-boot revive: SQLite session',
-              effectiveSessionId,
-              'overrides layout hint',
-              restoredSessionId,
-            )
-          }
+          decision = reconcileColdBootSession(restoredSessionId, canonical)
         } catch (err) {
           // Daemon unreachable / route error — fall back to the layout
           // hint (renderer-canonical resilience). Do NOT block revive.
           console.warn('[AgentChatPane] cold-boot SQLite reconcile failed, using layout hint:', err)
         }
         if (cancelled) return
-        // `claude --resume <X>` reloads an existing conversation;
-        // matches what k2so_agents_resume_chat_args would have
-        // returned for a workspace whose chat session has fired
-        // before. Skipping permissions matches workspace agent
-        // defaults across the rest of K2SO.
-        setLaunchConfig({
-          command: 'claude',
-          args: ['--dangerously-skip-permissions', '--resume', effectiveSessionId],
-          cwd: projectPath,
-        })
+
+        if (decision.kind === 'fresh') {
+          // resumedExisting === false → brand-new / pre-allocated session.
+          // Spawn the daemon's `--session-id <new>` args verbatim so claude
+          // starts a CLEAN session pinned to the persisted id (no --resume).
+          console.info(
+            '[AgentChatPane] cold-boot fresh session (resumedExisting=false):',
+            decision.sessionId,
+            '— launching with --session-id, NOT --resume',
+          )
+          setLaunchConfig({
+            command: 'claude',
+            args: decision.args,
+            cwd: projectPath,
+          })
+        } else {
+          // resume (real conversation) or fallback (daemon down) →
+          // `claude --resume <X>`. Skipping permissions matches workspace
+          // agent defaults across the rest of K2SO.
+          if (decision.kind === 'resume' && decision.sessionId !== restoredSessionId) {
+            console.info(
+              '[AgentChatPane] cold-boot revive: SQLite session',
+              decision.sessionId,
+              'overrides layout hint',
+              restoredSessionId,
+            )
+          }
+          setLaunchConfig({
+            command: 'claude',
+            args: ['--dangerously-skip-permissions', '--resume', decision.sessionId],
+            cwd: projectPath,
+          })
+        }
         daemonCliGet('agents/lock', {
           project: projectPath,
           agent: agentName,
           terminal_id: myTerminalId,
           owner: 'user',
         }).catch(() => {})
-        // Re-stamp so the layout converges on the reconciled session
-        // (no-op when effectiveSessionId === restoredSessionId).
-        stampSessionId(effectiveSessionId)
+        // Re-stamp so the layout converges on the resolved session
+        // (no-op when it already equals restoredSessionId).
+        stampSessionId(decision.sessionId)
         setReady(true)
         return
       }

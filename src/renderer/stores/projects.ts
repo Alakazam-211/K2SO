@@ -379,7 +379,14 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         if (newWorkspaceId) {
           const cwd = newProject.workspaces[0]?.worktreePath ?? newProject.path ?? '~'
           const newKey = `${newProject.id}:${newWorkspaceId}`
-          tabsStore.restoreWorkspace(newKey, cwd)
+          // #681 (Bug A) — AWAIT restoreWorkspace before ensuring the
+          // pinned tabs (mirrors the #658 cold-boot ordering). For a
+          // brand-new workspace restoreWorkspace falls through to the slow
+          // path → loadLayoutForWorkspace clears tabs + sets the workspace
+          // key; awaiting guarantees ensurePinnedAgentTabForMode then
+          // creates the Chat + Inbox tabs (Chat active) deterministically,
+          // so they show on first open instead of only after a switch-away.
+          await tabsStore.restoreWorkspace(newKey, cwd)
           ensurePinnedAgentTabForMode(newProject.agentMode, newProject.path)
         } else {
           tabsStore.clearAllTabs()
@@ -436,7 +443,9 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
         if (firstWorkspaceId) {
           const cwd = first.workspaces[0]?.worktreePath ?? first.path ?? '~'
           const newKey = `${first.id}:${firstWorkspaceId}`
-          tabsStore.restoreWorkspace(newKey, cwd)
+          // #681 (Bug A) — ensure pinned tabs after the layout load resolves
+          // (consistent with the other open paths).
+          await tabsStore.restoreWorkspace(newKey, cwd)
           ensurePinnedAgentTabForMode(first.agentMode, first.path)
         }
       }
@@ -489,8 +498,17 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
       if (newWorkspaceId) {
         const cwd = project.workspaces[0]?.worktreePath ?? project.path ?? '~'
         const newKey = `${id}:${newWorkspaceId}`
-        tabsStore.restoreWorkspace(newKey, cwd)
-        ensurePinnedAgentTabForMode(project.agentMode, project.path)
+        // #681 (Bug A) — ensure pinned tabs only AFTER restoreWorkspace's
+        // slow-path layout load finishes (mirrors #658 / addProject). The
+        // live fast path resolves immediately; the brand-new / no-saved-
+        // layout path resolves after the workspace key + cleared tabs are
+        // in place, so Chat + Inbox are created deterministically (Chat
+        // active) on first open rather than only after a switch-away. The
+        // store contract stays `=> void`; we chain rather than await so the
+        // signature doesn't change for callers.
+        void tabsStore.restoreWorkspace(newKey, cwd).then(() => {
+          ensurePinnedAgentTabForMode(project.agentMode, project.path)
+        })
       }
 
       // P1.B — clicking a project in the icon rail is a real interaction:
@@ -545,10 +563,16 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const workspace = project?.workspaces.find((w) => w.id === workspaceId)
     const cwd = workspace?.worktreePath ?? project?.path ?? '~'
     const newKey = `${projectId}:${workspaceId}`
-    tabsStore.restoreWorkspace(newKey, cwd)
-    if (project) {
-      ensurePinnedAgentTabForMode(project.agentMode, project.path)
-    }
+    // #681 (Bug A) — ensure pinned tabs only AFTER restoreWorkspace's
+    // slow-path layout load finishes (mirrors #658 / addProject /
+    // setActiveProject). For a brand-new / never-opened workspace this is
+    // what makes the pinned Chat + Inbox (Chat active) appear on first
+    // open instead of only after switching away and back.
+    void tabsStore.restoreWorkspace(newKey, cwd).then(() => {
+      if (project) {
+        ensurePinnedAgentTabForMode(project.agentMode, project.path)
+      }
+    })
   },
 
   reorderProjects: async (ids: string[]) => {
