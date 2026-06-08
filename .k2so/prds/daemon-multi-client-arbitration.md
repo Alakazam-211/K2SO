@@ -58,9 +58,23 @@ viewer's resizes are dropped. (The 0.39.42 tab-order loop fix already cut the
    follow-up `Resize`. This makes "most-recent viewer drives size" true.
 3. **Don't re-claim on a bare re-mount.** Renderer: only emit `set_active:true`
    on a genuine focus transition, not on every mount (guard via the existing
-   `computeDesiredActive` + a "last-sent" ref so a re-mount with unchanged focus
-   inputs doesn't re-claim). A window that isn't the focused viewer must
+   `computeDesiredActive` + a "last-sent" value **keyed per-session so it
+   survives re-mounts**). The guard keys on focus STATE, not on the re-mount
+   event — a real focus change still claims; only a refresh with unchanged focus
+   inputs is suppressed. A window that isn't the focused viewer must
    `set_active:false` (release) so a remote viewer's claim sticks.
+4. **INPUT also claims active-viewer (clean back-and-forth — Rosson).** A
+   focus-only model breaks across two machines: both clients can be
+   `windowFocused` simultaneously (each on its own OS), so the local user
+   *typing* produces no focus transition and wouldn't reclaim. So the daemon
+   treats an `Input{text}` frame as a claim too:
+   > **`active_subscriber` = the most-recent client to EITHER focus-claim
+   > (`set_active:true`) OR send `Input`.**
+   On `Input` from subscriber X (`sessions_grid_ws.rs:458`), set
+   `active_subscriber = X` (idempotent) and resize to X's last-known dims. So
+   the re-mount guard can NEVER strand a genuinely-interacting viewer — the
+   instant the local user types they become active again (and vice-versa for
+   the remote). Whoever last typed or focused owns the size.
 
 ### Edge cases
 - Single client (no `set_active` ever) → `active==0` first-resize-wins, unchanged.
