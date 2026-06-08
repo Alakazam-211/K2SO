@@ -18,7 +18,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Strip a `/.worktrees/<branch>` suffix to get the root project path.
 /// `/repo/.worktrees/feature-x` -> `/repo`. Used so every worktree of
@@ -310,6 +310,77 @@ pub fn claude_session_file_exists(session_id: &str, project_path: &str) -> bool 
         }
     }
     false
+}
+
+/// The most-recently-modified Claude session `.jsonl` on disk for this
+/// `project_path` (the bare `<hash>` dir + any `<hash>-<branch>`
+/// worktree siblings) — i.e. the session a running `claude` is
+/// actively appending to, or the latest prior conversation. Returns the
+/// session id (file stem), or `None` when the workspace has no on-disk
+/// session at all (a genuinely brand-new workspace).
+///
+/// GH#24: the pinned-chat resolver
+/// ([`crate::workspace::resume_chat::resolve_resume_chat_args`]) uses
+/// this to **resume** the real session instead of minting a throwaway
+/// `--session-id` when the saved id's JSONL is missing. Minting +
+/// overwriting an unconfirmed id that a *reused* (already-live) PTY
+/// never actually runs left its JSONL absent forever, so every
+/// subsequent resolve re-minted — an endless loop on remote/companion
+/// clients, which re-ask on each reconnect. The dir set here mirrors
+/// [`claude_session_file_exists`] exactly, so any id returned is
+/// guaranteed to pass that existence check on the next resolve (the
+/// happy path), making the resolver convergent.
+///
+/// Zero-byte files are skipped: a `--session-id <new>` that was
+/// pre-allocated but never run leaves an empty file that `--resume`
+/// would reject with "No conversation found".
+pub fn newest_claude_session_on_disk(project_path: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let project_hash = claude_project_hash(resolve_root_project_path(project_path));
+    let projects_dir = home.join(".claude").join("projects");
+    newest_session_in_projects_dir(&projects_dir, &project_hash)
+}
+
+/// Inner, dependency-free core of [`newest_claude_session_on_disk`] —
+/// takes the `~/.claude/projects` dir explicitly so it's testable
+/// without mutating the process `$HOME`.
+fn newest_session_in_projects_dir(projects_dir: &Path, project_hash: &str) -> Option<String> {
+    let entries = fs::read_dir(projects_dir).ok()?;
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name == *project_hash || name.starts_with(&format!("{}-", project_hash))) {
+            continue;
+        }
+        let Ok(session_files) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for sf in session_files.flatten() {
+            let path = sf.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(meta) = sf.metadata() else {
+                continue;
+            };
+            if meta.len() == 0 {
+                continue;
+            }
+            let Ok(mtime) = meta.modified() else {
+                continue;
+            };
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            match &best {
+                Some((best_mtime, _)) if mtime <= *best_mtime => {}
+                _ => best = Some((mtime, stem.to_string())),
+            }
+        }
+    }
+
+    best.map(|(_, id)| id)
 }
 
 /// Return the most recent Cursor chat ID for a project path (by
@@ -2629,6 +2700,94 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
         }
+    }
+
+    // ── GH#24: newest-on-disk session resolution ───────────────────
+    //
+    // `newest_session_in_projects_dir` is the convergence helper the
+    // pinned-chat resolver uses to RESUME a real session instead of
+    // minting a throwaway `--session-id` (which a reused PTY never runs
+    // → endless re-mint loop on remote clients). These exercise the
+    // inner, HOME-free core directly.
+
+    /// Set a file's mtime so tests can order "newest" deterministically
+    /// (filesystem write order alone isn't reliable at coarse mtime
+    /// granularity). Requires the file opened with write perms.
+    fn set_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for set_mtime");
+        f.set_modified(t).expect("set_modified");
+    }
+
+    #[test]
+    fn newest_session_picks_latest_nonempty_and_skips_empty() {
+        let tmp = U6TempDir::new("newest-session");
+        let projects = tmp.path.join(".claude").join("projects");
+        let hash = "-Users-z-proj-nsi";
+        let dir = projects.join(hash);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let old = dir.join("old-aaaa.jsonl");
+        let new = dir.join("new-bbbb.jsonl");
+        let empty = dir.join("empty-cccc.jsonl");
+        std::fs::write(&old, b"{\"cwd\":\"/x\"}\n").unwrap();
+        std::fs::write(&new, b"{\"cwd\":\"/x\"}\n").unwrap();
+        std::fs::write(&empty, b"").unwrap();
+
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        set_mtime(&old, base);
+        set_mtime(&new, base + std::time::Duration::from_secs(10));
+        // `empty` is the NEWEST by mtime but 0-byte → must be ignored
+        // (a never-run `--session-id` pre-allocation; `--resume` would
+        // say "No conversation found").
+        set_mtime(&empty, base + std::time::Duration::from_secs(20));
+
+        assert_eq!(
+            newest_session_in_projects_dir(&projects, hash).as_deref(),
+            Some("new-bbbb")
+        );
+    }
+
+    #[test]
+    fn newest_session_includes_worktree_siblings_and_ignores_other_projects() {
+        let tmp = U6TempDir::new("newest-session-wt");
+        let projects = tmp.path.join(".claude").join("projects");
+        let hash = "-Users-z-proj-nsi";
+        let wt_dir = projects.join(format!("{hash}-feature-x"));
+        let other_dir = projects.join("-Users-z-proj-OTHER");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+
+        // A worktree-sibling session (older) and an UNRELATED project's
+        // session (newest overall — must NOT be picked).
+        let wt = wt_dir.join("wt-1111.jsonl");
+        let other = other_dir.join("other-9999.jsonl");
+        std::fs::write(&wt, b"{\"cwd\":\"/x\"}\n").unwrap();
+        std::fs::write(&other, b"{\"cwd\":\"/y\"}\n").unwrap();
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000);
+        set_mtime(&wt, base);
+        set_mtime(&other, base + std::time::Duration::from_secs(99));
+
+        assert_eq!(
+            newest_session_in_projects_dir(&projects, hash).as_deref(),
+            Some("wt-1111")
+        );
+    }
+
+    #[test]
+    fn newest_session_none_for_brand_new_workspace() {
+        let tmp = U6TempDir::new("newest-session-empty");
+        let projects = tmp.path.join(".claude").join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        // No slug dir for this hash at all → genuinely brand-new → None
+        // (the resolver then mints a fresh `--session-id`, preserving the
+        // brand-new-workspace behavior from #681).
+        assert_eq!(
+            newest_session_in_projects_dir(&projects, "-Users-z-proj-nsi"),
+            None
+        );
     }
 
     #[test]

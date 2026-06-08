@@ -8,13 +8,23 @@
 //! 1. **A saved session_id exists in `workspace_sessions` AND its JSONL
 //!    is present on disk** — return `claude --resume <id>` so the
 //!    same conversation continues. The user's chat history is intact.
-//! 2. **No saved session_id, OR its JSONL is gone** (workspace
-//!    remove+readd, claude pruning, manual SQL clears) — pre-allocate
-//!    a fresh UUID, persist it via `workspace_sessions.session_id`
-//!    BEFORE claude spawns (so v2_spawn's auto-stamp hook can match
-//!    it against `--session-id <X>` in argv), then return
-//!    `claude --session-id <X>`. The session is "pre-decided" — the
-//!    pinned tab and any subsequent attach see the same UUID.
+//! 2. **The saved id's JSONL is gone, BUT the workspace has another
+//!    real session on disk** (workspace remove+readd, manual SQL
+//!    clear, a never-run pre-allocation left over from an earlier mint,
+//!    OR a reused pinned-chat PTY that's actively running a
+//!    bare-spawned session) — resume the **most-recently-active**
+//!    on-disk session and persist its id, instead of minting a fresh
+//!    one. This is the GH#24 convergence fix: minting + overwriting an
+//!    unconfirmed `--session-id` that a *reused* PTY never runs left
+//!    its JSONL absent forever, so every resolve re-minted — an endless
+//!    loop on remote/companion clients (they re-ask on each reconnect).
+//! 3. **No saved session AND no on-disk session at all** (a genuinely
+//!    brand-new workspace) — pre-allocate a fresh UUID, persist it via
+//!    `workspace_sessions.session_id` BEFORE claude spawns (so
+//!    v2_spawn's auto-stamp hook can match it against `--session-id
+//!    <X>` in argv), then return `claude --session-id <X>`. The session
+//!    is "pre-decided" — the pinned tab and any subsequent attach see
+//!    the same UUID.
 //!
 //! Lifted from `src-tauri/src/commands/k2so_agents.rs::k2so_agents_resume_chat_args`
 //! (which was a Tauri-side command pre-0.37.5). Moving it to k2so-core
@@ -105,10 +115,49 @@ pub fn resolve_resume_chat_args(project_path: &str) -> Result<ResumeChatArgs, St
         }
     }
 
-    // No saved session (or its JSONL is gone) — pre-allocate the
-    // session UUID and pin it via `--session-id <X>`. Persist to
-    // workspace_sessions.session_id BEFORE claude spawns so v2_spawn's
-    // auto-stamp hook sees the matching id in argv.
+    // GH#24 convergence fix. The saved id's JSONL is missing (a never-run
+    // pre-allocation, a workspace remove+readd, a manual clear) — but the
+    // workspace may still have a REAL prior session on disk: the one a
+    // reused/live pinned-chat PTY is actually running, or the user's last
+    // conversation. Resume the most-recently-active one and persist it,
+    // instead of minting a throwaway `--session-id`.
+    //
+    // Why this is the root fix: when the canonical PTY is REUSED
+    // (`reused=true`), claude is NOT re-spawned, so a freshly-minted
+    // `--session-id <new>` never gets written to disk. The old code still
+    // overwrote `workspace_sessions.session_id = <new>`, so the next
+    // resolve saw "saved id, no JSONL" → minted AGAIN. Remote/companion
+    // clients re-request resume-args on every reconnect, turning that into
+    // an unbounded re-mint / re-resume loop. Resuming the real on-disk
+    // session makes the resolver converge: the persisted id now passes the
+    // `claude_session_file_exists` happy-path check above on the next call.
+    if let Some(existing) = crate::chat_history::newest_claude_session_on_disk(project_path) {
+        if let Some(pid) = project_id.as_deref() {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            let row_id = uuid::Uuid::new_v4().to_string();
+            let _ = conn.execute(
+                "INSERT INTO workspace_sessions (id, project_id, session_id, harness, owner, status, created_at) \
+                 VALUES (?1, ?2, ?3, 'claude', 'user', 'running', unixepoch()) \
+                 ON CONFLICT(project_id) DO UPDATE SET session_id = ?3, last_activity_at = unixepoch()",
+                params![row_id, pid, existing],
+            );
+        }
+        args.push("--resume".to_string());
+        args.push(existing.clone());
+        return Ok(ResumeChatArgs {
+            command: "claude".to_string(),
+            args,
+            cwd: project_path.to_string(),
+            resume_session: existing,
+            resumed_existing: true,
+        });
+    }
+
+    // Genuinely brand-new workspace: no saved session AND nothing on disk.
+    // Pre-allocate the session UUID and pin it via `--session-id <X>`.
+    // Persist to workspace_sessions.session_id BEFORE claude spawns so
+    // v2_spawn's auto-stamp hook sees the matching id in argv.
     let new_sid = uuid::Uuid::new_v4().to_string();
     if let Some(pid) = project_id.as_deref() {
         let db = crate::db::shared();
