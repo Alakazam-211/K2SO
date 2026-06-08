@@ -58,6 +58,7 @@ mod llm_host;
 mod llm_routes;
 mod misc_routes;
 mod pending_live;
+mod pinned_chat;
 mod project_config_routes;
 mod providers;
 mod review_checklist_routes;

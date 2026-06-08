@@ -47,6 +47,7 @@ pub mod llm_host;
 pub mod llm_routes;
 pub mod misc_routes;
 pub mod pending_live;
+pub mod pinned_chat;
 pub mod project_config_routes;
 pub mod providers;
 pub mod review_checklist_routes;

@@ -389,6 +389,14 @@ async fn handle_one_request(
             | "/cli/heartbeat/set-show-sessions"
             | "/cli/relations/create"
             | "/cli/relations/delete"
+            // K2SO 0.39.39 — daemon-owned pinned-chat session lifecycle
+            // (decision D1: ONE idempotent endpoint w/ forceRespawn).
+            // JSON body carries {project, forceRespawn}; find-or-spawn
+            // under the canonical key. Method-gated per-handler below
+            // (feedback_post_only_route_guards) — the top-level dispatch
+            // lets a GET through on POST-allowlisted routes, so the arm
+            // re-asserts `require_post`.
+            | "/cli/workspace/ensure-pinned-chat"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -712,6 +720,48 @@ async fn handle_one_request(
             }
             let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
             let result = crate::v2_spawn::handle_v2_close(&body_bytes);
+            super::http::send_response(&mut *stream, result.status, "application/json", &result.body)
+                .await;
+        }
+        // POST /cli/workspace/ensure-pinned-chat — K2SO 0.39.39
+        // daemon-owned pinned-chat session lifecycle (decision D1:
+        // ONE idempotent endpoint). Body: {project, forceRespawn?}.
+        // Resolves the canonical Claude argv via resume_chat, then
+        // find-or-spawns under the bare-`<project_id>` canonical key
+        // (atomic allocate+register closes the #682 dup-`--session-id`
+        // race). ADDED alongside resume-chat-args / v2/spawn /
+        // set-chat-session — none of those are removed (the renderer
+        // keeps its current path until a later capability-gated cutover).
+        //
+        // Auth: owner OR connect-user session (token_ok) — same gate as
+        // set-chat-session / resume-chat-args which reach the /cli/*
+        // catchall. Method gate: explicit require_post (the top-level
+        // dispatch lets a GET through on POST-allowlisted routes; see
+        // feedback_post_only_route_guards).
+        "/cli/workspace/ensure-pinned-chat" => {
+            if !super::http::require_post(&mut *stream, &mut buf, is_post).await {
+                return DispatchOutcome::Done;
+            }
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::pinned_chat::handle_ensure_pinned_chat(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::awareness_ws::HandlerResult {
+                status: "500 Internal Server Error",
+                body: serde_json::json!({ "error": format!("worker join: {e}") }).to_string(),
+            });
             super::http::send_response(&mut *stream, result.status, "application/json", &result.body)
                 .await;
         }
