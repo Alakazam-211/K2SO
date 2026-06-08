@@ -29,7 +29,12 @@ import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 
 import { useKesselConfig } from '../kessel/config-context'
 import { useIsTabVisible } from '@/contexts/TabVisibilityContext'
-import { computeDesiredActive, shouldHoldGridWs } from './activeViewer'
+import {
+  computeDesiredActive,
+  getLastSentActive,
+  recordSentActive,
+  shouldHoldGridWs,
+} from './activeViewer'
 import {
   keyEventToSequence,
   naturalTextEditingSequence,
@@ -1493,6 +1498,13 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // yet") whenever `wsRef.current` changes identity (a new WS = a new
   // dedup window). See the effect below.
   const lastSentActiveRef = useRef<boolean | null>(null)
+  // 0.39.43 (PRD Issue A) — has THIS component instance sent its first
+  // `set_active` yet? The cross-remount dedup (skip a re-claim when a
+  // bare re-mount didn't change focus) only applies to the FIRST send
+  // of a fresh instance. Subsequent sends within the same instance —
+  // genuine focus transitions and WS-reconnect re-primes — must always
+  // go out (a reconnect's daemon subscriber is new and needs the claim).
+  const hasSentActiveThisInstanceRef = useRef(false)
   // Issue #8 — stable handle to the "recompute desired active state and
   // send it (dedup-guarded)" routine. Lives in a ref so the boot
   // effect's WS-connect path (a different `[]`-deps effect) can call
@@ -1526,8 +1538,47 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       if (lastSentActiveRef.current === active) return
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
-      ws.send(JSON.stringify({ action: 'set_active', active }))
+      const sessionId = sessionIdRef.current
+      // 0.39.43 (PRD Issue A) — cross-remount re-claim suppression.
+      // On the FIRST send from this fresh component instance, if the
+      // previous instance already sent this exact value for this
+      // session, the re-mount changed nothing on the wire: skip it so
+      // the local window doesn't re-steal the daemon's active slot from
+      // a remote viewer on a bare re-mount (attachNonce bump). Genuine
+      // focus transitions compute a DIFFERENT value → not skipped.
+      // WS-reconnect re-primes (same instance, hasSent=true) bypass
+      // this — their daemon subscriber is new and needs the claim.
+      if (
+        !hasSentActiveThisInstanceRef.current &&
+        sessionId &&
+        getLastSentActive(sessionId) === active
+      ) {
+        // Adopt the persisted value as our dedup baseline so later
+        // recomputes in this instance still short-circuit correctly,
+        // but emit nothing now.
+        lastSentActiveRef.current = active
+        hasSentActiveThisInstanceRef.current = true
+        return
+      }
+      // 0.39.43 (PRD Issue A) — carry the active viewer's current
+      // viewport dims on the CLAIM so the daemon snaps the PTY to our
+      // size the instant we become active (no waiting for the follow-up
+      // Resize frame). Release (`active:false`) carries no dims. Dims
+      // are optional on the wire — an older daemon ignores them.
+      const payload: {
+        action: 'set_active'
+        active: boolean
+        cols?: number
+        rows?: number
+      } = { action: 'set_active', active }
+      if (active && lastResizeRef.current) {
+        payload.cols = lastResizeRef.current.cols
+        payload.rows = lastResizeRef.current.rows
+      }
+      ws.send(JSON.stringify(payload))
       lastSentActiveRef.current = active
+      hasSentActiveThisInstanceRef.current = true
+      if (sessionId) recordSentActive(sessionId, active)
     }
 
     // Issue #8 — single source of truth for the active claim. The
@@ -1601,6 +1652,14 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
       if (ws && ws.readyState === WebSocket.OPEN && lastSentActiveRef.current === true) {
         ws.send(JSON.stringify({ action: 'set_active', active: false }))
         lastSentActiveRef.current = false
+        // 0.39.43 (PRD Issue A): deliberately do NOT
+        // `recordSentActive(sessionId, false)` here. This release is a
+        // teardown artifact, not a focus decision. On a bare re-mount
+        // (attachNonce bump) the new instance must see the last GENUINE
+        // active decision (still `true` if the user remained focused)
+        // so it can skip a redundant re-claim. Recording `false` here
+        // would poison that baseline and make every re-mount re-claim
+        // — exactly the local-window-re-steals bug we're fixing.
       }
     }
     // NOTE: `phase.kind` was previously in this dep array — pre-Issue

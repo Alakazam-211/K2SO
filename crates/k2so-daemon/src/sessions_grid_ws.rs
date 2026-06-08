@@ -45,8 +45,8 @@ use tokio_tungstenite::tungstenite::Message;
 use k2so_core::log_debug;
 use k2so_core::session::SessionId;
 use k2so_core::terminal::{
-    build_emit, snapshot_term, AlacEvent, EmitDecision, EmitState,
-    TermGridDelta, TermGridSnapshot,
+    build_emit, snapshot_term, AlacEvent, DaemonPtySession, EmitDecision,
+    EmitState, TermGridDelta, TermGridSnapshot,
 };
 
 use crate::v2_session_map;
@@ -116,7 +116,23 @@ enum Inbound {
     /// blur. Once the daemon-side `active_subscriber` is set,
     /// resize from non-active subscribers is ignored — eliminates
     /// the "two windows fighting over the TUI size" problem.
-    SetActive { active: bool },
+    ///
+    /// 0.39.43 (PRD `daemon-multi-client-arbitration.md` Issue A) —
+    /// the claim now optionally carries the viewer's current viewport
+    /// `cols`/`rows`. On a real claim the daemon records them on the
+    /// session AND immediately resizes the PTY to them, so the grid
+    /// snaps to the active viewer's size on claim instead of waiting
+    /// for a follow-up `Resize`. `cols`/`rows` are optional for
+    /// back-compat: an older client that sends `{action:'set_active',
+    /// active:true}` (no dims) behaves exactly as before — the claim
+    /// is recorded but the PTY size is left untouched.
+    SetActive {
+        active: bool,
+        #[serde(default)]
+        cols: Option<u16>,
+        #[serde(default)]
+        rows: Option<u16>,
+    },
 }
 
 /// 0.37.11 — monotonically-increasing subscriber id generator.
@@ -166,6 +182,88 @@ fn decide_set_active(current: u64, subscriber_id: u64, active: bool) -> SetActiv
             SetActiveOutcome::NoOp
         }
     }
+}
+
+/// Apply a `SetActive { active, cols, rows }` frame to the session.
+///
+/// Computes the transition with [`decide_set_active`] (idempotence
+/// rules from Issue #8) and applies only real state changes:
+///
+/// - **Claim** — store our `subscriber_id` as the active subscriber,
+///   displacing any prior claimer (most-recent-claim-wins). 0.39.43
+///   (PRD `daemon-multi-client-arbitration.md` Issue A): if the claim
+///   carried the viewer's viewport `cols`/`rows`, record them on the
+///   session AND immediately [`DaemonPtySession::resize`] the PTY to
+///   them — the active viewer drives the size the instant they claim,
+///   no waiting for a follow-up `Resize`. Dims are optional for
+///   back-compat: an older client that claims with no dims records the
+///   claim but leaves the PTY size untouched (pre-0.39.43 behavior).
+/// - **Release** — CAS-clear the active subscriber so a viewer that
+///   took over concurrently isn't accidentally cleared.
+/// - **NoOp** — redundant claim/release: no store, no resize, no log.
+///
+/// Returns the outcome so callers/tests can assert what happened.
+/// Extracted from the WS loop so the store + resize behavior is
+/// unit-testable against a real `DaemonPtySession` without a socket.
+fn apply_set_active(
+    session: &DaemonPtySession,
+    subscriber_id: u64,
+    active: bool,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> SetActiveOutcome {
+    let prev = session
+        .active_subscriber
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let outcome = decide_set_active(prev, subscriber_id, active);
+    match outcome {
+        SetActiveOutcome::Claim => {
+            session.active_subscriber.store(
+                subscriber_id,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if let (Some(c), Some(r)) = (cols, rows) {
+                session
+                    .active_cols
+                    .store(c, std::sync::atomic::Ordering::Relaxed);
+                session
+                    .active_rows
+                    .store(r, std::sync::atomic::Ordering::Relaxed);
+                session.resize(c, r);
+                log_debug!(
+                    "[v2-perf] side=daemon stage=active_claim \
+                     session={} sub={} cols={} rows={} \
+                     (resized to active viewer)",
+                    session.session_id,
+                    subscriber_id,
+                    c,
+                    r,
+                );
+            } else {
+                log_debug!(
+                    "[v2-perf] side=daemon stage=active_claim \
+                     session={} sub={} (no dims)",
+                    session.session_id,
+                    subscriber_id,
+                );
+            }
+        }
+        SetActiveOutcome::Release => {
+            let _ = session.active_subscriber.compare_exchange(
+                subscriber_id,
+                0,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            log_debug!(
+                "[v2-perf] side=daemon stage=active_release session={} sub={}",
+                session.session_id,
+                subscriber_id,
+            );
+        }
+        SetActiveOutcome::NoOp => {}
+    }
+    outcome
 }
 
 pub async fn serve_session_grid_connection(
@@ -481,7 +579,7 @@ pub async fn serve_session_grid_connection(
                                     );
                                 }
                             }
-                            Ok(Inbound::SetActive { active }) => {
+                            Ok(Inbound::SetActive { active, cols, rows }) => {
                                 // Issue #8 backstop: make the claim/release
                                 // handler idempotent. A long-lived window
                                 // with many mounted-but-hidden panes used
@@ -497,53 +595,13 @@ pub async fn serve_session_grid_connection(
                                 // transition with a pure helper (unit-tested
                                 // below), apply only real state changes, and
                                 // only log when something actually changed.
-                                let prev = session
-                                    .active_subscriber
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                match decide_set_active(prev, subscriber_id, active) {
-                                    SetActiveOutcome::Claim => {
-                                        // Real claim: we weren't already the
-                                        // active subscriber. Previous claimer
-                                        // (if any) is silently displaced —
-                                        // most-recent claim wins.
-                                        session.active_subscriber.store(
-                                            subscriber_id,
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
-                                        log_debug!(
-                                            "[v2-perf] side=daemon stage=active_claim \
-                                             session={} sub={}",
-                                            session.session_id,
-                                            subscriber_id,
-                                        );
-                                    }
-                                    SetActiveOutcome::Release => {
-                                        // Real release: we held the claim and
-                                        // are giving it up. CAS so a viewer
-                                        // that took over before us isn't
-                                        // accidentally cleared.
-                                        let _ = session
-                                            .active_subscriber
-                                            .compare_exchange(
-                                                subscriber_id,
-                                                0,
-                                                std::sync::atomic::Ordering::Relaxed,
-                                                std::sync::atomic::Ordering::Relaxed,
-                                            );
-                                        log_debug!(
-                                            "[v2-perf] side=daemon stage=active_release \
-                                             session={} sub={}",
-                                            session.session_id,
-                                            subscriber_id,
-                                        );
-                                    }
-                                    SetActiveOutcome::NoOp => {
-                                        // Redundant claim/release — no state
-                                        // change, no log. This is the Issue #8
-                                        // backstop: silence the churn instead
-                                        // of faithfully re-storing + re-logging.
-                                    }
-                                }
+                                apply_set_active(
+                                    &session,
+                                    subscriber_id,
+                                    active,
+                                    cols,
+                                    rows,
+                                );
                             }
                             Err(e) => {
                                 log_debug!(
@@ -685,5 +743,159 @@ mod tests {
         // clear sub 9's claim and must NOT log. The runtime CAS would
         // also reject this, but we short-circuit before logging.
         assert_eq!(decide_set_active(9, 7, false), SetActiveOutcome::NoOp);
+    }
+
+    // 0.39.43 (PRD `daemon-multi-client-arbitration.md` Issue A):
+    // `apply_set_active` must record the active viewer's dims on the
+    // session AND snap the PTY to them on a real claim, so the active
+    // viewer drives the size the instant they claim. These tests spawn
+    // a real `DaemonPtySession` (a `cat` subprocess on unix, mirroring
+    // the daemon_pty.rs label tests) and exercise the helper the WS
+    // loop calls. They require a tokio runtime because the session's
+    // broadcast channel lives inside a tokio module.
+
+    #[cfg(unix)]
+    fn spawn_test_session() -> std::sync::Arc<DaemonPtySession> {
+        use k2so_core::terminal::{DaemonPtyConfig, LabelSource};
+        let cfg = DaemonPtyConfig {
+            session_id: SessionId::new(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(std::path::PathBuf::from("/tmp")),
+            program: Some("cat".to_string()),
+            args: vec![],
+            env: Default::default(),
+            drain_on_exit: true,
+            label: String::new(),
+            label_source: LabelSource::Pty,
+        };
+        DaemonPtySession::spawn(cfg).expect("spawn cat")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_with_dims_records_and_resizes_pty() {
+        use k2so_core::terminal::Dimensions;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let s = spawn_test_session();
+        // Sanity: starts at the spawn dims, no dims captured yet.
+        {
+            let tm = s.term();
+            let t = tm.lock();
+            assert_eq!(t.columns() as u16, 80);
+            assert_eq!(t.screen_lines() as u16, 24);
+        }
+        assert_eq!(s.active_cols.load(Relaxed), 0);
+        assert_eq!(s.active_rows.load(Relaxed), 0);
+
+        // Subscriber 7 claims active WITH its viewport dims.
+        let outcome = apply_set_active(&s, 7, true, Some(120), Some(40));
+        assert_eq!(outcome, SetActiveOutcome::Claim);
+        assert_eq!(s.active_subscriber.load(Relaxed), 7);
+        // Dims recorded on the session...
+        assert_eq!(s.active_cols.load(Relaxed), 120);
+        assert_eq!(s.active_rows.load(Relaxed), 40);
+        // ...AND the PTY snapped to them immediately (no follow-up Resize).
+        {
+            let tm = s.term();
+            let t = tm.lock();
+            assert_eq!(t.columns() as u16, 120, "PTY must resize to claimer dims");
+            assert_eq!(t.screen_lines() as u16, 40);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn second_claim_resizes_to_its_dims() {
+        use k2so_core::terminal::Dimensions;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let s = spawn_test_session();
+        // Sub 7 claims at 120x40.
+        assert_eq!(
+            apply_set_active(&s, 7, true, Some(120), Some(40)),
+            SetActiveOutcome::Claim
+        );
+        // Sub 9 claims (displacing 7) at ITS dims 100x30 — most-recent
+        // viewer wins, PTY resizes to 9's size.
+        let outcome = apply_set_active(&s, 9, true, Some(100), Some(30));
+        assert_eq!(outcome, SetActiveOutcome::Claim);
+        assert_eq!(s.active_subscriber.load(Relaxed), 9);
+        assert_eq!(s.active_cols.load(Relaxed), 100);
+        assert_eq!(s.active_rows.load(Relaxed), 30);
+        {
+            let tm = s.term();
+            let t = tm.lock();
+            assert_eq!(t.columns() as u16, 100, "PTY must follow most-recent claimer");
+            assert_eq!(t.screen_lines() as u16, 30);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_without_dims_is_back_compat_no_resize() {
+        use k2so_core::terminal::Dimensions;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let s = spawn_test_session();
+        // Older client: claim with NO dims. Records the claim, leaves
+        // the PTY size untouched (pre-0.39.43 behavior).
+        let outcome = apply_set_active(&s, 7, true, None, None);
+        assert_eq!(outcome, SetActiveOutcome::Claim);
+        assert_eq!(s.active_subscriber.load(Relaxed), 7);
+        assert_eq!(s.active_cols.load(Relaxed), 0, "no dims captured");
+        assert_eq!(s.active_rows.load(Relaxed), 0);
+        {
+            let tm = s.term();
+            let t = tm.lock();
+            assert_eq!(t.columns() as u16, 80, "PTY size unchanged on dimless claim");
+            assert_eq!(t.screen_lines() as u16, 24);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_clears_active_subscriber() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let s = spawn_test_session();
+        apply_set_active(&s, 7, true, Some(120), Some(40));
+        assert_eq!(s.active_subscriber.load(Relaxed), 7);
+        // `active:false` from the holder releases the claim.
+        let outcome = apply_set_active(&s, 7, false, None, None);
+        assert_eq!(outcome, SetActiveOutcome::Release);
+        assert_eq!(s.active_subscriber.load(Relaxed), 0, "claim cleared on release");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn back_compat_deserialize_set_active_without_dims() {
+        // An older client sends `{action:'set_active', active:true}`
+        // with no cols/rows — must deserialize with None dims.
+        let parsed: Inbound =
+            serde_json::from_str(r#"{"action":"set_active","active":true}"#)
+                .expect("legacy set_active must still parse");
+        match parsed {
+            Inbound::SetActive { active, cols, rows } => {
+                assert!(active);
+                assert_eq!(cols, None);
+                assert_eq!(rows, None);
+            }
+            other => panic!("expected SetActive, got {other:?}"),
+        }
+        // New client with dims parses them.
+        let parsed: Inbound = serde_json::from_str(
+            r#"{"action":"set_active","active":true,"cols":120,"rows":40}"#,
+        )
+        .expect("set_active with dims must parse");
+        match parsed {
+            Inbound::SetActive { active, cols, rows } => {
+                assert!(active);
+                assert_eq!(cols, Some(120));
+                assert_eq!(rows, Some(40));
+            }
+            other => panic!("expected SetActive, got {other:?}"),
+        }
     }
 }

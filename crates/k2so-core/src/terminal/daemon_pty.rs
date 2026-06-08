@@ -287,6 +287,19 @@ pub struct DaemonPtySession {
     /// focus change, not per-frame).
     pub active_subscriber: std::sync::atomic::AtomicU64,
 
+    /// 0.39.43 (PRD `daemon-multi-client-arbitration.md` Issue A) —
+    /// the active viewer's viewport dimensions, captured on the
+    /// `SetActive { active:true, cols, rows }` claim. When a viewer
+    /// becomes active, the WS handler stores their cols/rows here AND
+    /// immediately `resize()`s the PTY to them, so the grid snaps to
+    /// the active viewer's size on claim instead of waiting for a
+    /// follow-up `Resize` frame. `0` means "no dims captured yet"
+    /// (an older client claimed without dims, or no claim has carried
+    /// dims) — in that case the claim leaves the PTY size untouched,
+    /// matching pre-0.39.43 behavior.
+    pub active_cols: std::sync::atomic::AtomicU16,
+    pub active_rows: std::sync::atomic::AtomicU16,
+
     /// Authoritative human-friendly label (Phase B / PRD
     /// `session-label-daemon-owned.md`). The daemon owns this
     /// string; every consumer (Tauri tabs, mobile companion, CLI
@@ -504,6 +517,8 @@ impl DaemonPtySession {
             events_tx,
             child_exited: std::sync::atomic::AtomicBool::new(false),
             active_subscriber: std::sync::atomic::AtomicU64::new(0),
+            active_cols: std::sync::atomic::AtomicU16::new(0),
+            active_rows: std::sync::atomic::AtomicU16::new(0),
             label: std::sync::RwLock::new(cfg.label),
             label_source: std::sync::RwLock::new(cfg.label_source),
             label_tx,

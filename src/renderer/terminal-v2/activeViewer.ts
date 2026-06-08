@@ -73,3 +73,70 @@ export interface GridWsInputs {
 export function shouldHoldGridWs(inputs: GridWsInputs): boolean {
   return inputs.visible && !inputs.exited
 }
+
+// 0.39.43 (PRD `daemon-multi-client-arbitration.md` Issue A) —
+// cross-remount active-claim dedup.
+//
+// The per-component `lastSentActiveRef` in TerminalPane resets on every
+// mount. So a BARE re-mount (e.g. AgentChatPane bumps `attachNonce`,
+// remounting TerminalPane under a new React key) re-runs the initial
+// claim and re-sends `set_active:true` even though the user's focus
+// never changed — letting the local window re-steal the daemon's
+// active-subscriber slot from a remote viewer (the "local wins on
+// refresh" path). The PRD fix: persist the last-sent active value
+// keyed by the canonical session id so it SURVIVES re-mounts.
+//
+// On a fresh TerminalPane instance's FIRST claim attempt, we consult
+// this map: if the value we're about to send equals what the last
+// instance already sent for this session, the re-mount changed nothing
+// on the wire — skip the send (no re-steal). A genuine focus transition
+// computes a DIFFERENT desired value → not deduped → claims/releases
+// correctly. A genuine WS reconnect within the SAME instance bypasses
+// this (it must re-prime the new daemon subscriber) — that path is
+// gated separately in TerminalPane by a per-instance "first connect"
+// flag, not by this map.
+//
+// Keyed by the daemon session id (the PTY identity): an idempotent
+// re-attach across a bare re-mount returns the SAME session id, so the
+// dedup window is shared; a real session switch gets a new id and a
+// fresh (undefined) entry, so it always claims.
+const lastSentActiveBySession = new Map<string, boolean>()
+
+/**
+ * Record the active value just sent on the wire for `sessionId`, so a
+ * later re-mount can detect "nothing changed" and skip a redundant
+ * re-claim. Call this every time a `set_active` frame is actually sent.
+ */
+export function recordSentActive(sessionId: string, active: boolean): void {
+  lastSentActiveBySession.set(sessionId, active)
+}
+
+/**
+ * The last active value sent for `sessionId` across ALL TerminalPane
+ * instances (survives re-mounts), or `undefined` if none was ever sent
+ * (brand-new / freshly-switched session). Used by a fresh instance's
+ * initial claim to decide whether a re-mount actually changed anything.
+ */
+export function getLastSentActive(sessionId: string): boolean | undefined {
+  return lastSentActiveBySession.get(sessionId)
+}
+
+/**
+ * Whether a fresh TerminalPane instance's INITIAL claim for `sessionId`
+ * should be suppressed: true iff the desired value equals what the
+ * previous instance already sent for this session (a bare re-mount with
+ * unchanged focus → re-sending would needlessly re-steal the daemon's
+ * active slot). Returns false when the value differs (genuine focus
+ * transition) or when nothing was ever sent (new session must claim).
+ */
+export function shouldSkipRemountReclaim(
+  sessionId: string,
+  desired: boolean,
+): boolean {
+  return lastSentActiveBySession.get(sessionId) === desired
+}
+
+/** Test-only: clear the cross-remount dedup map between cases. */
+export function __resetActiveViewerDedupForTests(): void {
+  lastSentActiveBySession.clear()
+}
