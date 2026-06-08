@@ -4317,6 +4317,97 @@ async function applyTabTitlesSnapshot(projectId: string): Promise<void> {
   }
 }
 
+/** Stable identity for matching a tab across a layout save/restore round-trip.
+ *  `paneGroupId`s are preserved on the main group (restoreLayout "Reuse the
+ *  saved ID", tabs.ts:2839), but the tab's own `id` is re-minted on restore.
+ *  So a tab's signature is its sorted, joined paneGroupId set — this matches a
+ *  serialized tab to the live `Tab` that owns the same panes regardless of the
+ *  re-minted tab id. */
+function serializedTabSignature(t: SerializedTab): string {
+  const pgIds = t.paneGroups ? Object.keys(t.paneGroups) : []
+  return pgIds.slice().sort().join(' ')
+}
+
+function liveTabSignature(t: Tab): string {
+  return Array.from(t.paneGroups.keys()).slice().sort().join(' ')
+}
+
+/** If the incoming `layout.tabs` is a PURE REORDER of the live main `tabs`
+ *  (same SET of tabs by signature, same count, just a different order), adopt
+ *  the new order IN PLACE — reusing the existing `Tab` objects so each tab's
+ *  `id` (the React key) and live `paneGroups`/terminals survive. React then
+ *  MOVES the existing terminal components instead of unmounting+remounting
+ *  them (no respawn, no flicker, no pinned-chat `ensure-pinned-chat` re-fire).
+ *
+ *  Returns `true` when it handled the change in place; `false` when the SET
+ *  differs (a tab was added/removed on the peer) and the caller must fall back
+ *  to the full `restoreLayout` rebuild.
+ *
+ *  Only the main `tabs` group is eligible: when the live workspace has split
+ *  `extraGroups`, the order spans multiple groups and we defer to the full
+ *  rebuild (returns false). All state mutation here runs under the caller's
+ *  `withLayoutSaveSuppressed` window so it never echoes a save. */
+function tryReorderTabsInPlace(key: string, layout: SerializedLayout): boolean {
+  const state = useTabsStore.getState()
+
+  // Split layouts: order spans multiple groups — defer to the full rebuild.
+  if (state.extraGroups.length > 0) return false
+  if (layout.extraGroups && layout.extraGroups.length > 0) return false
+
+  const liveTabs = state.tabs
+  const newOrder = layout.tabs
+  if (newOrder.length !== liveTabs.length) return false
+  if (liveTabs.length === 0) return false
+
+  // Build signature -> live Tab. If two live tabs share a signature (no panes,
+  // or an unexpected collision) we can't match 1:1 deterministically — bail to
+  // the full rebuild rather than risk a mis-order.
+  const bySignature = new Map<string, Tab>()
+  for (const t of liveTabs) {
+    const sig = liveTabSignature(t)
+    if (bySignature.has(sig)) return false
+    bySignature.set(sig, t)
+  }
+
+  // Map each entry in the new order 1:1 to a live tab by signature. Any miss
+  // (a tab added/removed on the peer) or duplicate consumption means the SET
+  // differs → fall back.
+  const reordered: Tab[] = []
+  const consumed = new Set<Tab>()
+  for (const st of newOrder) {
+    const sig = serializedTabSignature(st)
+    const live = bySignature.get(sig)
+    if (!live || consumed.has(live)) return false
+    consumed.add(live)
+    reordered.push(live)
+  }
+  if (reordered.length !== liveTabs.length) return false
+
+  // Preserve the active tab object: find which serialized tab is active, then
+  // keep the matching live tab's id active (its id is unchanged here).
+  let nextActiveId = state.activeTabId
+  if (layout.activeTabId) {
+    const activeSerialized = newOrder.find((t) => t.id === layout.activeTabId)
+    if (activeSerialized) {
+      const liveActive = bySignature.get(serializedTabSignature(activeSerialized))
+      if (liveActive) nextActiveId = liveActive.id
+    }
+  }
+  // If the previously-active id somehow isn't in the (unchanged) set, anchor to
+  // the first tab of the new order.
+  if (!nextActiveId || !reordered.some((t) => t.id === nextActiveId)) {
+    nextActiveId = reordered[0]?.id ?? null
+  }
+
+  useTabsStore.setState((s) => ({
+    tabs: reordered,
+    activeTabId: nextActiveId,
+    workspaceLayouts: { ...s.workspaceLayouts, [key]: layout },
+  }))
+  console.warn(`[tabs] adopted remote tab-order (in place) for ${key}`)
+  return true
+}
+
 /** Re-fetch the canonical layout after a remote client reordered ahead of
  *  our base revision (#677.3) and adopt it, so we don't silently keep a
  *  stale local order. Guards on the workspace still being active. */
@@ -4335,13 +4426,14 @@ async function refetchLayoutForRemoteReorder(
     if (!json) return
     const layout = JSON.parse(json) as SerializedLayout
     if (!layout.tabs || layout.tabs.length === 0) return
-    useTabsStore.setState((s) => ({ workspaceLayouts: { ...s.workspaceLayouts, [key]: layout } }))
-    // Adopt the peer's layout SILENTLY. `restoreLayout`'s `set(...)` fires the
-    // autosave subscription synchronously; suppressing across that call stops
-    // the echoing `workspace-layouts/save` that would re-broadcast and make two
-    // clients ping-pong forever (#676/#677 0.39.39 regression). The base
-    // revision was already advanced via `recordLayoutRevision` at the call
-    // site, so a duplicate broadcast at this revision stays a no-op.
+    // Adopt the peer's layout SILENTLY. Whether we reorder in place or fall
+    // back to `restoreLayout`, the mutation runs under suppression so the
+    // autosave subscription (which fires synchronously inside the store's
+    // `set(...)`) does NOT echo a `workspace-layouts/save` back to the daemon
+    // — the echo that would re-broadcast `TabOrderChanged` and make two clients
+    // ping-pong forever (#676/#677 0.39.39 regression). The base revision was
+    // already advanced via `recordLayoutRevision` at the call site, so a
+    // duplicate broadcast at this revision stays a no-op.
     //
     // Also cancel any pending pre-adoption autosave: its debounced timer fires
     // ~1s later (after suppression has lowered) and would serialize CURRENT
@@ -4350,9 +4442,19 @@ async function refetchLayoutForRemoteReorder(
     // higher revision), so dropping the pending save is correct, not lossy.
     cancelPendingLayoutSave()
     withLayoutSaveSuppressed(() => {
+      // #2 (companion to #1): if the change is a PURE REORDER of the current
+      // live tabs (same set, different order), permute the EXISTING `Tab`
+      // objects in place — reusing each tab's `id` (the React key) and live
+      // `paneGroups`/terminals. React moves the terminal components without
+      // unmounting, so a cross-client reorder is visual-only (no terminal
+      // reload, no pinned-chat re-ensure). Only when the tab SET actually
+      // differs (add/remove on the peer) do we fall back to the full
+      // `restoreLayout` rebuild (which re-mints tab/pane ids → remount).
+      if (tryReorderTabsInPlace(key, layout)) return
+      useTabsStore.setState((s) => ({ workspaceLayouts: { ...s.workspaceLayouts, [key]: layout } }))
       useTabsStore.getState().restoreLayout(layout, cwd)
+      console.warn(`[tabs] adopted remote tab-order reorder (rebuild) for ${key}`)
     })
-    console.warn(`[tabs] adopted remote tab-order reorder for ${key}`)
   } catch (err) {
     console.warn('[tabs] remote-reorder re-fetch failed:', err)
   }

@@ -668,6 +668,178 @@ describe('tabs — silent remote-reorder adoption (no echo loop) (#676/#677)', (
   })
 })
 
+// ── tabs: in-place reorder on remote adoption — no remount/flicker (#676/#677)
+//
+// Companion to the silent-adoption fix: a PURE reorder of the current tab set
+// (same tabs, different order) must permute the EXISTING `Tab` objects in
+// place — preserving each tab's `id` (the React key) and its live
+// `paneGroups`/terminals — instead of the full `restoreLayout` rebuild (which
+// re-mints every tab/pane id → React unmounts+remounts every terminal AND the
+// pinned-chat pane → a full terminal reload/flicker for a single reorder).
+// `restoreLayout` is the fallback ONLY when the tab SET actually differs.
+describe('tabs — in-place reorder on remote adoption (no remount) (#676/#677)', () => {
+  // Seed a live workspace with TWO tabs (each owning one paneGroup) so a
+  // reorder is meaningful. After restore, tab ids are re-minted but the main-
+  // group paneGroupIds are preserved ("Reuse the saved ID"), which is the
+  // stable identity the in-place reorder matches on. Returns the live tab
+  // ids/pgIds (post-restore) + the registered handler bundle.
+  async function openWorkspaceWithTwoLiveTabs(
+    tabsMod: typeof import('./tabs'),
+    key: string,
+    cwd: string,
+  ): Promise<{
+    tabIds: string[]
+    pgIds: string[]
+    handlers: Record<string, (...a: unknown[]) => void>
+  }> {
+    const { useTabsStore } = tabsMod
+    useTabsStore.setState({
+      tabs: [],
+      extraGroups: [],
+      activeTabId: null,
+      activeWorkspaceKey: null,
+      backgroundWorkspaces: {
+        [key]: {
+          tabs: [
+            {
+              id: 'seed-1',
+              title: 'One',
+              mosaicTree: 'pg-1',
+              paneGroups: new Map([['pg-1', { id: 'pg-1', items: [], activeItemIndex: 0 }]]),
+            },
+            {
+              id: 'seed-2',
+              title: 'Two',
+              mosaicTree: 'pg-2',
+              paneGroups: new Map([['pg-2', { id: 'pg-2', items: [], activeItemIndex: 0 }]]),
+            },
+          ],
+          activeTabId: 'seed-1',
+          extraGroups: [],
+          splitCount: 1,
+          activeGroupIndex: 0,
+        },
+      } as never,
+    })
+    await useTabsStore.getState().restoreWorkspace(key, cwd)
+    expect(ev.reg.tabSubs.length).toBe(1)
+    const liveTabs = useTabsStore.getState().tabs
+    expect(liveTabs.length).toBe(2)
+    return {
+      tabIds: liveTabs.map((t) => t.id),
+      pgIds: liveTabs.map((t) => Array.from(t.paneGroups.keys())[0]),
+      handlers: ev.reg.tabSubs[0].handlers,
+    }
+  }
+
+  // A serialized tab carrying a single paneGroup keyed by `pgId` — the shape
+  // the daemon persists and `workspace-layouts/load` returns.
+  function serializedTabFor(pgId: string, title: string) {
+    return {
+      id: `serialized-${pgId}`,
+      title,
+      mosaicTree: pgId,
+      paneGroups: { [pgId]: { id: pgId, items: [], activeItemIndex: 0 } },
+    }
+  }
+
+  it('PURE reorder permutes the SAME tab ids in place — no new ids, no save POST', async () => {
+    vi.useFakeTimers()
+    const tabsMod = await import('./tabs')
+    const { useTabsStore, __setLayoutRevisionForTests } = tabsMod
+    const { tabIds, pgIds, handlers } = await openWorkspaceWithTwoLiveTabs(
+      tabsMod,
+      'projC:wsC',
+      '/ws/c',
+    )
+
+    __setLayoutRevisionForTests('projC:wsC', 2)
+    // Peer reordered: the SAME two paneGroups in SWAPPED order.
+    const remoteLayout = {
+      version: 2,
+      tabs: [serializedTabFor(pgIds[1], 'Two'), serializedTabFor(pgIds[0], 'One')],
+      activeTabId: `serialized-${pgIds[0]}`,
+      splitCount: 1,
+      activeGroupIndex: 0,
+    }
+    cli.getImpl = async (route: string) =>
+      route === 'workspace-layouts/load' ? JSON.stringify(remoteLayout) : null
+    cli.posts = []
+
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed',
+      workspacePath: '/ws/c',
+      project: 'projC',
+      workspace: 'wsC',
+      revision: 7,
+    })
+    await vi.runAllTimersAsync()
+
+    const after = useTabsStore.getState().tabs
+    // Same SET of ids, reversed order — a permutation of the EXISTING tabs.
+    expect(after.map((t) => t.id)).toEqual([tabIds[1], tabIds[0]])
+    // The exact same Set of ids (no id was minted / dropped → no remount).
+    expect(new Set(after.map((t) => t.id))).toEqual(new Set(tabIds))
+    // paneGroupIds (and thus the live terminals) were reused, not re-minted.
+    expect(after.map((t) => Array.from(t.paneGroups.keys())[0])).toEqual([pgIds[1], pgIds[0]])
+    // The active tab object stayed active (its id is unchanged in place).
+    expect(useTabsStore.getState().activeTabId).toBe(tabIds[0])
+    // Adoption was visual-only — NO save echoed back to the daemon.
+    expect(cli.posts.find((p) => p.route === 'workspace-layouts/save')).toBeUndefined()
+  })
+
+  it('falls back to restoreLayout (rebuild) when the tab SET differs (tab added)', async () => {
+    vi.useFakeTimers()
+    const tabsMod = await import('./tabs')
+    const { useTabsStore, __setLayoutRevisionForTests } = tabsMod
+    const { tabIds, pgIds, handlers } = await openWorkspaceWithTwoLiveTabs(
+      tabsMod,
+      'projC:wsC',
+      '/ws/c',
+    )
+
+    __setLayoutRevisionForTests('projC:wsC', 2)
+    // Peer ADDED a third tab (new paneGroup) — the SET differs, so the
+    // in-place path must NOT apply; the full rebuild adopts the new tab.
+    const remoteLayout = {
+      version: 2,
+      tabs: [
+        serializedTabFor(pgIds[0], 'One'),
+        serializedTabFor(pgIds[1], 'Two'),
+        serializedTabFor('pg-3-new', 'Three'),
+      ],
+      activeTabId: 'serialized-pg-3-new',
+      splitCount: 1,
+      activeGroupIndex: 0,
+    }
+    cli.getImpl = async (route: string) =>
+      route === 'workspace-layouts/load' ? JSON.stringify(remoteLayout) : null
+    cli.posts = []
+
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed',
+      workspacePath: '/ws/c',
+      project: 'projC',
+      workspace: 'wsC',
+      revision: 7,
+    })
+    await vi.runAllTimersAsync()
+
+    const after = useTabsStore.getState().tabs
+    // The added tab was adopted → 3 tabs now.
+    expect(after.length).toBe(3)
+    expect(after.map((t) => t.title)).toEqual(['One', 'Two', 'Three'])
+    // restoreLayout re-mints tab ids on the rebuild path — the old ids are gone
+    // (this is the remount path we accept only when the set changed).
+    for (const oldId of tabIds) {
+      expect(after.some((t) => t.id === oldId)).toBe(false)
+    }
+    // Still silent — adoption never echoes a save (the #1 invariant holds on
+    // the fallback path too).
+    expect(cli.posts.find((p) => p.route === 'workspace-layouts/save')).toBeUndefined()
+  })
+})
+
 // ── heartbeat-sessions: heartbeat_state_changed (#677.1) ────────────────
 
 describe('heartbeat-sessions — heartbeat-live cutover (#677.1)', () => {
