@@ -20,9 +20,19 @@ files in the repo root for the full developer-facing changelog.
   opt back to live-only if you want a slimmer bundle.
 - **Rename tabs.** Double-click a tab — or right-click → **Rename Tab** — to give
   it your own name.
-- **Behind the scenes:** restored chat history now always binds to the workspace
-  that owns it (no more wrong-history on lookalike workspaces), plus test-suite
-  reliability fixes.
+- **Pinned-chat session picker, fixed and sturdier.** The dropdown reliably
+  switches the pinned chat to a past session, the reload button reloads the one
+  it names, and your chosen session is remembered across restarts (and reinstalls)
+  so it comes back without re-picking — it's stored on the server now.
+- **Brand-new workspaces open cleanly.** The pinned Chat + Inbox show up
+  immediately (no more "leave and come back"), and a workspace's first chat starts
+  fresh instead of failing on a not-yet-existent session.
+- **Remote access stays connected.** A connected machine's tunnel keeps itself
+  alive even if the Settings panel isn't open — the host renews its own lease, so
+  remote access no longer drops out from under you.
+- **Behind the scenes:** restored chat history always binds to the workspace that
+  owns it (no wrong-history on lookalike workspaces); a safety rail prevents a
+  misbehaving chat from respawning in a loop; plus test-suite reliability fixes.
 
 ## 0.39.37 — Settings layout polish for connected hosts
 
