@@ -200,7 +200,7 @@ async fn ensure_pinned_chat_fresh_spawns_and_registers() {
     let project = setup_project(workspace_id, "fresh");
     let project_path = project.to_string_lossy().into_owned();
 
-    let out = ensure_pinned_chat(&project_path, false)
+    let out = ensure_pinned_chat(&project_path, false, false)
         .expect("ensure should succeed on a never-chatted workspace");
 
     assert!(!out.reused, "cold workspace must spawn fresh");
@@ -255,10 +255,10 @@ async fn ensure_pinned_chat_second_call_reuses_no_duplicate() {
     let project = setup_project(workspace_id, "reuse");
     let project_path = project.to_string_lossy().into_owned();
 
-    let first = ensure_pinned_chat(&project_path, false).expect("first ensure");
+    let first = ensure_pinned_chat(&project_path, false, false).expect("first ensure");
     assert!(!first.reused, "first call must be a fresh spawn");
 
-    let second = ensure_pinned_chat(&project_path, false).expect("second ensure");
+    let second = ensure_pinned_chat(&project_path, false, false).expect("second ensure");
     assert!(
         second.reused,
         "second ensure without forceRespawn must reuse the live session"
@@ -293,7 +293,7 @@ async fn ensure_pinned_chat_force_respawn_replaces_and_emits_removed_then_added(
     let project = setup_project(workspace_id, "force");
     let project_path = project.to_string_lossy().into_owned();
 
-    let first = ensure_pinned_chat(&project_path, false).expect("first ensure");
+    let first = ensure_pinned_chat(&project_path, false, false).expect("first ensure");
     assert!(!first.reused);
     let original_session = first.session_id.clone();
     assert_eq!(
@@ -305,7 +305,7 @@ async fn ensure_pinned_chat_force_respawn_replaces_and_emits_removed_then_added(
     let mut rx = session_events::subscribe();
 
     let respawned =
-        ensure_pinned_chat(&project_path, true).expect("force_respawn ensure");
+        ensure_pinned_chat(&project_path, true, false).expect("force_respawn ensure");
     assert!(
         !respawned.reused,
         "force_respawn must spawn fresh, not reuse"
@@ -383,7 +383,7 @@ async fn ensure_pinned_chat_errors_when_workspace_unregistered() {
     init_for_tests();
     v2_session_map::clear_for_tests();
 
-    let result = ensure_pinned_chat("/tmp/k2so-pinned-chat-not-registered", false);
+    let result = ensure_pinned_chat("/tmp/k2so-pinned-chat-not-registered", false, false);
     assert!(result.is_err());
     assert!(
         result.unwrap_err().contains("project not registered"),
@@ -421,7 +421,7 @@ async fn ensure_pinned_chat_reused_returns_stable_session_id_across_calls() {
 
     // First ensure: resolver hits the happy path (saved id's JSONL is on
     // disk) → --resume <seeded>, fresh spawn under the canonical key.
-    let first = ensure_pinned_chat(&project_path, false).expect("first ensure");
+    let first = ensure_pinned_chat(&project_path, false, false).expect("first ensure");
     assert!(!first.reused, "first call spawns fresh");
     assert!(
         first.resumed_existing,
@@ -441,7 +441,7 @@ async fn ensure_pinned_chat_reused_returns_stable_session_id_across_calls() {
     // GH#24 regression lock. Each call re-resolves; with the JSONL still
     // on disk the resolver converges to the same id every time.
     for n in 0..3 {
-        let again = ensure_pinned_chat(&project_path, false).expect("reused ensure");
+        let again = ensure_pinned_chat(&project_path, false, false).expect("reused ensure");
         assert!(again.reused, "call #{n} must reuse the live PTY");
         assert_eq!(
             again.session_id, first.session_id,
@@ -482,7 +482,7 @@ async fn ensure_pinned_chat_brand_new_mints_with_no_on_disk_session() {
     let project_path = project.to_string_lossy().into_owned();
 
     // No write_on_disk_session: the workspace is genuinely Absent.
-    let out = ensure_pinned_chat(&project_path, false).expect("ensure on brand-new ws");
+    let out = ensure_pinned_chat(&project_path, false, false).expect("ensure on brand-new ws");
     assert!(
         !out.resumed_existing,
         "Absent workspace must MINT (--session-id), not --resume (#681)"
@@ -567,6 +567,154 @@ async fn restart_recovery_resumes_pinned_chat_from_ssot() {
         Some(prior),
         "restart-recovery must resume the SSOT id, got argv: {:?}",
         live.args
+    );
+
+    v2_session_map::clear_for_tests();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Issue B (daemon-multi-client-arbitration §6) — EXPLICIT SELECTION WINS.
+//
+// The dropdown switch persists the pick (set-chat-session) then ensures
+// with explicit_selection=true. The resolver must honor the saved id
+// directly and SKIP the GH#24 converge fallback — an explicit pick can
+// never be silently reverted to the newest on-disk session.
+//
+// This is the core regression lock for the no-op bug: B is picked but its
+// `.jsonl` is NOT on disk (path/slug divergence) while a NEWER session A
+// exists. On the AUTO path the converge fallback would clobber B → A
+// (that's the reproduced no-op). On the EXPLICIT path it must NOT.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_selection_of_on_disk_session_resumes_it_no_converge() {
+    let _g = lock();
+    init_for_tests();
+    v2_session_map::clear_for_tests();
+    let _home = HomeGuard::new("explicit-ok");
+    let _shim = install_claude_shim();
+
+    let workspace_id = "pinned-explicit-ok-ws";
+    let project = setup_project(workspace_id, "explicit-ok");
+    let project_path = project.to_string_lossy().into_owned();
+
+    // Two real on-disk sessions: B (older, the user's pick) and A (newest).
+    let session_b = "bbbbbbbb-0000-0000-0000-000000000000";
+    let session_a = "aaaaaaaa-1111-1111-1111-111111111111";
+    write_on_disk_session(&project_path, session_b);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write_on_disk_session(&project_path, session_a);
+
+    // Currently pinned to A (newest); the dropdown switch persists B.
+    set_saved_session_id(workspace_id, session_a);
+    set_saved_session_id(workspace_id, session_b); // = the set-chat-session call
+
+    // Explicit ensure (force_respawn + explicit_selection).
+    let out = ensure_pinned_chat(&project_path, true, true).expect("explicit ensure");
+
+    assert_eq!(
+        out.claude_session_id, session_b,
+        "explicit pick of B must resume B, not the newest A (converge skipped)"
+    );
+    assert!(
+        out.resumed_existing,
+        "B is on disk → --resume, resumed_existing=true"
+    );
+    assert!(
+        out.args.iter().any(|a| a == "--resume") && out.args.iter().any(|a| a == session_b),
+        "argv must carry --resume <B>, got: {:?}",
+        out.args
+    );
+    assert!(
+        !out.args.iter().any(|a| a == session_a),
+        "argv must NOT carry A, got: {:?}",
+        out.args
+    );
+
+    // The SSOT was NOT clobbered back to A by a converge fallback.
+    assert_eq!(
+        saved_session_id(workspace_id).as_deref(),
+        Some(session_b),
+        "workspace_sessions.session_id must stay B after an explicit switch"
+    );
+
+    v2_session_map::clear_for_tests();
+}
+
+// AUTO path keeps the GH#24 converge fallback: a stale saved id whose
+// JSONL is gone, NO explicit gesture → resume the newest on-disk session.
+// This is the regression lock that explicit-selection must not break.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_path_still_converges_when_saved_id_missing() {
+    let _g = lock();
+    init_for_tests();
+    v2_session_map::clear_for_tests();
+    let _home = HomeGuard::new("auto-converge");
+    let _shim = install_claude_shim();
+
+    let workspace_id = "pinned-auto-converge-ws";
+    let project = setup_project(workspace_id, "auto-converge");
+    let project_path = project.to_string_lossy().into_owned();
+
+    // Saved id B is STALE (not on disk); a real session A is on disk.
+    let stale_b = "bbbbbbbb-0000-0000-0000-000000000000";
+    let real_a = "aaaaaaaa-1111-1111-1111-111111111111";
+    write_on_disk_session(&project_path, real_a);
+    set_saved_session_id(workspace_id, stale_b);
+
+    // AUTO path: explicit_selection=false (a cold mount / refresh).
+    let out = ensure_pinned_chat(&project_path, false, false).expect("auto ensure");
+
+    assert_eq!(
+        out.claude_session_id, real_a,
+        "auto path must converge to the newest on-disk session (GH#24)"
+    );
+    assert_eq!(
+        saved_session_id(workspace_id).as_deref(),
+        Some(real_a),
+        "auto path persists the converged id (GH#24 convergence)"
+    );
+
+    v2_session_map::clear_for_tests();
+}
+
+// Explicit pick of a session whose `.jsonl` is GENUINELY gone → the
+// resolver returns an Err (surfaced as a toast), and must NOT silently
+// swap to a different session OR clobber the saved id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_selection_of_missing_session_errors_no_silent_swap() {
+    let _g = lock();
+    init_for_tests();
+    v2_session_map::clear_for_tests();
+    let _home = HomeGuard::new("explicit-missing");
+    let _shim = install_claude_shim();
+
+    let workspace_id = "pinned-explicit-missing-ws";
+    let project = setup_project(workspace_id, "explicit-missing");
+    let project_path = project.to_string_lossy().into_owned();
+
+    // Picked B is NOT on disk; a newer A IS — exactly the converge trap.
+    let missing_b = "bbbbbbbb-0000-0000-0000-000000000000";
+    let real_a = "aaaaaaaa-1111-1111-1111-111111111111";
+    write_on_disk_session(&project_path, real_a);
+    set_saved_session_id(workspace_id, missing_b); // the explicit pick
+
+    let result = ensure_pinned_chat(&project_path, true, true);
+    assert!(
+        result.is_err(),
+        "explicit pick of a gone session must error, not silently swap"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains(missing_b) && err.contains("no conversation on disk"),
+        "error must name the missing session, got: {err}"
+    );
+
+    // The saved id must NOT have been clobbered to A.
+    assert_eq!(
+        saved_session_id(workspace_id).as_deref(),
+        Some(missing_b),
+        "explicit-missing must NOT rewrite the SSOT to a different session"
     );
 
     v2_session_map::clear_for_tests();

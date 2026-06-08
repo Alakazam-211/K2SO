@@ -338,14 +338,18 @@ interface EnsurePinnedChatResponse {
 
 async function ensurePinnedChat(
   projectPath: string,
-  opts?: { forceRespawn?: boolean; restoredSessionId?: string },
+  opts?: { forceRespawn?: boolean; restoredSessionId?: string; explicitSelection?: boolean },
 ): Promise<EnsurePinnedChatResponse> {
   // host-aware POST (daemonCliPost). The daemon is authoritative;
   // restoredSessionId rides along ONLY as an offline hint (PRD §4.5 / D3).
+  // explicitSelection (Issue B) is set ONLY on a dropdown session switch:
+  // it tells the daemon resolver to honor the just-persisted session_id
+  // directly and skip the GH#24 converge fallback (no silent revert).
   return daemonCliPost<EnsurePinnedChatResponse>('workspace/ensure-pinned-chat', {
     project: projectPath,
     ...(opts?.forceRespawn ? { forceRespawn: true } : {}),
     ...(opts?.restoredSessionId ? { restoredSessionId: opts.restoredSessionId } : {}),
+    ...(opts?.explicitSelection ? { explicitSelection: true } : {}),
   })
 }
 
@@ -422,10 +426,13 @@ function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSe
   // SessionAdded broadcast re-attaches; but we also adopt the ensure
   // RESPONSE directly so a cold mount renders without waiting for the WS.
   const ensure = useCallback(
-    async (forceRespawn: boolean): Promise<void> => {
+    async (forceRespawn: boolean, explicitSelection = false): Promise<void> => {
       try {
         const res = await ensurePinnedChat(projectPath, {
           forceRespawn,
+          // Issue B — only true on a dropdown switch; honors the picked
+          // session id at the daemon and skips the converge fallback.
+          explicitSelection,
           // Offline hint only (D3) — daemon wins when reachable.
           restoredSessionId,
         })
@@ -533,7 +540,11 @@ function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSe
         void ensure(false)
         return
       }
-      await ensure(true)
+      // Issue B — explicitSelection:true so the daemon honors the picked
+      // session and never silently reverts to the newest on-disk session.
+      // ensure() sets phase=error if the chosen session is gone on disk
+      // (the daemon returns an Err) rather than swapping to a different one.
+      await ensure(true, true)
       setRefreshing(false)
     },
     [claudeSessionId, projectPath, ensure],

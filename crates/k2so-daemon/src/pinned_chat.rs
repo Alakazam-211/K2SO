@@ -53,7 +53,7 @@ use crate::awareness_ws::HandlerResult;
 use crate::canonical_session::canonical_key_for;
 use crate::spawn::{spawn_agent_session_v2_blocking, SpawnWorkspaceSessionRequest};
 use k2so_core::log_debug;
-use k2so_core::workspace::resume_chat::resolve_resume_chat_args;
+use k2so_core::workspace::resume_chat::resolve_resume_chat_args_ex;
 
 /// Resolved outcome of `ensure_pinned_chat`. Returned to the HTTP
 /// handler (and exercised directly by the integration tests) so
@@ -115,16 +115,24 @@ const DEFAULT_ROWS: u16 = 24;
 ///   canonical session (which tears down its PTY and emits
 ///   `SessionRemoved`) BEFORE spawning a fresh one. When `false`
 ///   (the default), a live session is returned as-is (`reused: true`).
+/// - `explicit_selection`: `true` ONLY when the caller is an explicit
+///   user dropdown session pick (Issue B). Threaded into the resolver
+///   so the chosen `workspace_sessions.session_id` is honored directly
+///   and the GH#24 converge fallback is skipped — an explicit pick is
+///   never silently reverted to the newest on-disk session. `false` for
+///   normal cold mounts / refreshes (auto path, fallback intact).
 ///
 /// Errors:
 /// - `"project not registered: <path>"` — `project_path` doesn't
 ///   match any `projects.path` row.
-/// - `"<resolver error>"` — `resolve_resume_chat_args` failed on a DB
-///   I/O error (the no-saved-session case is a SUCCESS, not an error).
+/// - `"<resolver error>"` — the resolver failed on a DB I/O error, OR
+///   (when `explicit_selection`) the explicitly-chosen session id has no
+///   conversation on disk for this workspace.
 /// - `"spawn failed: <e>"` — the underlying PTY spawn failed.
 pub fn ensure_pinned_chat(
     project_path: &str,
     force_respawn: bool,
+    explicit_selection: bool,
 ) -> Result<EnsurePinnedChatOutcome, String> {
     // 1. Resolve project_id. The canonical key is the bare project_id
     //    (canonical_session::canonical_key_for) — the same slot the
@@ -139,7 +147,7 @@ pub fn ensure_pinned_chat(
     //    `--session-id <new>` (for a never-chatted workspace) BEFORE
     //    we spawn, or splices `--resume <id>` for a real prior
     //    session. DO NOT duplicate this logic.
-    let resolved = resolve_resume_chat_args(project_path)?;
+    let resolved = resolve_resume_chat_args_ex(project_path, explicit_selection)?;
 
     // 3. force_respawn: tear down the existing live session first so
     //    the new spawn isn't short-circuited by the idempotency check
@@ -228,13 +236,14 @@ pub fn ensure_pinned_chat(
     }
 
     log_debug!(
-        "[daemon/pinned-chat] ensured session={} canonical_key={} claude_session={} resumed_existing={} reused={} force_respawn={}",
+        "[daemon/pinned-chat] ensured session={} canonical_key={} claude_session={} resumed_existing={} reused={} force_respawn={} explicit_selection={}",
         session_id,
         canonical_key,
         resolved.resume_session,
         resolved.resumed_existing,
         spawn_outcome.reused,
         force_respawn,
+        explicit_selection,
     );
 
     Ok(EnsurePinnedChatOutcome {
@@ -289,6 +298,12 @@ pub fn handle_ensure_pinned_chat(body: &[u8]) -> HandlerResult {
         project: String,
         #[serde(default)]
         force_respawn: bool,
+        /// Issue B: set ONLY by an explicit dropdown session pick. When
+        /// true the resolver honors the saved session_id directly and
+        /// skips the GH#24 converge fallback. Optional (defaults false)
+        /// so cold mounts / refreshes keep the auto path.
+        #[serde(default)]
+        explicit_selection: bool,
     }
 
     let req: Req = match serde_json::from_slice(body) {
@@ -310,7 +325,7 @@ pub fn handle_ensure_pinned_chat(body: &[u8]) -> HandlerResult {
         };
     }
 
-    match ensure_pinned_chat(&req.project, req.force_respawn) {
+    match ensure_pinned_chat(&req.project, req.force_respawn, req.explicit_selection) {
         Ok(out) => HandlerResult {
             status: "200 OK",
             body: out.to_json().to_string(),

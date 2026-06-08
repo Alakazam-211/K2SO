@@ -26,6 +26,19 @@
 //!    is "pre-decided" — the pinned tab and any subsequent attach see
 //!    the same UUID.
 //!
+//! ## Explicit selection (Issue B — daemon-multi-client-arbitration §6)
+//!
+//! When the user picks a different chat from the pinned-tab dropdown,
+//! the renderer persists the choice via `set-chat-session` and re-ensures
+//! with `explicitSelection: true`. In that mode the saved `session_id`
+//! is the user's *authoritative gesture* — the resolver returns
+//! `--resume <saved>` and **skips the case-2 converge fallback** so an
+//! explicit pick is never silently reverted to the newest on-disk
+//! session. If the chosen id's `.jsonl` is genuinely gone, the resolver
+//! returns an `Err` (surfaced as a toast) rather than swapping to a
+//! different conversation. The auto path (cold mount, restart-recovery,
+//! CLI) keeps the converge fallback, so GH#24 stays fixed.
+//!
 //! Lifted from `src-tauri/src/commands/k2so_agents.rs::k2so_agents_resume_chat_args`
 //! (which was a Tauri-side command pre-0.37.5). Moving it to k2so-core
 //! means:
@@ -66,6 +79,15 @@ impl ResumeChatArgs {
     }
 }
 
+/// Build the resume-chat args for a workspace (auto path — no explicit
+/// user gesture). Thin wrapper over [`resolve_resume_chat_args_ex`] with
+/// `explicit_selection = false`, preserving the GH#24 converge fallback
+/// and the #681 brand-new mint. Existing callers (restart-recovery, CLI
+/// verb, Tauri proxy) keep their behavior unchanged.
+pub fn resolve_resume_chat_args(project_path: &str) -> Result<ResumeChatArgs, String> {
+    resolve_resume_chat_args_ex(project_path, false)
+}
+
 /// Build the resume-chat args for a workspace.
 ///
 /// **Daemon-first.** This helper has no Tauri / IPC dependency; both
@@ -74,9 +96,24 @@ impl ResumeChatArgs {
 ///
 /// - `project_path`: filesystem path to the workspace (used as `cwd`
 ///   for the spawned claude and as the lookup key into `projects.path`).
-/// - Returns `Err` only on DB I/O failures — the "no saved session"
-///   case is a SUCCESS that returns pre-allocated args.
-pub fn resolve_resume_chat_args(project_path: &str) -> Result<ResumeChatArgs, String> {
+/// - `explicit_selection`: `true` ONLY when the user made an explicit
+///   dropdown session pick (Issue B, daemon-multi-client-arbitration
+///   PRD §6). When `true`, the saved `workspace_sessions.session_id` is
+///   the user's authoritative choice: the resolver returns
+///   `--resume <saved>` and **SKIPS the GH#24 converge fallback** so an
+///   explicit pick can never be silently reverted to the newest on-disk
+///   session. If that id's `.jsonl` is genuinely missing, it returns a
+///   clear `Err` rather than swapping to a different session. When
+///   `false` (the auto path — cold mount, restart-recovery, CLI), the
+///   GH#24 converge fallback + #681 brand-new mint stay intact.
+/// - Returns `Err` on DB I/O failures, and (only when
+///   `explicit_selection`) when the explicitly-chosen id is missing on
+///   disk. The auto-path "no saved session" case is a SUCCESS that
+///   returns pre-allocated args.
+pub fn resolve_resume_chat_args_ex(
+    project_path: &str,
+    explicit_selection: bool,
+) -> Result<ResumeChatArgs, String> {
     let mut args: Vec<String> = vec!["--dangerously-skip-permissions".to_string()];
 
     let project_id: Option<String> = {
@@ -112,6 +149,22 @@ pub fn resolve_resume_chat_args(project_path: &str) -> Result<ResumeChatArgs, St
                 resume_session: sid.clone(),
                 resumed_existing: true,
             });
+        }
+
+        // Issue B (daemon-multi-client-arbitration §6): EXPLICIT selection
+        // wins. The user picked this id from the dropdown — it is an
+        // authoritative gesture, not a possibly-stale saved id. We reached
+        // here because `claude_session_file_exists(sid)` was false, which on
+        // the auto path would fall through to the converge fallback below and
+        // silently revert the pick to the newest on-disk session (the no-op
+        // the user reported). On the explicit path we must NOT do that:
+        // surface a clear error so the renderer can toast, rather than
+        // swapping to a different conversation behind the user's back.
+        if explicit_selection {
+            return Err(format!(
+                "selected chat session {sid} has no conversation on disk for this workspace; \
+                 not switching to a different session"
+            ));
         }
     }
 
