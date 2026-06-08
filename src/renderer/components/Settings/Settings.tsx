@@ -24,6 +24,7 @@ import { WakeSchedulerSection, WAKE_SCHEDULER_MANIFEST } from './sections/WakeSc
 import { PermissionsSection, PERMISSIONS_MANIFEST } from './sections/PermissionsSection'
 import { DictationLabSection, DICTATION_LAB_MANIFEST } from './sections/DictationLabSection'
 import ServerSwitcher from '../TopBar/ServerSwitcher'
+import { TOPBAR_HEIGHT } from '../../../shared/constants'
 
 // ── Section nav items ────────────────────────────────────────────────
 const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] = [
@@ -31,7 +32,7 @@ const SECTIONS: { id: SettingsSection; label: string; agenticOnly?: boolean }[] 
   { id: 'projects', label: 'Workspaces' },
   { id: 'workspace-states', label: 'Workspace States', agenticOnly: true },
   { id: 'agent-skills', label: 'Canonical Agent Flow', agenticOnly: true },
-  { id: 'k2-connect', label: 'K2 Connect' },
+  { id: 'k2-connect', label: 'K2 Toge' },
   { id: 'companion', label: 'K2 Companion' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'code-editor', label: 'Code Editor' },
@@ -138,7 +139,31 @@ export default function Settings(): React.JSX.Element {
   }, [setSection])
 
   return (
-    <div className="flex h-full w-full min-h-0 bg-[var(--color-bg)]">
+    <div className="flex flex-col h-full w-full min-h-0 bg-[var(--color-bg)]">
+      {/* Top-bar — mirrors the main page's top-bar (TopBar.tsx left cluster):
+          traffic-light spacer + "K2" wordmark + ServerSwitcher, so Settings
+          shows "K2 <Server Name>" up top exactly like the main view. The
+          active-server display/switcher lives HERE now (relocated out of the
+          settings sidebar) so the connected-host context is always visible
+          and switchable while editing that host's settings. */}
+      <div
+        className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-bg-surface)] px-3 select-none flex-shrink-0"
+        data-tauri-drag-region
+        style={{ height: TOPBAR_HEIGHT, minHeight: TOPBAR_HEIGHT }}
+      >
+        <div className="flex items-center gap-2">
+          {/* Traffic lights occupy ~70px on macOS */}
+          <div style={{ width: 70 }} />
+          {/* App name (in-app wordmark) */}
+          <span className="text-[10px] font-bold tracking-widest text-[var(--color-text-muted)] uppercase flex-shrink-0">
+            K2
+          </span>
+          {/* K2 server switcher (Local / saved servers / add) */}
+          <ServerSwitcher />
+        </div>
+      </div>
+
+      <div className="flex flex-1 w-full min-h-0">
       {/* Left nav */}
       <div className="w-48 flex-shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-surface)] flex flex-col min-h-0">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] flex-shrink-0">
@@ -155,14 +180,6 @@ export default function Settings(): React.JSX.Element {
               <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
           </button>
-        </div>
-        {/* Active-server indicator — Settings renders as a full-page view that
-            hides the top-bar ServerSwitcher, so the connected-host context
-            disappears exactly while editing that host's settings. Reuse the
-            same switcher here so the active server is always visible (and
-            switchable) from Settings. Reads useConnectHostStore reactively. */}
-        <div className="px-2 py-2 border-b border-[var(--color-border)] flex-shrink-0">
-          <ServerSwitcher />
         </div>
         <nav className="flex-1 py-1 overflow-y-auto">
           {SECTIONS.filter((s) => !s.agenticOnly || useSettingsStore.getState().agenticSystemsEnabled).map((s) => (
@@ -289,6 +306,7 @@ export default function Settings(): React.JSX.Element {
             <DictationLabSection />
           </SectionErrorBoundary>
         )}
+      </div>
       </div>
 
       {searchOpen && (
