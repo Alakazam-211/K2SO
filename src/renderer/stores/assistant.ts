@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { listen } from '@tauri-apps/api/event'
 import { llmStatus } from '@/lib/llmDaemonClient'
+import { serverSupports } from '@/lib/server-capabilities'
+import { onLlmStatusChanged, onAppHello } from '@/stores/session-events'
 
 // Phase 2 Unit 2 — `invoke('assistant_*')` calls retired. The daemon
 // now owns the LLM lifecycle; the store polls `/cli/llm/status`
@@ -133,30 +135,69 @@ export const useAssistantStore = create<AssistantState>((set) => ({
   clearLog: () => set({ interactionLog: [] }),
 }))
 
-// Poll backend status until model is loaded (it loads async on startup).
-// Phase 2 Unit 2: now polls the daemon's /cli/llm/status route instead
-// of Tauri's `assistant_status` command.
+// Apply a single LLM status snapshot to the store. Shared by the one-shot
+// snapshot fetch (push path), the WS re-snapshot on (re)connect, and the
+// polling fallback (older / remote daemon without broadcasts).
+const applyLlmStatus = (status: {
+  loaded: boolean
+  downloading: boolean
+}): void => {
+  const store = useAssistantStore.getState()
+  if (status.loaded) {
+    store.setModelLoaded(true)
+  } else if (status.downloading) {
+    store.setDownloading(true)
+  }
+}
+
+// One-shot status snapshot (current truth on mount/connect).
+const snapshotModelStatus = (): void => {
+  llmStatus()
+    .then(applyLlmStatus)
+    .catch((err) => {
+      console.error('[assistant] Failed to snapshot model status:', err)
+    })
+}
+
+// 0.39.39 (#675.1) — push-primary with snapshot-on-connect. When the daemon
+// supports broadcasts we take ONE snapshot, then subscribe to
+// `llm_status_changed`; the old 2s `setTimeout` poll is gone. The
+// `downloadPercent` delta drives the download bar (the Tauri
+// `assistant:download-progress` event below still fires too — both converge
+// the same store fields, last-write-wins). Against an OLDER / REMOTE daemon
+// that doesn't emit the broadcast we KEEP the legacy poll loop so the model
+// status still updates.
 const pollModelStatus = (): void => {
   llmStatus()
     .then((status) => {
-      const store = useAssistantStore.getState()
-      if (status.loaded) {
-        store.setModelLoaded(true)
-      } else if (status.downloading) {
-        store.setDownloading(true)
-        // Keep polling
-        setTimeout(pollModelStatus, 2000)
-      } else {
-        // Model not loaded yet, might still be initializing — retry a few times
-        setTimeout(pollModelStatus, 2000)
-      }
+      applyLlmStatus(status)
+      if (status.loaded) return
+      // Keep polling until loaded (download in flight or still initializing).
+      setTimeout(pollModelStatus, 2000)
     })
     .catch((err) => {
       console.error('[assistant] Failed to poll model status:', err)
     })
 }
-// Start polling after a brief delay to let the backend initialize
-setTimeout(pollModelStatus, 1000)
+
+if (serverSupports('daemon-broadcasts')) {
+  // Push path: one snapshot now, re-snapshot on every WS (re)connect, and
+  // converge on each broadcast.
+  setTimeout(snapshotModelStatus, 1000)
+  onAppHello(() => snapshotModelStatus())
+  onLlmStatusChanged((e) => {
+    const store = useAssistantStore.getState()
+    if (e.loaded) {
+      store.setDownloading(false)
+      store.setModelLoaded(true)
+    } else if (e.downloading) {
+      store.setDownloading(true, e.downloadPercent ?? undefined)
+    }
+  })
+} else {
+  // Fallback: legacy 2s poll loop (older / remote daemon, no broadcasts).
+  setTimeout(pollModelStatus, 1000)
+}
 
 // Listen for download progress events from Tauri backend
 // Rust emits: { percent: f64, bytes_downloaded: u64, total_bytes: u64 }

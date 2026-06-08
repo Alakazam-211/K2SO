@@ -16,6 +16,8 @@ import { KNOWN_AGENT_COMMANDS, AGENT_IDLE_THRESHOLD_MS } from '@shared/constants
 import { agentChatId, worktreeChatId, parseTerminalId } from '@/lib/terminal-id'
 // #625 — reset agent pane state on a host switch.
 import { onActiveHostChange } from '@/stores/connect-host'
+import { serverSupports } from '@/lib/server-capabilities'
+import { onAgentStatusChanged, onAppHello } from '@/stores/session-events'
 
 export type PaneStatus = 'idle' | 'working' | 'permission' | 'review'
 
@@ -627,16 +629,41 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
 // ── Polling ─────────────────────────────────────────────────────────
 let pollInterval: ReturnType<typeof setInterval> | null = null
 let hookUnlisten: (() => void) | null = null
+// 0.39.39 (#675.2) — push-subscription teardowns (agent_status_changed +
+// app-hello re-snapshot). Module-level so stopAgentPolling can clean them up.
+let agentStatusUnsub: (() => void) | null = null
+let agentHelloUnsub: (() => void) | null = null
 
 export function startAgentPolling(): void {
-  if (pollInterval) return
-  // Initial poll
+  if (pollInterval || agentStatusUnsub) return
+  // Initial poll — snapshot of current truth (paneStatuses derived from
+  // foreground commands + liveSessionCwds for the live-session dot).
   useActiveAgentsStore.getState().pollOnce()
-  // Add jitter to avoid thundering-herd across multiple windows
-  const interval = 2500 + Math.floor(Math.random() * 500)
-  pollInterval = setInterval(() => {
-    useActiveAgentsStore.getState().pollOnce()
-  }, interval)
+
+  if (serverSupports('daemon-broadcasts')) {
+    // 0.39.39 (#675.2) — push-primary. The daemon emits `agent_status_changed`
+    // from its lifecycle-hook chokepoint (the canonical source for the same
+    // start/stop/permission buckets the Tauri `agent:lifecycle` event carries),
+    // so the ~2.5s poll that recomputed working/idle is GONE. We map each
+    // broadcast through `handleLifecycleEvent` — the exact path the Tauri hook
+    // uses — so spinner/toast/launch-failure logic is unchanged. The initial
+    // `pollOnce` above still seeds `liveSessionCwds`; on every WS (re)connect
+    // we re-`pollOnce` (via onAppHello) to backfill any missed transitions +
+    // refresh the live-session set.
+    agentStatusUnsub = onAgentStatusChanged((e) => {
+      useActiveAgentsStore.getState().handleLifecycleEvent(e.paneId, e.tabId, e.status)
+    })
+    agentHelloUnsub = onAppHello(() => {
+      useActiveAgentsStore.getState().pollOnce()
+    })
+  } else {
+    // Fallback: legacy ~2.5s poll loop (older / remote daemon, no broadcasts).
+    // Add jitter to avoid thundering-herd across multiple windows.
+    const interval = 2500 + Math.floor(Math.random() * 500)
+    pollInterval = setInterval(() => {
+      useActiveAgentsStore.getState().pollOnce()
+    }, interval)
+  }
 
   // Helper: create a tab for a companion-spawned terminal that's already running.
   // Adds the tab to the current workspace without switching active tab.
@@ -1174,6 +1201,14 @@ export function stopAgentPolling(): void {
   if (pollInterval) {
     clearInterval(pollInterval)
     pollInterval = null
+  }
+  if (agentStatusUnsub) {
+    agentStatusUnsub()
+    agentStatusUnsub = null
+  }
+  if (agentHelloUnsub) {
+    agentHelloUnsub()
+    agentHelloUnsub = null
   }
   if (hookUnlisten) {
     hookUnlisten()

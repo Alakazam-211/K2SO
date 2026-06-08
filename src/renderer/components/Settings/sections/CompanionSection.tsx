@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { useSettingsStore } from '@/stores/settings'
+import { serverSupports } from '@/lib/server-capabilities'
+import { onTunnelStatusChanged, onAppHello } from '@/stores/session-events'
 import type { SettingEntry } from '../searchManifest'
 
 // K2 Companion (task #615) — the mobile app and K2 Connect now share ONE
@@ -38,6 +40,14 @@ export const COMPANION_MANIFEST: SettingEntry[] = [
 export function CompanionSection(): React.JSX.Element {
   const [status, setStatus] = useState<TunnelStatus | null>(null)
 
+  // 0.39.39 (#675.5) — push-primary with snapshot-on-connect. The 5s tunnel-
+  // status poll is replaced by a subscription to the app-level
+  // `tunnel_status_changed` broadcast; the event carries `running` + the
+  // predicted `publicUrl` so we render without a follow-up GET (we preserve
+  // the last-snapshot `frpc_installed`, which the event doesn't carry). One
+  // snapshot on mount + a re-snapshot on each WS (re)connect (`onAppHello`)
+  // keeps current truth. Against an OLDER / REMOTE daemon without broadcasts
+  // we KEEP the 5s poll fallback.
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
@@ -49,6 +59,27 @@ export function CompanionSection(): React.JSX.Element {
       }
     }
     void refresh()
+
+    if (serverSupports('daemon-broadcasts')) {
+      const offHello = onAppHello(() => void refresh())
+      const offTunnel = onTunnelStatusChanged((e) => {
+        if (cancelled) return
+        setStatus((prev) => ({
+          running: e.running,
+          public_url: e.publicUrl,
+          // The event doesn't carry frpc_installed — keep the last snapshot's
+          // value (defaults true once running, false otherwise, until the next
+          // snapshot corrects it).
+          frpc_installed: prev?.frpc_installed ?? e.running,
+        }))
+      })
+      return () => {
+        cancelled = true
+        offHello()
+        offTunnel()
+      }
+    }
+
     const interval = setInterval(() => void refresh(), 5000)
     return () => {
       cancelled = true

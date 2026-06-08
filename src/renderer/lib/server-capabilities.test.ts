@@ -167,6 +167,29 @@ describe('serverSupports — remote, remote-update gating (min 0.39.33)', () => 
   })
 })
 
+describe('serverSupports — remote, daemon-broadcasts gating (min 0.39.39)', () => {
+  it('maps to 0.39.39', () => {
+    expect(featureMinVersion('daemon-broadcasts')).toBe('0.39.39')
+    expect(FEATURES['daemon-broadcasts']).toBe('0.39.39')
+  })
+  it('false below min (older remote keeps its renderer polling fallback)', () => {
+    setActiveRemote('0.39.38')
+    expect(serverSupports('daemon-broadcasts')).toBe(false)
+  })
+  it('true at exactly min', () => {
+    setActiveRemote('0.39.39')
+    expect(serverSupports('daemon-broadcasts')).toBe(true)
+  })
+  it('true above min', () => {
+    setActiveRemote('0.40.0')
+    expect(serverSupports('daemon-broadcasts')).toBe(true)
+  })
+  it('always true for the local Mac (byte-paired with this app)', () => {
+    useConnectHostStore.setState({ activeHost: 'local', serverVersion: null })
+    expect(serverSupports('daemon-broadcasts')).toBe(true)
+  })
+})
+
 describe('serverSupports — remote, roles gating (min 0.39.23)', () => {
   it('false below min', () => {
     setActiveRemote('0.39.22')

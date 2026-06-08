@@ -7,6 +7,8 @@ import { useTabsStore } from '@/stores/tabs'
 import { useConfirmDialogStore } from '@/stores/confirm-dialog'
 import { useSettingsStore } from '@/stores/settings'
 import { usePresetsStore, parseCommand } from '@/stores/presets'
+import { serverSupports } from '@/lib/server-capabilities'
+import { subscribeToWorkspaceReviewEvents } from '@/stores/session-events'
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -195,19 +197,46 @@ export default function ReviewPanel(): React.JSX.Element {
     }
   }, [workspacePath])
 
+  // 0.39.39 (#675.4 + #677) — push-primary with snapshot-on-connect. The 15s
+  // {fetchReviews; fetchChats} poll is replaced by a subscription to the
+  // daemon's workspace-scoped review broadcasts. Each `review_changed` /
+  // `review_queue_changed` re-fetches reviews + chats; because `review_changed`
+  // fires on every checklist write/toggle/init, the re-fetch updates `reviews`,
+  // which re-runs the checklist-read effect below (~232-242) — fixing #677's
+  // stale review-checklist cache. On (re)connect (`onHello`) we re-snapshot.
+  // Against an OLDER / REMOTE daemon without broadcasts we KEEP the 15s poll.
+  const reviewSubPath = activeProject?.path ?? null
+  const broadcastsSupported = serverSupports('daemon-broadcasts')
   useEffect(() => {
     fetchReviews()
     fetchChats()
-    const interval = setInterval(() => { fetchReviews(); fetchChats() }, 15_000)
+
+    let interval: ReturnType<typeof setInterval> | null = null
+    let unsubReviewEvents: (() => void) | null = null
+
+    if (broadcastsSupported && reviewSubPath) {
+      const refetch = (): void => { fetchReviews(); fetchChats() }
+      unsubReviewEvents = subscribeToWorkspaceReviewEvents(reviewSubPath, {
+        onReviewChanged: refetch,
+        onReviewQueueChanged: refetch,
+        onHello: refetch,
+      })
+    } else {
+      interval = setInterval(() => { fetchReviews(); fetchChats() }, 15_000)
+    }
+
+    // Capture the preview-poll map ref for cleanup (it's mutated elsewhere).
+    const previewPolls = previewPollRefs.current
     return () => {
-      clearInterval(interval)
+      if (interval) clearInterval(interval)
+      if (unsubReviewEvents) unsubReviewEvents()
       // Clean up preview polls
-      for (const pollId of previewPollRefs.current.values()) {
+      for (const pollId of previewPolls.values()) {
         clearInterval(pollId)
       }
-      previewPollRefs.current.clear()
+      previewPolls.clear()
     }
-  }, [fetchReviews, fetchChats])
+  }, [fetchReviews, fetchChats, broadcastsSupported, reviewSubPath])
 
   // Load or initialize checklist files for each review
   useEffect(() => {

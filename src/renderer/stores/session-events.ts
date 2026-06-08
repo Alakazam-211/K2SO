@@ -76,12 +76,73 @@ export interface ActiveChangedEvent {
   activeWindowHours: number
 }
 
+// ── Wave B broadcast events (#675/#677) ───────────────────────────────────
+//
+// These let the renderer DROP its polling intervals and subscribe to the
+// daemon's source-of-truth. Wire-frozen against
+// `crates/k2so-daemon/src/session_events.rs`. App-level events are
+// forwarded to EVERY subscriber regardless of `?path=`; workspace-scoped
+// events carry a `workspacePath` and are forwarded only when it matches the
+// subscriber's `?path=` (cwd-prefix rule). Field names are camelCase on the
+// wire (per-field serde `rename`).
+
+/** APP-LEVEL — local LLM (AI Workspace Assistant) model status changed.
+ *  Replaces the `/cli/llm/status` poll in `stores/assistant.ts`. */
+export interface LlmStatusChangedEvent {
+  kind: 'llm_status_changed'
+  loaded: boolean
+  modelPath: string | null
+  downloading: boolean
+  /** `0.0..=100.0` while a download is in flight, `null` otherwise. */
+  downloadPercent: number | null
+}
+
+/** APP-LEVEL — an agent's working/idle status flipped. Replaces the
+ *  list-running + agent-status poll in `stores/active-agents.ts`. */
+export interface AgentStatusChangedEvent {
+  kind: 'agent_status_changed'
+  /** The `K2SO_PANE_ID` (== terminal id) the PTY was spawned with. */
+  paneId: string
+  tabId: string
+  /** Canonical bucket: `start` (working) | `stop` (idle) | `permission`. */
+  status: 'start' | 'stop' | 'permission'
+}
+
+/** APP-LEVEL — K2 Connect tunnel connector state transitioned. Replaces
+ *  the `/cli/tunnel/status` poll in `CompanionSection.tsx`. */
+export interface TunnelStatusChangedEvent {
+  kind: 'tunnel_status_changed'
+  running: boolean
+  publicUrl: string | null
+}
+
+/** WORKSPACE-SCOPED — the per-workspace review queue changed. Replaces the
+ *  `/cli/agents/review-queue` poll in `stores/review-queue.ts`. */
+export interface ReviewQueueChangedEvent {
+  kind: 'review_queue_changed'
+  workspacePath: string
+}
+
+/** WORKSPACE-SCOPED — a specific review (or its checklist) changed.
+ *  Replaces the reviews+chats poll AND the review-checklist poll in
+ *  `ReviewPanel.tsx`. `agent` is the agent/branch when known, else null. */
+export interface ReviewChangedEvent {
+  kind: 'review_changed'
+  workspacePath: string
+  agent: string | null
+}
+
 export type SessionEventMessage =
   | SessionAddedEvent
   | SessionRemovedEvent
   | SessionRenamedEvent
   | HelloEvent
   | ActiveChangedEvent
+  | LlmStatusChangedEvent
+  | AgentStatusChangedEvent
+  | TunnelStatusChangedEvent
+  | ReviewQueueChangedEvent
+  | ReviewChangedEvent
 
 export interface SessionEventHandlers {
   onAdded?: (event: SessionAddedEvent) => void
@@ -318,11 +379,83 @@ export async function refreshActiveSnapshot(): Promise<void> {
   }
 }
 
+// ── App-level broadcast registry (#675) ───────────────────────────────────
+//
+// The Wave B APP-LEVEL events (llm/agent/tunnel) ride the SAME empty-path
+// app-level WS that `subscribeToActiveState` already opens at boot. Rather
+// than have each consumer open its own WS, consumers register a callback
+// here; the app-level WS onmessage dispatches to all registered callbacks.
+// The `onAppHello` registry lets consumers re-snapshot their truth on every
+// (re)connect — the daemon may have dropped frames during the gap.
+//
+// All registries are module-level singletons (one app-level WS exists), so
+// they survive the host-switch teardown/re-open of the WS itself — that's
+// fine: the helpers below just (de)register pure callbacks. On a host
+// switch the consumers' own host-aware snapshot fetch (fired from
+// `onAppHello`) re-establishes truth against the new host.
+
+type LlmStatusHandler = (e: LlmStatusChangedEvent) => void
+type AgentStatusHandler = (e: AgentStatusChangedEvent) => void
+type TunnelStatusHandler = (e: TunnelStatusChangedEvent) => void
+type AppHelloHandler = () => void
+
+const _llmStatusHandlers = new Set<LlmStatusHandler>()
+const _agentStatusHandlers = new Set<AgentStatusHandler>()
+const _tunnelStatusHandlers = new Set<TunnelStatusHandler>()
+const _appHelloHandlers = new Set<AppHelloHandler>()
+
+/** Subscribe to APP-LEVEL `llm_status_changed`. Returns an unsubscribe fn. */
+export function onLlmStatusChanged(fn: LlmStatusHandler): UnsubscribeFn {
+  _llmStatusHandlers.add(fn)
+  return () => void _llmStatusHandlers.delete(fn)
+}
+
+/** Subscribe to APP-LEVEL `agent_status_changed`. Returns an unsubscribe fn. */
+export function onAgentStatusChanged(fn: AgentStatusHandler): UnsubscribeFn {
+  _agentStatusHandlers.add(fn)
+  return () => void _agentStatusHandlers.delete(fn)
+}
+
+/** Subscribe to APP-LEVEL `tunnel_status_changed`. Returns an unsubscribe fn. */
+export function onTunnelStatusChanged(fn: TunnelStatusHandler): UnsubscribeFn {
+  _tunnelStatusHandlers.add(fn)
+  return () => void _tunnelStatusHandlers.delete(fn)
+}
+
+/** Fires on every app-level WS (re)connect — use it to re-snapshot truth
+ *  that may have drifted while the socket was down. Returns an unsub fn. */
+export function onAppHello(fn: AppHelloHandler): UnsubscribeFn {
+  _appHelloHandlers.add(fn)
+  return () => void _appHelloHandlers.delete(fn)
+}
+
+function dispatchAppEvent(msg: SessionEventMessage): void {
+  switch (msg.kind) {
+    case 'llm_status_changed':
+      for (const h of _llmStatusHandlers) h(msg)
+      break
+    case 'agent_status_changed':
+      for (const h of _agentStatusHandlers) h(msg)
+      break
+    case 'tunnel_status_changed':
+      for (const h of _tunnelStatusHandlers) h(msg)
+      break
+    default:
+      break
+  }
+}
+
 /**
  * Open the single app-level Active-state subscription. Call once at app
  * boot. Returns an UnsubscribeFn that tears down the WS + reconnect loop.
  * On a host switch, tear this down and call it again (see connect-host
  * wiring) so a remote host's Active set mirrors 1:1.
+ *
+ * This socket is ALSO the carrier for the Wave B APP-LEVEL broadcasts
+ * (llm/agent/tunnel, #675). They're dispatched to the registries above so
+ * consumers (`stores/assistant.ts`, `stores/active-agents.ts`,
+ * `CompanionSection.tsx`) can drop their polling loops. On (re)connect the
+ * `Hello` frame also fans out to `onAppHello` so those consumers re-snapshot.
  */
 export function subscribeToActiveState(): UnsubscribeFn {
   let socket: WebSocket | null = null
@@ -397,6 +530,9 @@ export function subscribeToActiveState(): UnsubscribeFn {
         // (Re)connected — pull a fresh snapshot to correct any drift
         // (deltas may have been missed during a drop window).
         void refreshActiveSnapshot()
+        // Fan out to Wave B app-level consumers so they re-snapshot their
+        // own truth (llm/agent/tunnel) after the same drop window.
+        for (const h of _appHelloHandlers) h()
         return
       }
       if (msg.kind === 'active_changed') {
@@ -407,8 +543,19 @@ export function subscribeToActiveState(): UnsubscribeFn {
         })
         return
       }
-      // session_added / session_removed / session_renamed — owned by the
-      // per-workspace subscriber; ignore on the app-level socket.
+      // Wave B APP-LEVEL broadcasts (#675) — llm/agent/tunnel. Dispatch to
+      // the registries above; consumers subscribed via onLlmStatusChanged /
+      // onAgentStatusChanged / onTunnelStatusChanged.
+      if (
+        msg.kind === 'llm_status_changed' ||
+        msg.kind === 'agent_status_changed' ||
+        msg.kind === 'tunnel_status_changed'
+      ) {
+        dispatchAppEvent(msg)
+        return
+      }
+      // session_added / session_removed / session_renamed / review_* —
+      // owned by the per-workspace subscriber; ignore on the app-level socket.
     }
 
     ws.onerror = () => {
@@ -420,6 +567,153 @@ export function subscribeToActiveState(): UnsubscribeFn {
       if (stopped) return
       console.debug(
         `[active-state] WS closed (code=${ev.code}, reason="${ev.reason ?? ''}") — scheduling reconnect`,
+      )
+      triggerReconnect()
+    }
+  }
+
+  void openSocket()
+
+  return () => {
+    stopped = true
+    clearReconnect()
+    if (socket) {
+      try {
+        socket.close(1000, 'unsubscribe')
+      } catch {
+        // ignore
+      }
+      socket = null
+    }
+  }
+}
+
+// ── Workspace-scoped review subscription (#675/#677) ───────────────────────
+//
+// The Wave B WORKSPACE-SCOPED review events (`review_queue_changed`,
+// `review_changed`) are forwarded only to subscribers whose `?path=` matches
+// the carried `workspacePath` (cwd-prefix rule, daemon-side
+// `event_matches_workspace`). So unlike the app-level llm/agent/tunnel
+// events, review events need a WS opened with the workspace path. This
+// helper opens that per-workspace socket and invokes the caller's handlers.
+//
+// Consumers (`stores/review-queue.ts`, `ReviewPanel.tsx`) call this with the
+// active workspace path and re-fetch the review queue / review detail +
+// checklist on each event. On (re)connect (`onHello`) they re-snapshot to
+// backfill any events missed during a drop. Tearing down + re-subscribing on
+// a workspace switch is the caller's responsibility (the path is baked into
+// the URL).
+
+export interface WorkspaceReviewHandlers {
+  /** A review was approved / rejected / had changes requested, or a
+   *  checklist mutation altered queue membership. */
+  onReviewQueueChanged?: (event: ReviewQueueChangedEvent) => void
+  /** A specific review (or its checklist) changed. */
+  onReviewChanged?: (event: ReviewChangedEvent) => void
+  /** Fires after each successful (re)connect — re-snapshot here. */
+  onHello?: (event: HelloEvent) => void
+}
+
+/** Subscribe to WORKSPACE-SCOPED review events for one workspace path.
+ *  Returns an unsubscribe fn that tears down the WS + reconnect loop. */
+export function subscribeToWorkspaceReviewEvents(
+  workspacePath: string,
+  handlers: WorkspaceReviewHandlers,
+): UnsubscribeFn {
+  let socket: WebSocket | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let backoffMs = INITIAL_BACKOFF_MS
+  let stopped = false
+
+  const clearReconnect = (): void => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
+
+  const scheduleReconnect = (): void => {
+    if (stopped) return
+    clearReconnect()
+    const delay = backoffMs
+    backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      void openSocket()
+    }, delay)
+  }
+
+  const triggerReconnect = (): void => {
+    if (stopped) return
+    if (reconnectTimer !== null) return
+    scheduleReconnect()
+  }
+
+  const openSocket = async (): Promise<void> => {
+    if (stopped) return
+    let creds: DaemonWsAvailable
+    try {
+      creds = await getDaemonWs()
+    } catch (err) {
+      invalidateDaemonWs()
+      console.warn('[review-events] daemon credentials unavailable, retrying:', err)
+      scheduleReconnect()
+      return
+    }
+    if (stopped) return
+
+    const url = `${daemonWsBase(creds)}/cli/sessions/events?path=${encodeURIComponent(workspacePath)}&token=${encodeURIComponent(creds.token)}`
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(url)
+    } catch (err) {
+      console.warn('[review-events] WS construction failed:', err)
+      scheduleReconnect()
+      return
+    }
+    socket = ws
+
+    ws.onopen = () => {
+      backoffMs = INITIAL_BACKOFF_MS
+    }
+
+    ws.onmessage = (ev) => {
+      const raw = typeof ev.data === 'string' ? ev.data : null
+      if (raw === null) return
+      let msg: SessionEventMessage
+      try {
+        msg = JSON.parse(raw) as SessionEventMessage
+      } catch (err) {
+        console.warn('[review-events] failed to parse frame:', err, raw)
+        return
+      }
+      switch (msg.kind) {
+        case 'hello':
+          handlers.onHello?.(msg)
+          break
+        case 'review_queue_changed':
+          handlers.onReviewQueueChanged?.(msg)
+          break
+        case 'review_changed':
+          handlers.onReviewChanged?.(msg)
+          break
+        default:
+          // session_added/removed/renamed + app-level events arrive on this
+          // socket too (cwd-match or app-level); the dedicated subscribers
+          // own those — ignore here.
+          break
+      }
+    }
+
+    ws.onerror = () => {
+      triggerReconnect()
+    }
+
+    ws.onclose = (ev) => {
+      if (socket === ws) socket = null
+      if (stopped) return
+      console.debug(
+        `[review-events] WS closed (code=${ev.code}, reason="${ev.reason ?? ''}") — scheduling reconnect`,
       )
       triggerReconnect()
     }
