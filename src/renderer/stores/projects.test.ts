@@ -58,11 +58,11 @@ vi.mock('./toast', () => ({
 // resolve so the `.then()` chain runs and so the ordering test can observe
 // ensure firing AFTER restore settles. `callOrder` records the sequence.
 const callOrder: string[] = []
-const restoreWorkspaceMock = vi.fn(() => {
+const restoreWorkspaceMock = vi.fn((..._args: unknown[]) => {
   callOrder.push('restore')
   return Promise.resolve()
 })
-const ensurePinnedMock = vi.fn(() => {
+const ensurePinnedMock = vi.fn((..._args: unknown[]) => {
   callOrder.push('ensure')
 })
 vi.mock('./tabs', () => ({
