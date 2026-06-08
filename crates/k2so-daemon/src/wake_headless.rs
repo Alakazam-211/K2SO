@@ -280,10 +280,17 @@ pub fn spawn_wake_headless(
 /// identity SSOT (see `.k2so/prds/pinned-chat-identity-ssot.md` §4.1a).
 /// Claude writes its `.jsonl` a beat after spawn (the session id only
 /// lands once the conversation persists), so we sleep ~5s on a detached
-/// thread, probe the chat-history dir via
-/// `chat_history::detect_active_session("claude", path)`, then persist
-/// the discovered id through `k2so_agents_save_session_id` →
-/// `WorkspaceSession::update_session_id`.
+/// thread, probe the on-disk session dir via
+/// `chat_history::newest_claude_session_on_disk(path)`, then persist the
+/// discovered id through `WorkspaceSession::update_session_id`.
+///
+/// NOTE (smoke-test finding, GH#24): this used to call
+/// `detect_active_session("claude", …)`, which keys on
+/// `~/.claude/history.jsonl` — and that file has no entry for a freshly
+/// spawned, not-yet-messaged chat within the ~5s window, so the eager
+/// stamp was a silent no-op. `newest_claude_session_on_disk` scans
+/// `~/.claude/projects/<hash>/*.jsonl` by mtime, so it catches the
+/// `--session-id`-created file immediately and the stamp actually fires.
 ///
 /// WHY this matters (GH#24): identity used to be argv-derived and
 /// scattered across three stores, none of which recorded the id Claude
@@ -316,9 +323,7 @@ pub fn defer_stamp_adopted_session(project_path: String, agent_name: String) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(5));
         let detected =
-            k2so_core::chat_history::detect_active_session("claude", &project_path)
-                .ok()
-                .flatten();
+            k2so_core::chat_history::newest_claude_session_on_disk(&project_path);
         let Some(session_id) = detected else { return };
         if session_id.is_empty() {
             return;
