@@ -3,6 +3,26 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.39 — The server runs the show (steadier chats, less chatter)
+
+- **Pinned chats are server-owned and steadier.** The daemon now owns the pinned
+  chat's session end-to-end — opening, switching sessions, reloading, and
+  reviving the right session after a restart are all handled server-side. No more
+  open-flicker, and the tab keeps its icon.
+- **Live updates instead of polling.** The app used to poll the server on timers
+  for model status, agent activity, the review queue, and tunnel state. It now
+  receives those as live pushes — fresher, lighter, correct across multiple
+  devices, and it keeps working on a headless server.
+- **Shared truth across everyone on a server.** Tab renames, tab order, the
+  Active bar, and heartbeat "live" state now sync to every connected device — one
+  consistent picture, not a per-window guess.
+- **K2 Connect is now K2 Toge.** The remote-access feature was renamed (the old
+  name belonged to another product). Settings and the website reflect it.
+- **Settings shows the connected host up top.** The Settings page now carries the
+  same "K2 ‹Server Name›" top-bar as the main view, with the host switcher there.
+- **Small fix:** the Active-window up/down arrows in General settings are now
+  visible instead of black-on-dark.
+
 ## 0.39.38 — Remote sessions stay alive, and Clone-to brings everything
 
 - **Remote chat sessions no longer die after ~15 seconds.** When you opened a
