@@ -256,42 +256,100 @@ pub fn spawn_wake_headless(
     // synchronously — poll the chat history dir a few seconds later
     // and stamp `agent_sessions.session_id` for the next --resume.
     // For heartbeat fires the synchronous save above is authoritative.
+    //
+    // Factored into the shared `defer_stamp_adopted_session` helper so
+    // `pinned_chat::ensure_pinned_chat` can reuse the SAME read-back to
+    // make `workspace_sessions.session_id` the single source of truth
+    // (pinned-chat-identity-ssot PRD §4.1a; GH#24). This call keeps the
+    // wake path's behavior identical — same agent_name keying, same ~5s
+    // window, same `save_session_id` persistence.
     if heartbeat_name.is_none() {
-        let agent_name_owned = agent_name.to_string();
-        let project_path_owned = project_path.to_string();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            let detected = k2so_core::chat_history::detect_active_session(
-                "claude",
-                &project_path_owned,
-            )
-            .ok()
-            .flatten();
-            let Some(session_id) = detected else { return };
-            if session_id.is_empty() {
-                return;
-            }
-            match k2so_core::workspace::session::k2so_agents_save_session_id(
-                project_path_owned.clone(),
-                agent_name_owned.clone(),
-                session_id.clone(),
-            ) {
-                Ok(_) => log_debug!(
-                    "[daemon/wake] saved session id for {}: {}",
-                    agent_name_owned,
-                    session_id
-                ),
-                Err(e) => log_debug!(
-                    "[daemon/wake] save session id for {} failed: {}",
-                    agent_name_owned,
-                    e
-                ),
-            }
-        });
+        defer_stamp_adopted_session(project_path.to_string(), agent_name.to_string());
     }
 
     // The Arc dropping silently retires the unused outcome metadata.
     let _ = Arc::new(outcome);
 
     Ok(terminal_id)
+}
+
+/// Deferred post-spawn read-back: stamp `workspace_sessions.session_id`
+/// with the Claude session the spawned PTY **actually adopted on disk**.
+///
+/// This is the eager write-truth-at-the-source half of the pinned-chat
+/// identity SSOT (see `.k2so/prds/pinned-chat-identity-ssot.md` §4.1a).
+/// Claude writes its `.jsonl` a beat after spawn (the session id only
+/// lands once the conversation persists), so we sleep ~5s on a detached
+/// thread, probe the chat-history dir via
+/// `chat_history::detect_active_session("claude", path)`, then persist
+/// the discovered id through `k2so_agents_save_session_id` →
+/// `WorkspaceSession::update_session_id`.
+///
+/// WHY this matters (GH#24): identity used to be argv-derived and
+/// scattered across three stores, none of which recorded the id Claude
+/// *actually* used. Stamping the adopted id here makes
+/// `workspace_sessions.session_id` truthful at the source, so the
+/// resolver's `claude_session_file_exists` happy-path hits on the next
+/// resolve — no re-mint, no re-resume loop. The 0.39.40 resolver
+/// converge fallback (`resume_chat.rs`) stays as the lazy safety net for
+/// any path that misses this eager stamp.
+///
+/// Shared by the wake path (chat-tab wakes, `heartbeat_name = None`,
+/// passing the real agent folder name) and
+/// `pinned_chat::ensure_pinned_chat` (after a fresh `!reused` spawn,
+/// passing the canonical `project_id` as the agent_name).
+///
+/// `agent_name` is used only for log context; the persist itself is
+/// keyed on the `project_id` resolved from `project_path` (the
+/// `workspace_sessions` row is `project_id`-unique). We deliberately do
+/// **not** route through `k2so_agents_save_session_id` here: that helper
+/// guards on an on-disk agent dir (`AGENT.md`/`SKILL.md`), which the
+/// pinned-chat canonical key (`agent_name == project_id`) has no reason
+/// to own. Persisting via `update_session_id` keyed on `project_id` is
+/// behavior-equivalent for the wake path (a registered workspace always
+/// has the row) and correct for the pinned chat (identity lives in that
+/// one row — the SSOT).
+///
+/// Fire-and-forget: errors are logged, never surfaced — the lazy
+/// resolver self-heal (`resume_chat.rs`, 0.39.40) covers a miss.
+pub fn defer_stamp_adopted_session(project_path: String, agent_name: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let detected =
+            k2so_core::chat_history::detect_active_session("claude", &project_path)
+                .ok()
+                .flatten();
+        let Some(session_id) = detected else { return };
+        if session_id.is_empty() {
+            return;
+        }
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        let Some(project_id) =
+            k2so_core::workspace::agent_identity::resolve_project_id(&conn, &project_path)
+        else {
+            log_debug!(
+                "[daemon/wake] save session id for {} skipped: unregistered project {}",
+                agent_name,
+                project_path
+            );
+            return;
+        };
+        match k2so_core::db::schema::WorkspaceSession::update_session_id(
+            &conn,
+            &project_id,
+            &session_id,
+        ) {
+            Ok(_) => log_debug!(
+                "[daemon/wake] saved session id for {}: {}",
+                agent_name,
+                session_id
+            ),
+            Err(e) => log_debug!(
+                "[daemon/wake] save session id for {} failed: {}",
+                agent_name,
+                e
+            ),
+        }
+    });
 }

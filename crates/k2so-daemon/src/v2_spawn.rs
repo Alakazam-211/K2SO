@@ -199,50 +199,99 @@ pub fn handle_v2_spawn(body: &[u8]) -> HandlerResult {
         let db = k2so_core::db::shared();
         let conn = db.lock();
         if let Some(project_id) = k2so_core::workspace::agent_identity::resolve_project_id(&conn, &req.cwd) {
-            if let Ok(Some(saved)) = k2so_core::db::schema::WorkspaceTabSession::get_by_agent_name(
+            // pinned-chat-identity-ssot PRD §4.3.1 (GH#24): the canonical
+            // pinned chat (`agent_name == project_id`) sources its
+            // `--resume` id from the SINGLE SOURCE OF TRUTH —
+            // `workspace_sessions.session_id` — NOT from
+            // `workspace_tab_sessions`. Recovery used to read the tab
+            // table's argv-derived id, which is the coupling that let the
+            // daemon-owned pinned chat (#683) bypass the canonical column
+            // for identity. Command/cwd may still come from the tab row if
+            // one happens to exist (legacy/pre-Phase-3), but after Phase 3
+            // the pinned row is no longer written, so we default to
+            // `claude` + the request cwd and splice `--resume <ssot-id>`.
+            // Ad-hoc Cmd+T tabs (`agent_name == tab-<...>`) are untouched
+            // below — they have no workspace_sessions row and legitimately
+            // recover from workspace_tab_sessions.
+            let is_pinned = req.agent_name == project_id;
+
+            // Default the command from the tab row when present; the
+            // pinned chat falls back to `claude` so recovery works even
+            // with no tab row (Phase 3).
+            let tab_row = k2so_core::db::schema::WorkspaceTabSession::get_by_agent_name(
                 &conn,
                 &project_id,
                 &req.agent_name,
-            ) {
-                if let Some(saved_cmd) = saved.command {
-                    let mut saved_args: Vec<String> = saved
-                        .args_json
-                        .as_deref()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-                    // If the persisted row has a session_id (claude's
-                    // session UUID from the original spawn), strip
-                    // any existing `--session-id` flag from saved args
-                    // (we replace it with `--resume` for unambiguous
-                    // resumption) and splice in `--resume <id>`. The
-                    // original args carry --dangerously-skip-permissions
-                    // and similar flags we want to keep.
-                    if let Some(sid) = saved.session_id.as_deref() {
-                        // Drop any --session-id <value> pair.
-                        let mut i = 0;
-                        while i + 1 < saved_args.len() {
-                            if saved_args[i] == "--session-id" {
-                                saved_args.remove(i); // flag
-                                saved_args.remove(i); // value
-                            } else {
-                                i += 1;
-                            }
-                        }
-                        let already_has_resume = saved_args
-                            .iter()
-                            .any(|a| a == "--resume" || a == "-r");
-                        if !already_has_resume {
-                            saved_args.push("--resume".to_string());
-                            saved_args.push(sid.to_string());
+            )
+            .ok()
+            .flatten();
+
+            // Source the resume id: SSOT for the pinned chat, the tab
+            // row's argv-derived id for ad-hoc tabs.
+            let resume_id: Option<String> = if is_pinned {
+                k2so_core::db::schema::WorkspaceSession::get(&conn, &project_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.session_id)
+                    .filter(|s| !s.is_empty())
+            } else {
+                tab_row.as_ref().and_then(|r| r.session_id.clone())
+            };
+
+            // Pick the command + base args. Tab row wins when it carries a
+            // command; the pinned chat defaults to `claude` so it recovers
+            // even after Phase 3 drops the tab-row write.
+            let recovered_cmd = tab_row
+                .as_ref()
+                .and_then(|r| r.command.clone())
+                .or_else(|| if is_pinned { Some("claude".to_string()) } else { None });
+
+            if let Some(saved_cmd) = recovered_cmd {
+                let mut saved_args: Vec<String> = tab_row
+                    .as_ref()
+                    .and_then(|r| r.args_json.as_deref())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| {
+                        // No tab row (pinned, Phase 3): start from the
+                        // standard pinned-chat base flags so a recovered
+                        // claude still runs headlessly.
+                        vec!["--dangerously-skip-permissions".to_string()]
+                    });
+                // If we have a resume id, strip any existing
+                // `--session-id` flag (we replace it with `--resume` for
+                // unambiguous resumption) and splice in `--resume <id>`.
+                // The base args carry --dangerously-skip-permissions and
+                // similar flags we want to keep.
+                if let Some(sid) = resume_id.as_deref() {
+                    // Drop any --session-id <value> pair.
+                    let mut i = 0;
+                    while i + 1 < saved_args.len() {
+                        if saved_args[i] == "--session-id" {
+                            saved_args.remove(i); // flag
+                            saved_args.remove(i); // value
+                        } else {
+                            i += 1;
                         }
                     }
-                    log_debug!(
-                        "[v2-spawn] restart-recovery: project={} agent={} replayed command={} args={:?}",
-                        project_id, req.agent_name, saved_cmd, saved_args
-                    );
-                    command = Some(saved_cmd);
-                    args = saved_args;
+                    let already_has_resume = saved_args
+                        .iter()
+                        .any(|a| a == "--resume" || a == "-r");
+                    if !already_has_resume {
+                        saved_args.push("--resume".to_string());
+                        saved_args.push(sid.to_string());
+                    }
                 }
+                log_debug!(
+                    "[v2-spawn] restart-recovery: project={} agent={} pinned={} resume_source={} replayed command={} args={:?}",
+                    project_id,
+                    req.agent_name,
+                    is_pinned,
+                    if is_pinned { "workspace_sessions(SSOT)" } else { "workspace_tab_sessions" },
+                    saved_cmd,
+                    saved_args
+                );
+                command = Some(saved_cmd);
+                args = saved_args;
             }
         }
     }

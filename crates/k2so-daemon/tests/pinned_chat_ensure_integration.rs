@@ -97,6 +97,94 @@ fn active_terminal_id(workspace_id: &str) -> Option<String> {
         .and_then(|row| row.active_terminal_id)
 }
 
+/// Read `workspace_sessions.session_id` (the pinned-chat identity SSOT)
+/// for a workspace.
+fn saved_session_id(workspace_id: &str) -> Option<String> {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    k2so_core::db::schema::WorkspaceSession::get(&conn, workspace_id)
+        .unwrap()
+        .and_then(|row| row.session_id)
+}
+
+/// Override `$HOME` for the duration of a test so the resolver's
+/// on-disk probes (`claude_session_file_exists`,
+/// `newest_claude_session_on_disk`) read a controlled
+/// `~/.claude/projects` tree instead of the developer's real one.
+/// Restores the prior `$HOME` on drop. Mirrors the `U6HomeGuard`
+/// pattern in `chat_history.rs`'s unit tests.
+struct HomeGuard {
+    original: Option<std::ffi::OsString>,
+    home: PathBuf,
+}
+
+impl HomeGuard {
+    fn new(label: &str) -> Self {
+        let home = std::env::temp_dir().join(format!(
+            "k2so-pinned-chat-home-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let original = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        Self { original, home }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// Write a non-empty Claude session `.jsonl` on disk under
+/// `$HOME/.claude/projects/<hash>/<session_id>.jsonl` so the resolver's
+/// `claude_session_file_exists` happy path (and the
+/// `newest_claude_session_on_disk` converge fallback) find a real prior
+/// conversation. The shim `claude` (which just execs `cat`) never writes
+/// a `.jsonl`, so the test must seed disk truth itself.
+fn write_on_disk_session(project_path: &str, session_id: &str) {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+    let root = k2so_core::chat_history::resolve_root_project_path(project_path);
+    let hash = k2so_core::chat_history::claude_project_hash(root);
+    let dir = home.join(".claude").join("projects").join(&hash);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Non-empty: `newest_claude_session_on_disk` skips 0-byte files
+    // (never-run pre-allocations) and `--resume` rejects them.
+    std::fs::write(
+        dir.join(format!("{session_id}.jsonl")),
+        b"{\"cwd\":\"/x\",\"sessionId\":\"seed\"}\n",
+    )
+    .unwrap();
+}
+
+/// Force `workspace_sessions.session_id` (the SSOT) to a known value so
+/// a test can assert restart-recovery / resolve reads it.
+fn set_saved_session_id(workspace_id: &str, session_id: &str) {
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    // The row may not exist yet (cold workspace); INSERT-or-UPDATE on the
+    // project_id-UNIQUE key, mirroring the resolver's own upsert shape.
+    let row_id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO workspace_sessions (id, project_id, session_id, harness, owner, status, created_at) \
+         VALUES (?1, ?2, ?3, 'claude', 'user', 'running', unixepoch()) \
+         ON CONFLICT(project_id) DO UPDATE SET session_id = ?3",
+        rusqlite::params![row_id, workspace_id, session_id],
+    )
+    .unwrap();
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Fresh spawn on a never-chatted workspace.
 // ─────────────────────────────────────────────────────────────────────
@@ -301,4 +389,185 @@ async fn ensure_pinned_chat_errors_when_workspace_unregistered() {
         result.unwrap_err().contains("project not registered"),
         "error must explain the cause"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GH#24 regression lock (pinned-chat-identity-ssot PRD §8): a reused PTY
+// `ensure` returns a STABLE claudeSessionId across N calls when a real
+// session exists on disk. The old defect re-minted an unconfirmed id on
+// every resolve (a reused PTY never ran it → JSONL absent forever →
+// re-mint loop on remote/companion clients). With a non-empty `.jsonl`
+// seeded on disk + the SSOT pointing at it, every resolve must converge
+// to the SAME id.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure_pinned_chat_reused_returns_stable_session_id_across_calls() {
+    let _g = lock();
+    init_for_tests();
+    v2_session_map::clear_for_tests();
+    let _home = HomeGuard::new("stable");
+    let _shim = install_claude_shim();
+
+    let workspace_id = "pinned-stable-ws";
+    let project = setup_project(workspace_id, "stable");
+    let project_path = project.to_string_lossy().into_owned();
+
+    // Seed a REAL prior conversation: an on-disk `.jsonl` + the SSOT
+    // pointing at it. This is the Detached state the pinned chat resumes.
+    let seeded = "11111111-2222-3333-4444-555555555555";
+    write_on_disk_session(&project_path, seeded);
+    set_saved_session_id(workspace_id, seeded);
+
+    // First ensure: resolver hits the happy path (saved id's JSONL is on
+    // disk) → --resume <seeded>, fresh spawn under the canonical key.
+    let first = ensure_pinned_chat(&project_path, false).expect("first ensure");
+    assert!(!first.reused, "first call spawns fresh");
+    assert!(
+        first.resumed_existing,
+        "a workspace with an on-disk session must --resume, not mint"
+    );
+    assert_eq!(
+        first.claude_session_id, seeded,
+        "first resolve must resume the seeded on-disk session"
+    );
+    assert!(
+        first.args.iter().any(|a| a == seeded),
+        "argv must carry the seeded id, got: {:?}",
+        first.args
+    );
+
+    // N more ensures REUSE the live PTY. The id must NOT drift — the
+    // GH#24 regression lock. Each call re-resolves; with the JSONL still
+    // on disk the resolver converges to the same id every time.
+    for n in 0..3 {
+        let again = ensure_pinned_chat(&project_path, false).expect("reused ensure");
+        assert!(again.reused, "call #{n} must reuse the live PTY");
+        assert_eq!(
+            again.session_id, first.session_id,
+            "reused daemon session id must be stable (call #{n})"
+        );
+        assert_eq!(
+            again.claude_session_id, seeded,
+            "claudeSessionId must be STABLE across reused calls (call #{n}) — GH#24 regression lock"
+        );
+    }
+
+    // The SSOT was never overwritten with an unconfirmed mint.
+    assert_eq!(
+        saved_session_id(workspace_id).as_deref(),
+        Some(seeded),
+        "workspace_sessions.session_id (SSOT) must still hold the seeded id"
+    );
+
+    v2_session_map::clear_for_tests();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// #681 lock (kept green): a brand-new workspace with NO on-disk session
+// still MINTS a fresh `--session-id` and reports resumedExisting=false,
+// even with a HomeGuard pointing at an empty `~/.claude/projects`.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure_pinned_chat_brand_new_mints_with_no_on_disk_session() {
+    let _g = lock();
+    init_for_tests();
+    v2_session_map::clear_for_tests();
+    let _home = HomeGuard::new("mint");
+    let _shim = install_claude_shim();
+
+    let workspace_id = "pinned-mint-ws";
+    let project = setup_project(workspace_id, "mint");
+    let project_path = project.to_string_lossy().into_owned();
+
+    // No write_on_disk_session: the workspace is genuinely Absent.
+    let out = ensure_pinned_chat(&project_path, false).expect("ensure on brand-new ws");
+    assert!(
+        !out.resumed_existing,
+        "Absent workspace must MINT (--session-id), not --resume (#681)"
+    );
+    assert!(
+        out.args.iter().any(|a| a == "--session-id"),
+        "argv must carry --session-id, got: {:?}",
+        out.args
+    );
+    assert!(
+        !out.args.iter().any(|a| a == "--resume"),
+        "argv must NOT carry --resume on a brand-new mint, got: {:?}",
+        out.args
+    );
+
+    v2_session_map::clear_for_tests();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 2 lock (pinned-chat-identity-ssot PRD §4.3.1): restart-recovery
+// for the pinned chat resumes from `workspace_sessions.session_id` (the
+// SSOT), NOT `workspace_tab_sessions`. We simulate a daemon restart:
+// the v2 map is empty, the SSOT holds the prior conversation id, and
+// `handle_v2_spawn` lands with an empty command (the renderer's
+// canonical re-spawn shape). The recovered PTY must run
+// `claude ... --resume <ssot-id>`.
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_recovery_resumes_pinned_chat_from_ssot() {
+    let _g = lock();
+    init_for_tests();
+    v2_session_map::clear_for_tests();
+    let _home = HomeGuard::new("recover");
+    let _shim = install_claude_shim();
+
+    let workspace_id = "pinned-recover-ws";
+    let project = setup_project(workspace_id, "recover");
+    let project_path = project.to_string_lossy().into_owned();
+
+    // Prior conversation: on-disk JSONL + SSOT. NO workspace_tab_sessions
+    // row is written (Phase 3 stops booking it for the pinned chat), so
+    // recovery MUST source the resume id from the SSOT alone.
+    let prior = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    write_on_disk_session(&project_path, prior);
+    set_saved_session_id(workspace_id, prior);
+
+    // Daemon "restart": the in-memory map is empty (clear above). The
+    // renderer re-spawns the canonical pinned chat with an EMPTY command
+    // (the v2 default for a restored canonical session) keyed on the bare
+    // project_id. The restart-recovery branch must splice
+    // `--resume <prior>` from workspace_sessions.session_id.
+    let body = serde_json::json!({
+        "agent_name": workspace_id,
+        "cwd": project_path,
+        // command intentionally absent → recovery branch fires.
+    })
+    .to_string();
+    let resp = k2so_daemon::v2_spawn::handle_v2_spawn(body.as_bytes());
+    assert_eq!(
+        resp.status, "200 OK",
+        "recovery spawn must succeed, got: {} / {}",
+        resp.status, resp.body
+    );
+
+    // Inspect the live session's argv: it must carry `--resume <prior>`
+    // sourced from the SSOT, and `claude` as the command.
+    let live = v2_session_map::lookup_by_agent_name(workspace_id)
+        .expect("recovered canonical session must be registered");
+    assert_eq!(
+        live.program.as_deref(),
+        Some("claude"),
+        "recovered pinned chat must run `claude`"
+    );
+    let resume_idx = live
+        .args
+        .iter()
+        .position(|a| a == "--resume")
+        .expect("recovered argv must carry --resume");
+    assert_eq!(
+        live.args.get(resume_idx + 1).map(String::as_str),
+        Some(prior),
+        "restart-recovery must resume the SSOT id, got argv: {:?}",
+        live.args
+    );
+
+    v2_session_map::clear_for_tests();
 }

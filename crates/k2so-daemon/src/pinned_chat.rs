@@ -209,6 +209,24 @@ pub fn ensure_pinned_chat(
         );
     }
 
+    // 6. Eager post-spawn read-back (pinned-chat-identity-ssot PRD §4.1a;
+    //    GH#24). On a FRESH spawn (`!reused`), claude will write its
+    //    `.jsonl` a beat from now under the session id it actually adopts.
+    //    Defer ~5s, probe the chat-history dir, and stamp
+    //    `workspace_sessions.session_id` (the SSOT) with the adopted id.
+    //    This writes truth at the source so the resolver's
+    //    `claude_session_file_exists` happy-path hits on the next ensure —
+    //    no re-mint loop. On a reused PTY we skip: identity is already
+    //    correct (the resolver/earlier read-back set it) and no new
+    //    `.jsonl` is being created. The 0.39.40 resolver converge fallback
+    //    remains the lazy safety net if this eager stamp ever misses.
+    if !spawn_outcome.reused {
+        crate::wake_headless::defer_stamp_adopted_session(
+            project_path.to_string(),
+            project_id.clone(),
+        );
+    }
+
     log_debug!(
         "[daemon/pinned-chat] ensured session={} canonical_key={} claude_session={} resumed_existing={} reused={} force_respawn={}",
         session_id,

@@ -96,6 +96,26 @@ pub fn register(agent_name: impl Into<String>, session: Arc<DaemonPtySession>) {
         let db = k2so_core::db::shared();
         let conn = db.lock();
         if let Some(project_id) = k2so_core::workspace::agent_identity::resolve_project_id(&conn, &cwd) {
+            // pinned-chat-identity-ssot PRD §4.3.2 (GH#24): the canonical
+            // pinned chat (`agent_name == project_id`) must NOT double-book
+            // its identity in `workspace_tab_sessions`. Its single source
+            // of truth is `workspace_sessions.session_id` (1 row/workspace,
+            // `project_id` UNIQUE), stamped by the resolver + the deferred
+            // read-back. Writing an argv-derived copy here is the redundant
+            // second store that the GH#24 re-mint loop fed on, and now that
+            // restart-recovery reads the SSOT (§4.3.1), the tab row is dead
+            // weight for the pinned chat. Validated safe to skip: the
+            // session-picker (#679) reads chat history FROM DISK
+            // (`list_all_sessions` → `parse_claude_sessions`), never this
+            // table, so the dropdown is unaffected. Ad-hoc Cmd+T tabs
+            // (`agent_name == tab-<paneGroupId>`) still need this row for
+            // restart-recovery and are written below as before.
+            if key == project_id {
+                log_debug!(
+                    "[v2-map] register: skipping workspace_tab_sessions stamp for canonical pinned key={key} (identity SSOT is workspace_sessions)"
+                );
+                return;
+            }
             let args_json = serde_json::to_string(&session.args).ok();
             // 0.38.8 — extract claude's session UUID from the args if
             // present. v2_spawn::handle_v2_spawn auto-injects
