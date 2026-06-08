@@ -3,6 +3,14 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.41 — Pinned chats remember exactly where they were
+
+- **Your pinned chat resumes the same conversation, every time.** The workspace's
+  pinned chat now has one canonical, server-owned identity — so reopening it,
+  switching devices, or restarting the host all return you to the *same* Claude
+  session instead of occasionally starting a fresh one. This is the root fix
+  behind the remote re-mint loop the last release patched.
+
 ## 0.39.40 — Clone-to chat history lands, and remote pinned chats settle down
 
 - **Cloned workspaces keep their chat history on the new machine.** After a
