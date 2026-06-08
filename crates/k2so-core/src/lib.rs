@@ -28,6 +28,7 @@ macro_rules! log_debug {
     }};
 }
 
+pub mod active;
 pub mod agent_hooks;
 // Phase 2.5e: `agents` module retired. All historical homes for
 // agent-scoped code redistributed across `workspace/`, `skills/`,

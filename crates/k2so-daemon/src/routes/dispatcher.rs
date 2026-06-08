@@ -340,7 +340,12 @@ async fn handle_one_request(
             | "/cli/window-state/set"
             | "/cli/projects/create" | "/cli/projects/update" | "/cli/projects/delete"
             | "/cli/projects/reorder" | "/cli/projects/touch-interaction"
-            | "/cli/projects/touch-interaction-clear" | "/cli/projects/add-from-path"
+            | "/cli/projects/touch-interaction-clear"
+            // task #672 — canonical Active mutating routes (owner-OR-
+            // connect-user auth via token_ok in the /cli/projects/ POST
+            // arm; dispatched by db_routes::dispatch_unit4_post).
+            | "/cli/projects/activate" | "/cli/projects/pin" | "/cli/projects/dismiss"
+            | "/cli/projects/add-from-path"
             | "/cli/projects/add-without-git" | "/cli/projects/init-git-and-open"
             | "/cli/projects/enable-worktrees" | "/cli/projects/detect-icon"
             | "/cli/projects/set-icon" | "/cli/projects/clear-icon"

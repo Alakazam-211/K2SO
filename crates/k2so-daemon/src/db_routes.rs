@@ -744,6 +744,99 @@ pub fn handle_projects_reorder(body: &[u8]) -> CliResponse {
     unit_ok(pops::projects_reorder(&b.ids))
 }
 
+// ── Canonical Active set routes (task #672) ────────────────────────────
+
+/// Current unix time in milliseconds (the renderer's native clock).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveSnapshot {
+    project_ids: Vec<String>,
+    active_window_hours: u32,
+}
+
+/// `GET /cli/projects/active` → `{ projectIds, activeWindowHours }`.
+/// Canonical Active-set snapshot used by the renderer on connect /
+/// host-switch. Reads `active_window_hours` from app_settings.
+pub fn handle_projects_active() -> CliResponse {
+    let window = k2so_core::app_settings::load().active_window_hours;
+    match pops::compute_active_project_ids(now_ms(), window) {
+        Ok(ids) => ok_serialized(ActiveSnapshot {
+            project_ids: ids,
+            active_window_hours: window,
+        }),
+        Err(e) => CliResponse::internal_error(format!("compute active set: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivateBody {
+    project_id: String,
+}
+
+/// `POST /cli/projects/activate { projectId }` → bump
+/// `last_interaction_at` (the workspace was opened/focused), recompute
+/// the canonical Active set, broadcast `ActiveChanged`. `{ "ok": true }`.
+pub fn handle_projects_activate(body: &[u8]) -> CliResponse {
+    let b: ActivateBody = match parse_body(body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if let Err(e) = pops::projects_touch_interaction(&b.project_id) {
+        return CliResponse::bad_request(e);
+    }
+    crate::active_reaper::recompute_and_broadcast_active();
+    CliResponse::ok_json(r#"{"ok":true}"#.to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinBody {
+    project_id: String,
+    pinned: bool,
+}
+
+/// `POST /cli/projects/pin { projectId, pinned }` → set
+/// `manually_active` = pinned, recompute, broadcast. `{ "ok": true }`.
+pub fn handle_projects_pin(body: &[u8]) -> CliResponse {
+    let b: PinBody = match parse_body(body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if let Err(e) = pops::projects_set_manually_active(&b.project_id, b.pinned) {
+        return CliResponse::bad_request(e);
+    }
+    crate::active_reaper::recompute_and_broadcast_active();
+    CliResponse::ok_json(r#"{"ok":true}"#.to_string())
+}
+
+/// `POST /cli/projects/dismiss { projectId }` → clear `manually_active`
+/// (if set) AND arm the reaper's grace for this workspace NOW (don't
+/// wait for the interaction window to expire), then recompute +
+/// broadcast. `{ "ok": true }`.
+pub fn handle_projects_dismiss(body: &[u8]) -> CliResponse {
+    let b: ActivateBody = match parse_body(body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if let Err(e) = pops::projects_set_manually_active(&b.project_id, false) {
+        return CliResponse::bad_request(e);
+    }
+    // Arm the daemon reaper's grace immediately (PRD §4.2) — the chat is
+    // reap-eligible now, gated only by `!heartbeat` + the 15s grace +
+    // the fire-time re-check; re-activating within the grace cancels it.
+    crate::active_reaper::arm_dismiss_grace(&b.project_id);
+    crate::active_reaper::recompute_and_broadcast_active();
+    CliResponse::ok_json(r#"{"ok":true}"#.to_string())
+}
+
 pub fn handle_projects_touch_interaction(body: &[u8]) -> CliResponse {
     let b: IdBody = match parse_body(body) {
         Ok(v) => v,
@@ -948,6 +1041,10 @@ pub fn dispatch_unit4_post(path: &str, body: &[u8]) -> CliResponse {
         "/cli/projects/reorder" => handle_projects_reorder(body),
         "/cli/projects/touch-interaction" => handle_projects_touch_interaction(body),
         "/cli/projects/touch-interaction-clear" => handle_projects_touch_interaction_clear(body),
+        // task #672 — canonical Active mutating routes.
+        "/cli/projects/activate" => handle_projects_activate(body),
+        "/cli/projects/pin" => handle_projects_pin(body),
+        "/cli/projects/dismiss" => handle_projects_dismiss(body),
         "/cli/projects/add-from-path" => handle_projects_add_from_path(body),
         "/cli/projects/add-without-git" => handle_projects_add_without_git(body),
         "/cli/projects/init-git-and-open" => handle_projects_init_git_and_open(body),

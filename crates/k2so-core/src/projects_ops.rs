@@ -411,6 +411,61 @@ pub fn projects_reorder(ids: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+// ── Canonical Active set (task #672) ───────────────────────────────────
+
+/// Load every project as a DB-free [`crate::active::ProjectRow`] view
+/// for the canonical Active compute. Includes the audit sentinels
+/// (`_orphan`/`_broadcast`) — they can never be Active (never pinned,
+/// never interacted with), so they cost nothing and skipping the
+/// `projects_list` filter keeps this a straight column read.
+pub fn active_project_rows() -> Result<Vec<crate::active::ProjectRow>, String> {
+    let db = db::shared();
+    let conn = db.lock();
+    let mut stmt = conn
+        .prepare("SELECT id, manually_active, last_interaction_at FROM projects")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(crate::active::ProjectRow {
+                id: row.get(0)?,
+                manually_active: row.get(1)?,
+                last_interaction_at_secs: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// Compute the canonical Active project-id set against the live DB.
+/// `now_ms` is unix milliseconds; `active_window_hours` comes from
+/// `app_settings`. Thin wrapper over [`crate::active::active_project_ids`]
+/// — used by the daemon's `GET /cli/projects/active` route + the Active
+/// reaper so both share one truth.
+pub fn compute_active_project_ids(
+    now_ms: i64,
+    active_window_hours: u32,
+) -> Result<Vec<String>, String> {
+    let rows = active_project_rows()?;
+    Ok(crate::active::active_project_ids(now_ms, &rows, active_window_hours))
+}
+
+/// Set `projects.manually_active` for a single project (the dedicated
+/// pin/unpin write behind `POST /cli/projects/pin`). `pinned = true`
+/// pins the workspace into the Active bar; `false` clears the pin.
+/// Returns `Ok(())` even if the id doesn't exist (idempotent UPDATE).
+pub fn projects_set_manually_active(id: &str, pinned: bool) -> Result<(), String> {
+    let db = db::shared();
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE projects SET manually_active = ?1 WHERE id = ?2",
+        rusqlite::params![if pinned { 1i64 } else { 0i64 }, id],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 pub fn projects_touch_interaction(id: &str) -> Result<(), String> {
     let db = db::shared();
     let conn = db.lock();

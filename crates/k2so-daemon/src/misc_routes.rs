@@ -859,6 +859,8 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
         "/cli/presets/list" => crate::db_routes::handle_presets_list(),
         "/cli/window-state/get" => crate::db_routes::handle_window_state_get(),
         "/cli/projects/list" => crate::db_routes::handle_projects_list(),
+        // task #672 — canonical Active-set snapshot (GET).
+        "/cli/projects/active" => crate::db_routes::handle_projects_active(),
         "/cli/projects/get-icon" => crate::db_routes::handle_projects_get_icon(params),
         "/cli/projects/get-editors" => crate::db_routes::handle_projects_get_editors(),
         "/cli/projects/get-all-editors" => crate::db_routes::handle_projects_get_all_editors(),

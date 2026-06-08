@@ -34,6 +34,7 @@
 //!   (which rotates the random port) propagates instantly without
 //!   any running consumer needing to be restarted itself.
 
+mod active_reaper;
 mod agents_routes;
 mod awareness_ws;
 mod boot_status;
@@ -618,6 +619,15 @@ async fn async_main() {
     // correctly-paired daemon, and stops showing "Applying updates…".
     boot_status::set_ready();
     log_debug!("[daemon] boot complete — phase=ready");
+
+    // task #672 — canonical daemon-owned Active reaper. A single
+    // long-lived task that owns the grace-reap of dormant workspace
+    // chat PTYs, keyed on the canonical Active set (replaces the
+    // per-client renderer sweeps). Its first pass is the boot
+    // reconciliation that arms timers for already-aged survivors
+    // (#663 boot-survivor gap, daemon-side). Spawned after the
+    // readiness gate opens so it operates against fully-migrated state.
+    let _active_reaper_handle = active_reaper::spawn();
 
     // K2 Connect — re-launch the frpc tunnel on boot when the user opted
     // in (tunnel.json `auto_start: true`) AND the config is connectable.

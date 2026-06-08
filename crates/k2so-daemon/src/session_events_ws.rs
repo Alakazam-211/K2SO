@@ -180,6 +180,13 @@ fn event_matches_workspace(event: &SessionEvent, workspace_path: &str) -> bool {
         SessionEvent::SessionAdded { workspace_path: cwd, .. } => cwd,
         SessionEvent::SessionRemoved { workspace_path: cwd, .. } => cwd,
         SessionEvent::SessionRenamed { workspace_path: cwd, .. } => cwd,
+        // task #672 — ActiveChanged is APP-LEVEL (the canonical Active
+        // union for the whole daemon), not tied to one workspace path.
+        // Forward it to EVERY subscriber so each client mirrors the
+        // global set regardless of which `?path=` it subscribed under.
+        // The renderer's app-level `subscribeToActiveState` consumer
+        // filters for `kind === "active_changed"`.
+        SessionEvent::ActiveChanged { .. } => return true,
     };
     let trimmed = workspace_path.trim_end_matches('/');
     let prefix_with_slash = if trimmed.is_empty() {

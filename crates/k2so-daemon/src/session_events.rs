@@ -88,6 +88,30 @@ pub enum SessionEvent {
         pane_group_id: Option<String>,
         agent_name: String,
     },
+    /// Canonical Active-set changed (task #672 — daemon-owned Active).
+    /// Carries the FULL set (not a diff) so client convergence is
+    /// trivial + race-free (last-write-wins on a monotonic snapshot).
+    /// Emitted after every recompute that can change membership:
+    /// activate / pin / dismiss / window-tick / reaper close.
+    ///
+    /// **App-level, not workspace-scoped.** Unlike `SessionAdded`/
+    /// `SessionRemoved` (filtered by `cwd starts_with path`), this
+    /// event has no single workspace — `session_events_ws` forwards it
+    /// to EVERY subscriber regardless of their `?path=` so each client
+    /// mirrors the global union (see `event_matches_workspace`).
+    ///
+    /// **Wire shape (frozen — the renderer codes against these EXACT
+    /// names):** `{ "kind": "active_changed", "activeProjectIds":
+    /// string[], "activeWindowHours": number }`. The `#[serde(tag =
+    /// "kind", rename_all = "snake_case")]` on the enum yields the
+    /// `active_changed` tag; the per-field `rename` yields the camelCase
+    /// field names.
+    ActiveChanged {
+        #[serde(rename = "activeProjectIds")]
+        active_project_ids: Vec<String>,
+        #[serde(rename = "activeWindowHours")]
+        active_window_hours: u32,
+    },
     /// Session label/title changed. Reserved variant — currently
     /// unused on the emit side because the daemon's existing label
     /// broadcast (`sessions_grid_ws::Outbound::LabelChanged`) is
@@ -141,6 +165,32 @@ pub fn pane_group_id_from_agent(agent_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FROZEN WIRE CONTRACT (task #672): the renderer codes against
+    /// EXACTLY `{ "kind": "active_changed", "activeProjectIds":
+    /// string[], "activeWindowHours": number }`. Pin the serialized
+    /// shape so any field rename / tag drift fails CI loudly.
+    #[test]
+    fn active_changed_serializes_to_frozen_contract() {
+        let ev = SessionEvent::ActiveChanged {
+            active_project_ids: vec!["pid-a".to_string(), "pid-b".to_string()],
+            active_window_hours: 24,
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(json["kind"], "active_changed");
+        assert_eq!(
+            json["activeProjectIds"],
+            serde_json::json!(["pid-a", "pid-b"])
+        );
+        assert_eq!(json["activeWindowHours"], 24);
+        // No stray snake_case leakage.
+        assert!(json.get("active_project_ids").is_none());
+        assert!(json.get("active_window_hours").is_none());
+        // Exactly the three documented keys.
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 3, "unexpected extra fields: {obj:?}");
+    }
 
     #[test]
     fn pane_group_id_extracts_tab_prefix() {
