@@ -100,6 +100,9 @@ vi.mock('@/kessel/daemon-ws', () => ({
 // doesn't reach into the real WS plumbing during the test.
 vi.mock('./session-events', () => ({
   subscribeToWorkspaceSessionEvents: vi.fn(() => () => undefined),
+  // 0.39.39 (#676/#677) — the active-workspace subscription also opens a
+  // tab-title/tab-order WS; stub it inert too.
+  subscribeToWorkspaceTabEvents: vi.fn(() => () => undefined),
 }))
 
 // Now import the REAL tabs store under test.

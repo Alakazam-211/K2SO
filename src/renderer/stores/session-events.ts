@@ -132,6 +132,47 @@ export interface ReviewChangedEvent {
   agent: string | null
 }
 
+/** WORKSPACE-SCOPED — a tab's title changed (daemon-canonical, #676). A
+ *  rename in one client/window broadcasts here so every other client
+ *  converges its tab BAR label. `project` is the project PATH echoed under
+ *  the contract name (kept distinct from the filter field so they can't
+ *  drift); `tabId`/`title` are the renamed tab + its new label. */
+export interface TabTitleChangedEvent {
+  kind: 'tab_title_changed'
+  workspacePath: string
+  project: string
+  tabId: string
+  title: string
+}
+
+/** WORKSPACE-SCOPED — workspace tab-order/layout persistence advanced
+ *  (#677). Carries the monotonic `revision` the daemon stamped on the
+ *  write; a renderer re-fetches the layout when this revision is ahead of
+ *  its last-known base (a remote client reordered) and drops a stale local
+ *  write whose base is behind. `project`/`workspace` are the
+ *  `(projectId, workspaceId)` key of the `workspace_layouts` row. */
+export interface TabOrderChangedEvent {
+  kind: 'tab_order_changed'
+  workspacePath: string
+  project: string
+  workspace: string
+  revision: number
+}
+
+/** WORKSPACE-SCOPED — a heartbeat session's live (PTY-attached) state
+ *  flipped (#677). The daemon owns the PTY lifecycle and emits this when a
+ *  heartbeat's `active_terminal_id` is stamped (live=true) or nulled
+ *  (live=false). `project` is the projectId; `agent` is the heartbeat name.
+ *  `workspacePath` may be empty (the spawn path doesn't always resolve it)
+ *  — the renderer then matches on `project`. */
+export interface HeartbeatStateChangedEvent {
+  kind: 'heartbeat_state_changed'
+  workspacePath: string
+  project: string
+  agent: string
+  live: boolean
+}
+
 export type SessionEventMessage =
   | SessionAddedEvent
   | SessionRemovedEvent
@@ -143,6 +184,9 @@ export type SessionEventMessage =
   | TunnelStatusChangedEvent
   | ReviewQueueChangedEvent
   | ReviewChangedEvent
+  | TabTitleChangedEvent
+  | TabOrderChangedEvent
+  | HeartbeatStateChangedEvent
 
 export interface SessionEventHandlers {
   onAdded?: (event: SessionAddedEvent) => void
@@ -714,6 +758,157 @@ export function subscribeToWorkspaceReviewEvents(
       if (stopped) return
       console.debug(
         `[review-events] WS closed (code=${ev.code}, reason="${ev.reason ?? ''}") — scheduling reconnect`,
+      )
+      triggerReconnect()
+    }
+  }
+
+  void openSocket()
+
+  return () => {
+    stopped = true
+    clearReconnect()
+    if (socket) {
+      try {
+        socket.close(1000, 'unsubscribe')
+      } catch {
+        // ignore
+      }
+      socket = null
+    }
+  }
+}
+
+// ── Workspace-scoped tab / heartbeat subscription (#676/#677) ──────────────
+//
+// The Wave B WORKSPACE-SCOPED tab-title / tab-order / heartbeat-live events
+// (`tab_title_changed`, `tab_order_changed`, `heartbeat_state_changed`) are
+// forwarded only to subscribers whose `?path=` matches the carried
+// `workspacePath` (cwd-prefix rule), EXCEPT heartbeat events whose spawn
+// path didn't resolve a `workspacePath` (empty string) — those are
+// broadcast to every subscriber and the consumer matches on `project`
+// (the project_id). This helper opens that per-workspace socket and invokes
+// the caller's handlers; consumers (`stores/tabs.ts`,
+// `stores/heartbeat-sessions.ts`) re-snapshot their truth on each
+// (re)connect (`onHello`) to backfill anything missed during a drop.
+// Tearing down + re-subscribing on a workspace switch is the caller's
+// responsibility (the path is baked into the URL).
+
+export interface WorkspaceTabHandlers {
+  /** A tab's daemon-canonical title changed (rename in another client). */
+  onTabTitleChanged?: (event: TabTitleChangedEvent) => void
+  /** The workspace layout/tab-order persistence advanced (carries the
+   *  monotonic revision for last-write-wins conflict resolution). */
+  onTabOrderChanged?: (event: TabOrderChangedEvent) => void
+  /** A heartbeat session's live (PTY-attached) state flipped. */
+  onHeartbeatStateChanged?: (event: HeartbeatStateChangedEvent) => void
+  /** Fires after each successful (re)connect — re-snapshot here. */
+  onHello?: (event: HelloEvent) => void
+}
+
+/** Subscribe to WORKSPACE-SCOPED tab/heartbeat events for one workspace
+ *  path. Returns an unsubscribe fn that tears down the WS + reconnect loop. */
+export function subscribeToWorkspaceTabEvents(
+  workspacePath: string,
+  handlers: WorkspaceTabHandlers,
+): UnsubscribeFn {
+  let socket: WebSocket | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let backoffMs = INITIAL_BACKOFF_MS
+  let stopped = false
+
+  const clearReconnect = (): void => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
+
+  const scheduleReconnect = (): void => {
+    if (stopped) return
+    clearReconnect()
+    const delay = backoffMs
+    backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      void openSocket()
+    }, delay)
+  }
+
+  const triggerReconnect = (): void => {
+    if (stopped) return
+    if (reconnectTimer !== null) return
+    scheduleReconnect()
+  }
+
+  const openSocket = async (): Promise<void> => {
+    if (stopped) return
+    let creds: DaemonWsAvailable
+    try {
+      creds = await getDaemonWs()
+    } catch (err) {
+      invalidateDaemonWs()
+      console.warn('[tab-events] daemon credentials unavailable, retrying:', err)
+      scheduleReconnect()
+      return
+    }
+    if (stopped) return
+
+    const url = `${daemonWsBase(creds)}/cli/sessions/events?path=${encodeURIComponent(workspacePath)}&token=${encodeURIComponent(creds.token)}`
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(url)
+    } catch (err) {
+      console.warn('[tab-events] WS construction failed:', err)
+      scheduleReconnect()
+      return
+    }
+    socket = ws
+
+    ws.onopen = () => {
+      backoffMs = INITIAL_BACKOFF_MS
+    }
+
+    ws.onmessage = (ev) => {
+      const raw = typeof ev.data === 'string' ? ev.data : null
+      if (raw === null) return
+      let msg: SessionEventMessage
+      try {
+        msg = JSON.parse(raw) as SessionEventMessage
+      } catch (err) {
+        console.warn('[tab-events] failed to parse frame:', err, raw)
+        return
+      }
+      switch (msg.kind) {
+        case 'hello':
+          handlers.onHello?.(msg)
+          break
+        case 'tab_title_changed':
+          handlers.onTabTitleChanged?.(msg)
+          break
+        case 'tab_order_changed':
+          handlers.onTabOrderChanged?.(msg)
+          break
+        case 'heartbeat_state_changed':
+          handlers.onHeartbeatStateChanged?.(msg)
+          break
+        default:
+          // session_added/removed/renamed + app-level + review events
+          // arrive on this socket too; their dedicated subscribers own
+          // them — ignore here.
+          break
+      }
+    }
+
+    ws.onerror = () => {
+      triggerReconnect()
+    }
+
+    ws.onclose = (ev) => {
+      if (socket === ws) socket = null
+      if (stopped) return
+      console.debug(
+        `[tab-events] WS closed (code=${ev.code}, reason="${ev.reason ?? ''}") — scheduling reconnect`,
       )
       triggerReconnect()
     }

@@ -46,6 +46,7 @@ const ev = vi.hoisted(() => {
     tunnel: [] as Fn[],
     appHello: [] as Fn[],
     reviewSubs: [] as Array<{ path: string; handlers: Record<string, Fn> }>,
+    tabSubs: [] as Array<{ path: string; handlers: Record<string, Fn> }>,
   }
   return { reg }
 })
@@ -73,6 +74,16 @@ vi.mock('@/stores/session-events', () => ({
       return () => void (ev.reg.reviewSubs = ev.reg.reviewSubs.filter((e) => e !== entry))
     },
   ),
+  subscribeToWorkspaceTabEvents: vi.fn(
+    (path: string, handlers: Record<string, (...a: unknown[]) => void>) => {
+      const entry = { path, handlers }
+      ev.reg.tabSubs.push(entry)
+      return () => void (ev.reg.tabSubs = ev.reg.tabSubs.filter((e) => e !== entry))
+    },
+  ),
+  // tabs.ts's active-workspace subscription also opens the session-events
+  // WS; inert here (orthogonal to the tab-title/order wiring under test).
+  subscribeToWorkspaceSessionEvents: vi.fn(() => () => undefined),
 }))
 
 // Daemon transport boundary — keep every fire-and-forget fetch inert so a
@@ -85,9 +96,20 @@ vi.mock('@/kessel/daemon-ws', () => ({
   invalidateDaemonWs: vi.fn(),
   prewarmDaemonWs: vi.fn(),
 }))
+// Daemon CLI boundary — controllable per test. `cli.getImpl` lets a test
+// stub a GET response (e.g. the workspace-layouts/load re-fetch); posts are
+// recorded so a test can assert `workspace/set-tab-title` fired.
+const cli = vi.hoisted(() => ({
+  posts: [] as Array<{ route: string; body: unknown }>,
+  getImpl: (async () => []) as (route: string, params?: unknown) => Promise<unknown>,
+  postImpl: (async () => ({})) as (route: string, body?: unknown) => Promise<unknown>,
+}))
 vi.mock('@/lib/daemon-cli', () => ({
-  daemonCliGet: vi.fn(async () => []),
-  daemonCliPost: vi.fn(async () => ({})),
+  daemonCliGet: vi.fn(async (route: string, params?: unknown) => cli.getImpl(route, params)),
+  daemonCliPost: vi.fn(async (route: string, body?: unknown) => {
+    cli.posts.push({ route, body })
+    return cli.postImpl(route, body)
+  }),
 }))
 vi.mock('@/lib/terminal-daemon', () => ({
   terminalListRunning: vi.fn(async () => []),
@@ -129,6 +151,10 @@ beforeEach(() => {
   ev.reg.tunnel = []
   ev.reg.appHello = []
   ev.reg.reviewSubs = []
+  ev.reg.tabSubs = []
+  cli.posts = []
+  cli.getImpl = async () => []
+  cli.postImpl = async () => ({})
   vi.clearAllTimers()
 })
 
@@ -228,5 +254,247 @@ describe('review-queue — review_changed cutover', () => {
     expect(setInterval).toHaveBeenCalledWith(expect.any(Function), 30_000)
 
     stopReviewQueuePolling()
+  })
+})
+
+// ── tabs: tab titles (#676) ─────────────────────────────────────────────
+
+// Seed a live workspace into backgroundWorkspaces and restore it so the
+// fast path registers the tab-events subscription synchronously (no daemon
+// GET dance). Returns the registered handler bundle + the tab id.
+async function openWorkspaceWithLiveTab(
+  tabsMod: typeof import('./tabs'),
+  key: string,
+  cwd: string,
+): Promise<{ tabId: string; handlers: Record<string, (...a: unknown[]) => void> }> {
+  const { useTabsStore } = tabsMod
+  const tabId = 'tab-1'
+  useTabsStore.setState({
+    tabs: [],
+    extraGroups: [],
+    activeTabId: null,
+    activeWorkspaceKey: null,
+    backgroundWorkspaces: {
+      [key]: {
+        tabs: [
+          {
+            id: tabId,
+            title: 'Original',
+            mosaicTree: 'pg-1',
+            paneGroups: new Map([['pg-1', { id: 'pg-1', items: [], activeItemIndex: 0 }]]),
+          },
+        ],
+        activeTabId: tabId,
+        extraGroups: [],
+        splitCount: 1,
+        activeGroupIndex: 0,
+      },
+    } as never,
+  })
+  await useTabsStore.getState().restoreWorkspace(key, cwd)
+  expect(ev.reg.tabSubs.length).toBe(1)
+  return { tabId, handlers: ev.reg.tabSubs[0].handlers }
+}
+
+describe('tabs — tab-title daemon-canonical (#676)', () => {
+  it('setTabTitle POSTs workspace/set-tab-title when supported', async () => {
+    const tabsMod = await import('./tabs')
+    const { useTabsStore } = tabsMod
+    const { tabId } = await openWorkspaceWithLiveTab(tabsMod, 'projA:wsA', '/ws/a')
+
+    cli.posts = [] // ignore the restore's layout saves
+    useTabsStore.getState().setTabTitle(tabId, 'Renamed')
+
+    const post = cli.posts.find((p) => p.route === 'workspace/set-tab-title')
+    expect(post).toBeDefined()
+    expect(post!.body).toMatchObject({ projectId: 'projA', tabId, title: 'Renamed' })
+    // Local apply happened too.
+    const t = useTabsStore.getState().tabs.find((x) => x.id === tabId)
+    expect(t?.title).toBe('Renamed')
+  })
+
+  it('does NOT POST set-tab-title when unsupported (local-only fallback)', async () => {
+    supports.value = false
+    const tabsMod = await import('./tabs')
+    const { useTabsStore } = tabsMod
+    // Unsupported: no tab-events sub opens; drive setTabTitle on a plain tab.
+    useTabsStore.setState({
+      tabs: [
+        {
+          id: 'tab-x',
+          title: 'Original',
+          mosaicTree: 'pg-x',
+          paneGroups: new Map([['pg-x', { id: 'pg-x', items: [], activeItemIndex: 0 }]]),
+        },
+      ] as never,
+      extraGroups: [],
+      activeTabId: 'tab-x',
+      activeWorkspaceKey: 'projA:wsA',
+    })
+    cli.posts = []
+    useTabsStore.getState().setTabTitle('tab-x', 'Renamed')
+
+    expect(cli.posts.find((p) => p.route === 'workspace/set-tab-title')).toBeUndefined()
+    expect(useTabsStore.getState().tabs.find((x) => x.id === 'tab-x')?.title).toBe('Renamed')
+  })
+
+  it('tab_title_changed event applies the title locally without re-POST', async () => {
+    const tabsMod = await import('./tabs')
+    const { useTabsStore } = tabsMod
+    const { tabId, handlers } = await openWorkspaceWithLiveTab(tabsMod, 'projA:wsA', '/ws/a')
+
+    cli.posts = []
+    handlers.onTabTitleChanged({
+      kind: 'tab_title_changed',
+      workspacePath: '/ws/a',
+      project: '/ws/a',
+      tabId,
+      title: 'FromOtherClient',
+    })
+
+    expect(useTabsStore.getState().tabs.find((x) => x.id === tabId)?.title).toBe('FromOtherClient')
+    // Applying a remote rename must NOT echo a POST back (no feedback loop).
+    expect(cli.posts.find((p) => p.route === 'workspace/set-tab-title')).toBeUndefined()
+  })
+})
+
+// ── tabs: tab-order revision LWW (#677.3) ───────────────────────────────
+
+describe('tabs — tab-order revision conflict (#677.3)', () => {
+  it('skips a stale tab_order_changed (revision <= base) — no layout re-fetch', async () => {
+    const tabsMod = await import('./tabs')
+    const { __setLayoutRevisionForTests, __getLayoutRevisionForTests } = tabsMod
+    const { handlers } = await openWorkspaceWithLiveTab(tabsMod, 'projB:wsB', '/ws/b')
+
+    __setLayoutRevisionForTests('projB:wsB', 5)
+    const getSpy = vi.fn(async () => null)
+    cli.getImpl = getSpy as never
+
+    // A broadcast at-or-below our base = our own (or older) write — skip.
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed',
+      workspacePath: '/ws/b',
+      project: 'projB',
+      workspace: 'wsB',
+      revision: 5,
+    })
+
+    expect(getSpy).not.toHaveBeenCalled()
+    expect(__getLayoutRevisionForTests('projB:wsB')).toBe(5)
+  })
+
+  it('re-fetches the layout on a newer tab_order_changed (remote reorder)', async () => {
+    const tabsMod = await import('./tabs')
+    const { useTabsStore, __setLayoutRevisionForTests, __getLayoutRevisionForTests } = tabsMod
+    const { handlers } = await openWorkspaceWithLiveTab(tabsMod, 'projB:wsB', '/ws/b')
+
+    __setLayoutRevisionForTests('projB:wsB', 2)
+    const remoteLayout = {
+      version: 2,
+      tabs: [
+        { id: 'tab-remote', title: 'Remote', mosaicTree: 'pg-r', paneGroups: { 'pg-r': { id: 'pg-r', items: [], activeItemIndex: 0 } } },
+      ],
+      activeTabId: 'tab-remote',
+      splitCount: 1,
+      activeGroupIndex: 0,
+    }
+    cli.getImpl = async (route: string) =>
+      route === 'workspace-layouts/load' ? JSON.stringify(remoteLayout) : null
+
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed',
+      workspacePath: '/ws/b',
+      project: 'projB',
+      workspace: 'wsB',
+      revision: 7,
+    })
+    // Let the async re-fetch (GET → JSON.parse → restoreLayout) settle.
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+
+    // Base advanced to the remote revision, and the remote layout was
+    // adopted (restoreLayout assigns fresh tab ids, so match on title).
+    expect(__getLayoutRevisionForTests('projB:wsB')).toBe(7)
+    const tabs = useTabsStore.getState().tabs
+    expect(tabs.length).toBe(1)
+    expect(tabs[0].title).toBe('Remote')
+  })
+})
+
+// ── heartbeat-sessions: heartbeat_state_changed (#677.1) ────────────────
+
+describe('heartbeat-sessions — heartbeat-live cutover (#677.1)', () => {
+  function seedRow(store: typeof import('./heartbeat-sessions')['useHeartbeatSessionsStore']) {
+    store.setState({
+      active: [
+        {
+          row: {
+            id: 'hb-1',
+            projectId: 'projH',
+            name: 'nightly',
+            frequency: 'daily',
+            specJson: '{}',
+            wakeupPath: '/w',
+            enabled: true,
+            lastFired: null,
+            lastSessionId: null,
+            archivedAt: null,
+            createdAt: 0,
+          },
+          state: 'scheduled',
+          liveTerminalId: null,
+        },
+      ],
+      archived: [],
+      loadedFor: '/ws/h',
+    } as never)
+  }
+
+  it('subscribes when supported; live event flips the row to live', async () => {
+    const mod = await import('./heartbeat-sessions')
+    const { useHeartbeatSessionsStore, subscribeHeartbeatLive, unsubscribeHeartbeatLive } = mod
+    seedRow(useHeartbeatSessionsStore)
+
+    subscribeHeartbeatLive('/ws/h')
+    expect(ev.reg.tabSubs.length).toBe(1)
+
+    ev.reg.tabSubs[0].handlers.onHeartbeatStateChanged({
+      kind: 'heartbeat_state_changed',
+      workspacePath: '',
+      project: 'projH',
+      agent: 'nightly',
+      live: true,
+    })
+    expect(useHeartbeatSessionsStore.getState().active[0].state).toBe('live')
+
+    ev.reg.tabSubs[0].handlers.onHeartbeatStateChanged({
+      kind: 'heartbeat_state_changed',
+      workspacePath: '',
+      project: 'projH',
+      agent: 'nightly',
+      live: false,
+    })
+    // live=false re-derives the idle state (no lastSessionId → scheduled).
+    expect(useHeartbeatSessionsStore.getState().active[0].state).toBe('scheduled')
+
+    unsubscribeHeartbeatLive()
+  })
+
+  it('does NOT subscribe when unsupported (poll-derivation fallback)', async () => {
+    supports.value = false
+    const mod = await import('./heartbeat-sessions')
+    const { subscribeHeartbeatLive } = mod
+
+    subscribeHeartbeatLive('/ws/h')
+    expect(ev.reg.tabSubs.length).toBe(0)
+  })
+
+  it('applyHeartbeatLive ignores a non-matching row', async () => {
+    const mod = await import('./heartbeat-sessions')
+    const { useHeartbeatSessionsStore } = mod
+    seedRow(useHeartbeatSessionsStore)
+
+    useHeartbeatSessionsStore.getState().applyHeartbeatLive('projH', 'other-hb', true)
+    expect(useHeartbeatSessionsStore.getState().active[0].state).toBe('scheduled')
   })
 })

@@ -1,6 +1,12 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { terminalListRunning } from '@/lib/terminal-daemon'
+import { serverSupports } from '@/lib/server-capabilities'
+import {
+  subscribeToWorkspaceTabEvents,
+  type HeartbeatStateChangedEvent,
+  type UnsubscribeFn,
+} from '@/stores/session-events'
 
 /**
  * Heartbeat sessions store — drives the sidebar Heartbeats panel.
@@ -68,6 +74,21 @@ interface HeartbeatSessionsState {
   refresh: (projectPath: string) => Promise<void>
   /** Clear cached state (call when no workspace is active). */
   clear: () => void
+  /** 0.39.39 (#677.1) — apply a daemon `heartbeat_state_changed` broadcast.
+   *  Flips the matching row's live flag without a poll. The event only
+   *  carries `live` (no terminal id), so live=true sets state 'live' (and
+   *  preserves any known liveTerminalId); live=false re-derives the
+   *  idle state (resumable/scheduled) from the row. Matches on
+   *  (projectId, heartbeat name). No-op when the row isn't loaded. */
+  applyHeartbeatLive: (projectId: string, agent: string, live: boolean) => void
+}
+
+/** Idle (non-live) display state for a heartbeat row: resumable when it
+ *  has a prior CLI session id, else scheduled. Archived rows are handled
+ *  by the caller (they never go live). */
+function idleStateForRow(row: HeartbeatRow): HeartbeatSessionState {
+  if (row.lastSessionId && row.lastSessionId.length > 0) return 'resumable'
+  return 'scheduled'
 }
 
 interface RunningAgentInfo {
@@ -191,4 +212,82 @@ export const useHeartbeatSessionsStore = create<HeartbeatSessionsState>((set, ge
   clear: () => {
     set({ active: [], archived: [], loadedFor: null, lastError: null })
   },
+
+  applyHeartbeatLive: (projectId: string, agent: string, live: boolean): void => {
+    set((state) => {
+      let changed = false
+      const active = state.active.map((entry) => {
+        const row = entry.row
+        if (row.projectId !== projectId || row.name !== agent) return entry
+        if (row.archivedAt) return entry // archived rows never go live
+        const nextState: HeartbeatSessionState = live ? 'live' : idleStateForRow(row)
+        // live=true keeps any known liveTerminalId (the event omits it, so
+        // we don't have a fresher one); live=false clears it.
+        const nextTerminalId = live ? entry.liveTerminalId : null
+        if (entry.state === nextState && entry.liveTerminalId === nextTerminalId) return entry
+        changed = true
+        return { ...entry, state: nextState, liveTerminalId: nextTerminalId }
+      })
+      return changed ? { active } : {}
+    })
+  },
 }))
+
+// 0.39.39 (#677.1) — push-primary heartbeat live-dot. The per-renderer
+// derive-vs-`terminal/list-running` join (`deriveState`) only reflects
+// liveness at refresh time and never updates a headless/remote-driven
+// wake. Against a daemon that emits the Wave B broadcasts we subscribe to
+// `heartbeat_state_changed` and flip the row's live flag directly; the
+// `refresh()` derivation remains the initial snapshot + the fallback when
+// the daemon doesn't support the broadcast. The subscription is keyed on
+// the loaded workspace path and swapped when the workspace changes.
+let hbEventsUnsub: UnsubscribeFn | null = null
+let hbSubscribedPath: string | null = null
+
+/** (Re)subscribe the heartbeat live-dot stream to `projectPath`. No-op when
+ *  already subscribed to that path or when the daemon lacks the broadcast
+ *  capability (the `refresh()` derivation covers display). Pass `null` to
+ *  tear the subscription down (no workspace active). */
+export function subscribeHeartbeatLive(projectPath: string | null): void {
+  if (!serverSupports('daemon-broadcasts')) {
+    // Unsupported daemon — drop any stale subscription and rely on the
+    // refresh-time derivation fallback.
+    if (hbEventsUnsub) {
+      hbEventsUnsub()
+      hbEventsUnsub = null
+    }
+    hbSubscribedPath = null
+    return
+  }
+  if (projectPath === hbSubscribedPath) return
+  if (hbEventsUnsub) {
+    hbEventsUnsub()
+    hbEventsUnsub = null
+  }
+  hbSubscribedPath = projectPath
+  if (!projectPath) return
+  hbEventsUnsub = subscribeToWorkspaceTabEvents(projectPath, {
+    onHeartbeatStateChanged: (e: HeartbeatStateChangedEvent) => {
+      // `project` is the project_id; the live-event's `project` is the
+      // authoritative key (workspacePath may be empty on the spawn path).
+      useHeartbeatSessionsStore
+        .getState()
+        .applyHeartbeatLive(e.project, e.agent, e.live)
+    },
+    // Re-snapshot on (re)connect to backfill liveness missed during a drop.
+    onHello: () => {
+      const loadedFor = useHeartbeatSessionsStore.getState().loadedFor
+      if (loadedFor) void useHeartbeatSessionsStore.getState().refresh(loadedFor)
+    },
+  })
+}
+
+/** Tear down the heartbeat live-dot subscription (call when no workspace is
+ *  active or on host switch). Idempotent. */
+export function unsubscribeHeartbeatLive(): void {
+  if (hbEventsUnsub) {
+    hbEventsUnsub()
+    hbEventsUnsub = null
+  }
+  hbSubscribedPath = null
+}

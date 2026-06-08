@@ -3,8 +3,11 @@ import { useProjectsStore } from '@/stores/projects'
 import { useSettingsStore } from '@/stores/settings'
 import {
   useHeartbeatSessionsStore,
+  subscribeHeartbeatLive,
+  unsubscribeHeartbeatLive,
   type HeartbeatEntry,
 } from '@/stores/heartbeat-sessions'
+import { serverSupports } from '@/lib/server-capabilities'
 import { IconHeartEKG } from '@/components/icons/IconHeartEKG'
 import { HeartbeatEntryRow } from './HeartbeatEntry'
 
@@ -42,13 +45,21 @@ export function HeartbeatsPanel(): React.JSX.Element {
   const refresh = useHeartbeatSessionsStore((s) => s.refresh)
   const clear = useHeartbeatSessionsStore((s) => s.clear)
 
-  // Refresh on workspace switch + every 5s while mounted.
+  // Initial snapshot on workspace switch. Liveness then comes from the
+  // daemon's `heartbeat_state_changed` broadcast (push-primary, #677.1);
+  // against an older/remote daemon that doesn't emit it we keep the 5s
+  // poll fallback so the live-dot still converges.
   useEffect(() => {
     if (!projectPath || agentMode === 'off') {
       clear()
+      unsubscribeHeartbeatLive()
       return
     }
     refresh(projectPath)
+    if (serverSupports('daemon-broadcasts')) {
+      subscribeHeartbeatLive(projectPath)
+      return () => unsubscribeHeartbeatLive()
+    }
     const t = setInterval(() => refresh(projectPath), 5000)
     return () => clearInterval(t)
   }, [projectPath, agentMode, refresh, clear])

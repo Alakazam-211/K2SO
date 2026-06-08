@@ -16,10 +16,14 @@ import { onDaemonConnected } from '@/lib/daemon-reconnect'
 import { onActiveHostChange } from '@/stores/connect-host'
 import {
   subscribeToWorkspaceSessionEvents,
+  subscribeToWorkspaceTabEvents,
   type SessionAddedEvent,
   type SessionRemovedEvent,
+  type TabTitleChangedEvent,
+  type TabOrderChangedEvent,
   type UnsubscribeFn,
 } from '@/stores/session-events'
+import { serverSupports } from '@/lib/server-capabilities'
 
 /** Phase 2.5 fix (finding #547) — gate for `loadWorkspaceSessionsFromDb`.
  *  Flips to true on the first successful load (regardless of whether the
@@ -100,6 +104,38 @@ function activateProjectViaRef(projectId: string): void {
 let activeSessionEventsUnsub: UnsubscribeFn | null = null
 let activeSessionEventsKey: string | null = null
 
+// 0.39.39 (#676/#677) — workspace-scoped tab-title / tab-order broadcast
+// subscription handle. Opened/torn-down alongside the session-events sub in
+// `subscribeForActiveWorkspace` / `tearDownActiveWorkspaceSubscription` so a
+// rename or reorder in one client converges on every connected client.
+let activeTabEventsUnsub: UnsubscribeFn | null = null
+
+// 0.39.39 (#677.3) — last-known layout `revision` for the active workspace
+// key (the monotonic LWW token the daemon stamps on `workspace-layouts/save`).
+// Captured from each save response + each load snapshot, and used to drop a
+// stale local write whose base is behind a remote reorder's broadcast.
+const layoutRevisions = new Map<string, number>()
+
+/** Read the last-known layout revision for a workspace key (0 if unknown). */
+export function __getLayoutRevisionForTests(key: string): number {
+  return layoutRevisions.get(key) ?? 0
+}
+
+/** Test-only override of the last-known layout revision (#677.3 LWW). */
+export function __setLayoutRevisionForTests(key: string, revision: number): void {
+  layoutRevisions.set(key, revision)
+}
+
+/** Record a layout `revision` returned by `workspace-layouts/save` as our
+ *  new base for the workspace key. Monotonic — never moves backwards (a
+ *  late-arriving response from an earlier write can't clobber a newer base).
+ *  Tolerates the old daemon's `{success}`-only response (no revision). */
+function recordLayoutRevision(key: string, revision: unknown): void {
+  if (typeof revision !== 'number') return
+  const prev = layoutRevisions.get(key) ?? 0
+  if (revision > prev) layoutRevisions.set(key, revision)
+}
+
 // Best-effort cleanup on window unload — the WS would close on its own
 // when the page unmounts, but explicit close gives the daemon a clean
 // disconnect notification instead of a TCP RST.
@@ -108,6 +144,8 @@ if (typeof window !== 'undefined') {
     activeSessionEventsUnsub?.()
     activeSessionEventsUnsub = null
     activeSessionEventsKey = null
+    activeTabEventsUnsub?.()
+    activeTabEventsUnsub = null
   })
 }
 
@@ -608,6 +646,11 @@ interface TabsState {
   openFileInNewTab: (filePath: string) => void
   openUntitledDocument: (cwd: string) => void
   setTabTitle: (tabId: string, title: string) => void
+  /** 0.39.39 (#676) — apply a daemon-canonical title to a tab WITHOUT
+   *  re-POSTing (used by the `tab_title_changed` broadcast handler + the
+   *  on-load `tab-titles` snapshot, so a rename in another client shows
+   *  here). No-op when the tab id isn't currently surfaced. */
+  applyDaemonTabTitle: (tabId: string, title: string) => void
   renameTabByTitle: (oldTitle: string, newTitle: string) => void
   setTabDirty: (tabId: string, dirty: boolean) => void
   setFileViewerState: (tabId: string, paneId: string, itemId: string, state: { scrollTop?: number; cursorPos?: number }) => void
@@ -2336,9 +2379,38 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       const result = mapTabAcrossGroups(state, tabId, (tab) => ({ ...tab, title }))
       return { tabs: result.tabs, extraGroups: result.extraGroups }
     })
-    // 0.38.0 Commit 4 — title is renderer-local; the daemon owns
-    // session labels via `LabelChanged` on the grid WS. No
-    // cross-window broadcast needed.
+    // 0.39.39 (#676) — tab titles are now daemon-canonical so a rename in
+    // one client/window converges on every connected client + the mobile
+    // companion. Persist to the daemon-owned `tab_titles` store (which
+    // broadcasts `TabTitleChanged`); the local-layout persistence (via the
+    // auto-save debounce) stays as the fallback when the daemon doesn't
+    // advertise the broadcast capability. The store is keyed by
+    // (projectId, tabId), so we send the active workspace's projectId.
+    if (serverSupports('daemon-broadcasts')) {
+      const projectId = get().activeWorkspaceKey?.split(':')[0]
+      if (projectId) {
+        daemonCliPost('workspace/set-tab-title', { projectId, tabId, title }).catch((err) => {
+          console.error('[tabs] set-tab-title persist failed:', err)
+        })
+      }
+    }
+  },
+
+  applyDaemonTabTitle: (tabId: string, title: string) => {
+    // Local-only apply (no re-POST) for the broadcast handler + on-load
+    // snapshot. Same pinned-system-agent guard as setTabTitle: those tabs
+    // own their functional bar labels and ignore canonical renames.
+    const allTabs = (() => {
+      const s = get()
+      return [...s.tabs, ...s.extraGroups.flatMap((g) => g.tabs)]
+    })()
+    const target = allTabs.find((t) => t.id === tabId)
+    if (!target || target.isSystemAgent) return
+    if (target.title === title) return
+    set((state) => {
+      const result = mapTabAcrossGroups(state, tabId, (tab) => ({ ...tab, title }))
+      return { tabs: result.tabs, extraGroups: result.extraGroups }
+    })
   },
 
   renameTabByTitle: (oldTitle: string, newTitle: string) => {
@@ -2997,14 +3069,18 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const layout = state.serializeCurrentLayout()
     set({ workspaceLayouts: { ...state.workspaceLayouts, [key]: layout } })
 
-    // Persist to SQLite via the host-aware daemon route.
-    daemonCliPost('workspace-layouts/save', {
+    // Persist to SQLite via the host-aware daemon route. Capture the
+    // monotonic `revision` (#677.3) so a later remote reorder's broadcast
+    // can be compared against our base and a stale local write skipped.
+    daemonCliPost<{ success?: boolean; revision?: number }>('workspace-layouts/save', {
       projectId,
       workspaceId,
       layoutJson: JSON.stringify(layout),
-    }).catch((err) => {
-      console.error('[tabs] Failed to persist workspace layout:', err)
     })
+      .then((res) => recordLayoutRevision(key, res?.revision))
+      .catch((err) => {
+        console.error('[tabs] Failed to persist workspace layout:', err)
+      })
   },
 
   loadLayoutForWorkspace: async (projectId: string, workspaceId: string, cwd: string): Promise<void> => {
@@ -3667,13 +3743,16 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       if (state.tabs.length === 0 && state.extraGroups.length === 0) return
 
       const layout = state.serializeCurrentLayout()
-      const [projectId, workspaceId] = state.activeWorkspaceKey.split(':')
+      const key = state.activeWorkspaceKey
+      const [projectId, workspaceId] = key.split(':')
       if (projectId && workspaceId) {
-        daemonCliPost('workspace-layouts/save', {
+        daemonCliPost<{ success?: boolean; revision?: number }>('workspace-layouts/save', {
           projectId,
           workspaceId,
           layoutJson: JSON.stringify(layout),
-        }).catch((err) => console.error('[tabs] Auto-save failed:', err))
+        })
+          .then((res) => recordLayoutRevision(key, res?.revision))
+          .catch((err) => console.error('[tabs] Auto-save failed:', err))
       }
     }, 1000)
   },
@@ -3984,6 +4063,44 @@ function subscribeForActiveWorkspace(
   tearDownActiveWorkspaceSubscription()
   activeSessionEventsKey = key
 
+  // 0.39.39 (#676/#677) — open the workspace-scoped tab-title / tab-order
+  // broadcast subscription alongside the session-events one (capability-
+  // gated; against an older/remote daemon these events never arrive and the
+  // renderer keeps its local-layout behavior). On (re)connect re-snapshot
+  // the canonical tab titles so a rename missed during a drop is backfilled.
+  if (serverSupports('daemon-broadcasts')) {
+    void applyTabTitlesSnapshot(projectId)
+    activeTabEventsUnsub = subscribeToWorkspaceTabEvents(cwd, {
+      onTabTitleChanged: (event: TabTitleChangedEvent) => {
+        // Match on project_id (the event's `project` is the project PATH
+        // echoed, but the title store is keyed by tab id which is globally
+        // unique within a workspace — apply to the surfaced tab directly).
+        if (useTabsStore.getState().activeWorkspaceKey !== key) return
+        useTabsStore.getState().applyDaemonTabTitle(event.tabId, event.title)
+      },
+      onTabOrderChanged: (event: TabOrderChangedEvent) => {
+        if (useTabsStore.getState().activeWorkspaceKey !== key) return
+        // Only the active workspace's row matters here.
+        if (event.project !== projectId || event.workspace !== workspaceId) return
+        const base = layoutRevisions.get(key) ?? 0
+        if (event.revision <= base) {
+          // Our own write (or an older one) — already reflected locally.
+          // Still advance the base so a duplicate broadcast is a no-op.
+          recordLayoutRevision(key, event.revision)
+          return
+        }
+        // A remote client reordered ahead of our base — re-fetch the
+        // canonical layout and adopt it (no silent last-write-wins clobber).
+        recordLayoutRevision(key, event.revision)
+        void refetchLayoutForRemoteReorder(key, projectId, workspaceId, cwd)
+      },
+      onHello: () => {
+        if (useTabsStore.getState().activeWorkspaceKey !== key) return
+        void applyTabTitlesSnapshot(projectId)
+      },
+    })
+  }
+
   activeSessionEventsUnsub = subscribeToWorkspaceSessionEvents(cwd, {
     onAdded: (event: SessionAddedEvent) => {
       // Only adopt `tab-<paneGroupId>` sessions — pinned chat and
@@ -4099,6 +4216,70 @@ function tearDownActiveWorkspaceSubscription(): void {
     }
     activeSessionEventsUnsub = null
     activeSessionEventsKey = null
+  }
+  if (activeTabEventsUnsub) {
+    try {
+      activeTabEventsUnsub()
+    } catch (err) {
+      console.warn('[tabs] failed to tear down tab events sub:', err)
+    }
+    activeTabEventsUnsub = null
+  }
+}
+
+// ── 0.39.39 (#676/#677) tab-title snapshot + remote-reorder re-fetch ───────
+
+interface DaemonTabTitle {
+  projectId: string
+  tabId: string
+  title: string
+}
+
+/** Fetch the daemon-canonical tab titles for a project and apply them to
+ *  the surfaced tabs (hydrate labels from the daemon on workspace load +
+ *  on reconnect). No-op for tab ids not currently surfaced. Best-effort:
+ *  swallows the route-absent / transient case (the local layout label
+ *  remains the fallback). */
+async function applyTabTitlesSnapshot(projectId: string): Promise<void> {
+  try {
+    const titles = await daemonCliGet<DaemonTabTitle[]>('workspace/tab-titles', {
+      project_id: projectId,
+    })
+    if (!Array.isArray(titles)) return
+    const store = useTabsStore.getState()
+    for (const t of titles) {
+      if (t && typeof t.tabId === 'string' && typeof t.title === 'string') {
+        store.applyDaemonTabTitle(t.tabId, t.title)
+      }
+    }
+  } catch (err) {
+    console.debug('[tabs] tab-titles snapshot skipped:', err)
+  }
+}
+
+/** Re-fetch the canonical layout after a remote client reordered ahead of
+ *  our base revision (#677.3) and adopt it, so we don't silently keep a
+ *  stale local order. Guards on the workspace still being active. */
+async function refetchLayoutForRemoteReorder(
+  key: string,
+  projectId: string,
+  workspaceId: string,
+  cwd: string,
+): Promise<void> {
+  try {
+    const json = await daemonCliGet<string | null>('workspace-layouts/load', {
+      project_id: projectId,
+      workspace_id: workspaceId,
+    })
+    if (useTabsStore.getState().activeWorkspaceKey !== key) return
+    if (!json) return
+    const layout = JSON.parse(json) as SerializedLayout
+    if (!layout.tabs || layout.tabs.length === 0) return
+    useTabsStore.setState((s) => ({ workspaceLayouts: { ...s.workspaceLayouts, [key]: layout } }))
+    useTabsStore.getState().restoreLayout(layout, cwd)
+    console.warn(`[tabs] adopted remote tab-order reorder for ${key}`)
+  } catch (err) {
+    console.warn('[tabs] remote-reorder re-fetch failed:', err)
   }
 }
 
