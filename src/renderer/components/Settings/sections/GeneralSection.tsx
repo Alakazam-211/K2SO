@@ -326,6 +326,10 @@ function ActiveWindowHoursRow(): React.JSX.Element {
               e.currentTarget.blur()
             }
           }}
+          // colorScheme:dark renders the native up/down stepper carrots light
+          // (visible) instead of the default dark-on-dark black — matches the
+          // K2 Toge section's number stepper.
+          style={{ colorScheme: 'dark' }}
           className="w-16 px-2 py-1 text-xs bg-[var(--color-bg-surface)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] no-drag text-center"
         />
         <span className="text-[10px] text-[var(--color-text-muted)]">hours</span>
