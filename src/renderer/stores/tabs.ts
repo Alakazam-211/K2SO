@@ -14,6 +14,10 @@ import { useHeartbeatSessionsStore } from '@/stores/heartbeat-sessions'
 import { onDaemonConnected } from '@/lib/daemon-reconnect'
 // #625 — reset per-machine workspace-session state on a host switch.
 import { onActiveHostChange } from '@/stores/connect-host'
+// per-client-view-state.md — the user's SELECTED tab is per-client view
+// state, sourced from this local store (never the shared layout's leaked
+// `activeTabId`). Module-level fns avoid a React subscription in this store.
+import { getSelectedTab, setSelectedTab, resetSelectedTabs } from '@/stores/selected-tabs'
 import {
   subscribeToWorkspaceSessionEvents,
   subscribeToWorkspaceTabEvents,
@@ -594,8 +598,14 @@ export interface SerializedLayout {
   /** Schema version. Absent / < 2 = v1; readers migrate to v2 in-place. */
   version?: number
   tabs: SerializedTab[]
-  activeTabId: string | null
-  extraGroups?: Array<{ tabs: SerializedTab[], activeTabId: string | null }>
+  /** @deprecated per-client-view-state.md — selected tab is per-client VIEW
+   *  state, NOT canonical. No longer written into the shared layout (it was
+   *  leaking one client's selection onto peers via `workspace-layouts/save`).
+   *  Still typed optional so OLD stored layouts (and older daemons) parse;
+   *  readers IGNORE it for selection (selection comes from the per-client
+   *  selected-tabs store). */
+  activeTabId?: string | null
+  extraGroups?: Array<{ tabs: SerializedTab[], activeTabId?: string | null }>
   splitCount?: number
   activeGroupIndex?: number
 }
@@ -732,6 +742,15 @@ interface TabsState {
 
   // Layout persistence per workspace
   activeWorkspaceKey: string | null  // "projectId:workspaceId" for auto-save
+  // per-client-view-state.md — the project/workspace ids of the active
+  // workspace, threaded in by `loadLayoutForWorkspace`/`restoreWorkspace`
+  // so the selected-tab reads/writes (which run inside `restoreLayout` /
+  // `setActiveTabInGroup`, neither of which receives the ids as args) can
+  // key the per-client selected-tabs store. Kept in lockstep with
+  // `activeWorkspaceKey` (which is `${projectId}:${workspaceId}`), but split
+  // explicitly so a colon in a projectId can't corrupt the key.
+  activeProjectId: string | null
+  activeWorkspaceId: string | null
   backgroundWorkspaces: Record<string, WorkspaceTabSnapshot>
   workspaceLayouts: Record<string, SerializedLayout>
   serializeCurrentLayout: () => SerializedLayout
@@ -994,16 +1013,19 @@ function serializeTab(tab: Tab): SerializedTab {
   }
 }
 
-/** Serialize a WorkspaceTabSnapshot (background workspace with live tabs). */
+/** Serialize a WorkspaceTabSnapshot (background workspace with live tabs).
+ *  per-client-view-state.md (Phase 1) — like `serializeCurrentLayout`, the
+ *  canonical background-workspace layout carries STRUCTURE only; the snapshot's
+ *  `activeTabId` (top-level + per-split-group) is per-client VIEW state and is
+ *  intentionally omitted so a background-workspace save can't leak this
+ *  client's selection to peers. */
 function serializeSnapshot(snapshot: WorkspaceTabSnapshot): SerializedLayout {
   const serializedExtraGroups = snapshot.extraGroups.map((group) => ({
     tabs: group.tabs.map(serializeTab),
-    activeTabId: group.activeTabId,
   }))
   return {
     version: LAYOUT_SCHEMA_VERSION,
     tabs: snapshot.tabs.map(serializeTab),
-    activeTabId: snapshot.activeTabId,
     extraGroups: serializedExtraGroups.length > 0 ? serializedExtraGroups : undefined,
     splitCount: snapshot.splitCount > 1 ? snapshot.splitCount : undefined,
     activeGroupIndex: snapshot.activeGroupIndex > 0 ? snapshot.activeGroupIndex : undefined,
@@ -1357,6 +1379,10 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     } else {
       set({ activeTabId: tabId })
     }
+    // per-client-view-state.md (Phase 2) — same primary-selection persist as
+    // `setActiveTabInGroup`'s group-0 branch (this is the other group-0
+    // selection entry point, e.g. ChatHistory's tab jump).
+    persistGroup0Selection(state, tabId)
   },
 
   splitPane: (tabId, existingPaneGroupId, newPaneGroupId, newPane, direction) => {
@@ -2757,6 +2783,13 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
     if (groupIndex === 0) {
       set({ activeTabId: tabId })
+      // per-client-view-state.md (Phase 2) — persist the user's PRIMARY
+      // (group-0) selection into the per-client store so a cold load /
+      // remote adoption restores THIS client's last selection, not a peer's.
+      // Keyed by paneGroup signature (the stable identity that survives a
+      // restore's tab-id re-mint). Group-0 paneGroupIds are preserved on
+      // restore ("Reuse the saved ID"), so the signature round-trips.
+      persistGroup0Selection(state, tabId)
       return
     }
     set((state) => {
@@ -2835,20 +2868,24 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   // ── Layout persistence per workspace ──────────────────────────────────
 
   activeWorkspaceKey: null,
+  activeProjectId: null,
+  activeWorkspaceId: null,
   backgroundWorkspaces: {},
   workspaceLayouts: {},
 
   serializeCurrentLayout: (): SerializedLayout => {
     const state = get()
     const serializedTabs = state.tabs.map(serializeTab)
+    // per-client-view-state.md (Phase 1) — the canonical layout carries only
+    // STRUCTURE. `activeTabId` (top-level AND per-split-group) is per-client
+    // VIEW state and is intentionally OMITTED so a save can't drag this
+    // client's selection onto peers that adopt the layout.
     const serializedExtraGroups = state.extraGroups.map((group) => ({
       tabs: group.tabs.map(serializeTab),
-      activeTabId: group.activeTabId,
     }))
     return {
       version: LAYOUT_SCHEMA_VERSION,
       tabs: serializedTabs,
-      activeTabId: state.activeTabId,
       extraGroups: serializedExtraGroups.length > 0 ? serializedExtraGroups : undefined,
       splitCount: state.splitCount > 1 ? state.splitCount : undefined,
       activeGroupIndex: state.activeGroupIndex > 0 ? state.activeGroupIndex : undefined,
@@ -2990,13 +3027,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
       }
     })
 
-    // Restore activeTabId by index position (IDs are remapped)
-    const activeTabIndex = layout.activeTabId
-      ? layout.tabs.findIndex((t) => t.id === layout.activeTabId)
-      : -1
-    const restoredActiveTabId = activeTabIndex >= 0 && activeTabIndex < restoredTabs.length
-      ? restoredTabs[activeTabIndex].id
-      : restoredTabs.length > 0 ? restoredTabs[0].id : null
+    // per-client-view-state.md (Phase 1+2) — selection is NO LONGER read from
+    // the shared layout's leaked `activeTabId` (that hijacked peers). It comes
+    // from this client's per-client selected-tabs store, matched by paneGroup
+    // SIGNATURE (the stable identity that survives restore's tab-id re-mint).
+    // Fallbacks: the saved selection's tab no longer exists → first tab; a
+    // brand-new client with no saved selection → first tab (preserves #658
+    // cold-boot pinned-chat, which is the first/system tab).
+    const restoredActiveTabId = resolveRestoredSelection(get(), restoredTabs)
 
     // Restore extra groups (split columns)
     const restoredExtraGroups: Array<{ tabs: Tab[], activeTabId: string | null }> = []
@@ -3065,14 +3103,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
             paneGroups,
           }
         })
-        const groupActiveIndex = group.activeTabId
-          ? group.tabs.findIndex((t) => t.id === group.activeTabId)
-          : -1
+        // per-client-view-state.md (Phase 1) — split-group selection is also
+        // per-client VIEW state and is no longer read from the (now omitted)
+        // serialized `group.activeTabId`. Default to the group's first tab;
+        // the user's split focus re-establishes locally as they interact. (The
+        // per-client store tracks only the primary group-0 selection.)
         restoredExtraGroups.push({
           tabs: groupTabs,
-          activeTabId: groupActiveIndex >= 0 && groupActiveIndex < groupTabs.length
-            ? groupTabs[groupActiveIndex].id
-            : groupTabs.length > 0 ? groupTabs[0].id : null,
+          activeTabId: groupTabs.length > 0 ? groupTabs[0].id : null,
         })
       }
     }
@@ -3138,6 +3176,11 @@ export const useTabsStore = create<TabsState>((set, get) => ({
 
   loadLayoutForWorkspace: async (projectId: string, workspaceId: string, cwd: string): Promise<void> => {
     const key = `${projectId}:${workspaceId}`
+    // per-client-view-state.md (Phase 2) — thread the workspace ids into the
+    // store BEFORE `restoreLayout` runs (it reads them via
+    // `resolveRestoredSelection` to source this client's selection) and so
+    // later group-0 selection writes (`setActiveTabInGroup`) have the key.
+    set({ activeProjectId: projectId, activeWorkspaceId: workspaceId })
     const savedLayout = get().workspaceLayouts[key]
     // Kill any existing PTYs in the active view before restoring
     get().clearAllTabs()
@@ -3662,8 +3705,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     const state = get()
     const live = state.backgroundWorkspaces[key]
     if (live && (live.tabs.length > 0 || live.extraGroups.length > 0)) {
-      // Live tabs with running PTYs — swap them in
+      // Live tabs with running PTYs — swap them in. The restored
+      // `live.activeTabId` is THIS client's own stashed selection (per-client
+      // by nature — the snapshot never left this window), so the fast path
+      // keeps it as-is. We still thread the workspace ids
+      // (per-client-view-state.md Phase 2) so later group-0 selection writes
+      // key the per-client store.
       const { [key]: _, ...remaining } = state.backgroundWorkspaces
+      const [liveProjectId, liveWorkspaceId] = key.split(':')
       set({
         tabs: live.tabs,
         activeTabId: live.activeTabId,
@@ -3672,6 +3721,8 @@ export const useTabsStore = create<TabsState>((set, get) => ({
         activeGroupIndex: live.activeGroupIndex,
         backgroundWorkspaces: remaining,
         activeWorkspaceKey: key,
+        activeProjectId: liveProjectId ?? null,
+        activeWorkspaceId: liveWorkspaceId ?? null,
       })
       // Issue #8 (0.39.13) — session-events subscription handoff on the
       // live fast path. The slow path delegates to
@@ -4332,6 +4383,51 @@ function liveTabSignature(t: Tab): string {
   return Array.from(t.paneGroups.keys()).slice().sort().join(' ')
 }
 
+/** per-client-view-state.md (Phase 2) — resolve the active (selected) tab for a
+ *  freshly-restored main-group tab list from the PER-CLIENT selected-tabs store.
+ *
+ *  The store records the user's selection as a paneGroup SIGNATURE
+ *  ({@link liveTabSignature}) rather than a tab id, because `restoreLayout`
+ *  re-mints tab ids on every restore while the main group's paneGroupIds are
+ *  preserved. We look up `getSelectedTab(projectId, workspaceId)` and match it
+ *  against the restored tabs by signature.
+ *
+ *  Fallbacks (in order): no project/workspace ids threaded yet → first tab;
+ *  no saved selection (brand-new client) → first tab; saved selection's tab no
+ *  longer exists (closed on a peer) → first tab. The first tab is the system
+ *  Chat tab on cold boot, so #658 pinned-chat-as-default is preserved. */
+function resolveRestoredSelection(
+  state: { activeProjectId: string | null; activeWorkspaceId: string | null },
+  restoredTabs: Tab[],
+): string | null {
+  if (restoredTabs.length === 0) return null
+  const firstId = restoredTabs[0].id
+  const { activeProjectId, activeWorkspaceId } = state
+  if (!activeProjectId || !activeWorkspaceId) return firstId
+  const savedSig = getSelectedTab(activeProjectId, activeWorkspaceId)
+  if (!savedSig) return firstId
+  const match = restoredTabs.find((t) => liveTabSignature(t) === savedSig)
+  return match ? match.id : firstId
+}
+
+/** per-client-view-state.md (Phase 2) — persist the user's PRIMARY (group-0)
+ *  selection into the per-client selected-tabs store, keyed by the active
+ *  workspace and recorded as the selected tab's paneGroup signature (stable
+ *  across a restore's tab-id re-mint). No-op when the workspace ids aren't
+ *  threaded yet or the tab isn't a live group-0 tab (e.g. a system/transient
+ *  id that isn't in `state.tabs`). `state` is the pre-mutation snapshot, which
+ *  still contains the selected tab object. */
+function persistGroup0Selection(
+  state: { activeProjectId: string | null; activeWorkspaceId: string | null; tabs: Tab[] },
+  tabId: string,
+): void {
+  const { activeProjectId, activeWorkspaceId } = state
+  if (!activeProjectId || !activeWorkspaceId) return
+  const tab = state.tabs.find((t) => t.id === tabId)
+  if (!tab) return
+  setSelectedTab(activeProjectId, activeWorkspaceId, liveTabSignature(tab))
+}
+
 /** If the incoming `layout.tabs` is a PURE REORDER of the live main `tabs`
  *  (same SET of tabs by signature, same count, just a different order), adopt
  *  the new order IN PLACE — reusing the existing `Tab` objects so each tab's
@@ -4383,16 +4479,12 @@ function tryReorderTabsInPlace(key: string, layout: SerializedLayout): boolean {
   }
   if (reordered.length !== liveTabs.length) return false
 
-  // Preserve the active tab object: find which serialized tab is active, then
-  // keep the matching live tab's id active (its id is unchanged here).
+  // per-client-view-state.md (Phase 3) — adoption NEVER moves this client's
+  // selection. The peer's reorder is a PURE permutation of the same tab ids,
+  // so the locally-selected `state.activeTabId` is still valid and we KEEP it.
+  // (The old `layout.activeTabId` override that re-pointed selection at the
+  // peer's serialized selection is gone — that was the multi-client hijack.)
   let nextActiveId = state.activeTabId
-  if (layout.activeTabId) {
-    const activeSerialized = newOrder.find((t) => t.id === layout.activeTabId)
-    if (activeSerialized) {
-      const liveActive = bySignature.get(serializedTabSignature(activeSerialized))
-      if (liveActive) nextActiveId = liveActive.id
-    }
-  }
   // If the previously-active id somehow isn't in the (unchanged) set, anchor to
   // the first tab of the new order.
   if (!nextActiveId || !reordered.some((t) => t.id === nextActiveId)) {
@@ -4451,6 +4543,12 @@ async function refetchLayoutForRemoteReorder(
       // differs (add/remove on the peer) do we fall back to the full
       // `restoreLayout` rebuild (which re-mints tab/pane ids → remount).
       if (tryReorderTabsInPlace(key, layout)) return
+      // per-client-view-state.md (Phase 3) — the rebuild fallback re-anchors
+      // selection via `restoreLayout` → `resolveRestoredSelection`, which
+      // sources THIS client's selection from the per-client store (matched by
+      // paneGroup signature) and falls back to the first tab. It does NOT read
+      // the peer's serialized `activeTabId` (now omitted), so a peer's tab-set
+      // change can never hijack this client's selected tab.
       useTabsStore.setState((s) => ({ workspaceLayouts: { ...s.workspaceLayouts, [key]: layout } }))
       useTabsStore.getState().restoreLayout(layout, cwd)
       console.warn(`[tabs] adopted remote tab-order reorder (rebuild) for ${key}`)
@@ -4464,6 +4562,13 @@ async function refetchLayoutForRemoteReorder(
 // use the `subscribeForActiveWorkspace` flow above.
 export function __getActiveSessionEventsKey(): string | null {
   return activeSessionEventsKey
+}
+
+/** Test-only: drive the in-place reorder adoption directly (the path the
+ *  remote-reorder re-fetch takes for a pure permutation). Exercised by
+ *  selected-tabs.test.ts to prove adoption never moves local selection. */
+export function __tryReorderTabsInPlaceForTests(key: string, layout: SerializedLayout): boolean {
+  return tryReorderTabsInPlace(key, layout)
 }
 
 // ── Legacy format conversion ─────────────────────────────────────────────
@@ -4826,7 +4931,14 @@ export function __resetWorkspaceSessionsForHostSwitch(): void {
     backgroundWorkspaces: {},
     workspaceLayouts: {},
     activeWorkspaceKey: null,
+    activeProjectId: null,
+    activeWorkspaceId: null,
   })
+  // per-client-view-state.md (Phase 2) — selection is per-machine; the NEW
+  // host has its own workspaces/selections. Clear this machine's stashed
+  // selection map so a stale local-host selection can't be matched against a
+  // remote-host workspace's tabs. (Mirrors the other per-machine resets.)
+  resetSelectedTabs()
   void useTabsStore.getState().loadWorkspaceSessionsFromDb()
 }
 
@@ -4841,14 +4953,22 @@ export function __hasLoadedWorkspaceSessionsForTests(): boolean {
 
 // Auto-save: subscribe to tab structure changes and persist to DB (debounced).
 // This provides crash resilience — lose at most ~1 second of tab changes.
+//
+// per-client-view-state.md (Phase 1) — `activeTabId` is NO LONGER part of the
+// canonical layout, so a pure SELECTION change is intentionally NOT an autosave
+// trigger: the serialized structure would be byte-identical (a wasted SQL
+// write) AND a save bumps the layout revision + re-broadcasts `TabOrderChanged`
+// to peers — i.e. clicking a tab would needlessly churn every other client.
+// Selection persistence is handled locally by the per-client selected-tabs
+// store (`setActiveTabInGroup`/`setActiveTab`), not this canonical save path.
 useTabsStore.subscribe(
   (state, prevState) => {
-    // Only trigger on meaningful tab structure changes (not backgroundWorkspaces swaps)
+    // Only trigger on meaningful tab structure changes (not backgroundWorkspaces
+    // swaps, and not pure selection changes — see note above).
     if (
       state.tabs !== prevState.tabs ||
       state.extraGroups !== prevState.extraGroups ||
       state.splitCount !== prevState.splitCount ||
-      state.activeTabId !== prevState.activeTabId ||
       state.activeGroupIndex !== prevState.activeGroupIndex
     ) {
       if (state.activeWorkspaceKey && state.tabs.length > 0) {
