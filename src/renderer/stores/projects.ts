@@ -7,6 +7,11 @@ import { emit } from '@tauri-apps/api/event'
 // mutation so other windows re-fetch; we now re-emit that event from the
 // renderer after each successful mutation (see `emitProjectsChanged`).
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
+// #672 — canonical daemon-owned Active. Gestures route through the
+// activate/pin/dismiss daemon routes (capability-gated); the renderer no
+// longer derives or mutates Active as truth — the daemon is authoritative.
+import { serverSupports } from '@/lib/server-capabilities'
+import { useActiveStore } from '@/stores/active'
 // Phase 2 Unit 7a — settings live in the daemon.
 import { settingsGet, settingsUpdate } from '@/lib/daemon-settings'
 // Phase 2.5 fix (finding #547) — daemon-reconnect retry bus.
@@ -16,7 +21,7 @@ import { onDaemonConnected } from '@/lib/daemon-reconnect'
 import { onActiveHostChange } from '@/stores/connect-host'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
-import { useTabsStore, ensurePinnedAgentTabForMode, registerActiveProjectIdGetter } from './tabs'
+import { useTabsStore, ensurePinnedAgentTabForMode, registerActiveProjectIdGetter, registerActivateProject } from './tabs'
 import { useFocusGroupsStore } from './focus-groups'
 import { useSettingsStore } from './settings'
 
@@ -27,9 +32,50 @@ import { useSettingsStore } from './settings'
 // the initial `null`).
 registerActiveProjectIdGetter(() => useProjectsStore.getState().activeProjectId)
 
+// #672 — register the canonical open/attach⇒activate gesture so tabs.ts's
+// chat-surfacing chokepoint (`subscribeForActiveWorkspace`) can call it
+// without a static projects→tabs→projects import cycle (PRD §4.3.1).
+// Defined below (hoisted function); safe to reference here.
+registerActivateProject((projectId: string) => activateProject(projectId))
+
 // Debounce touchInteraction to avoid excessive DB writes (5 min per project)
 const TOUCH_DEBOUNCE_MS = 5 * 60 * 1000
 const _lastTouchMap = new Map<string, number>()
+
+// #672 — canonical-Active gesture: opening/focusing a workspace is an
+// ACTIVATION (PRD §4.3.1 — the load-bearing invariant that makes daemon-
+// side Active-only reaping safe). We POST projects/activate to the daemon,
+// which bumps lastInteractionAt + recomputes the canonical set + broadcasts
+// the delta back. DEDUPED on the foreground project id (mirror of
+// TerminalPane's `lastSentActiveRef`): only POST when the foreground
+// workspace actually changes, so per-frame/focus churn can never reproduce
+// the #603 set_active storm. Optimistic local echo into useActiveStore for
+// snappiness; reconciles to the daemon snapshot/delta.
+let _lastActivatedProjectId: string | null = null
+
+/** Reset the activate dedup so the next setActiveProject re-POSTs even to
+ *  the same id (used on host switch — a new daemon must see the activation
+ *  fresh). */
+function resetActivateDedup(): void {
+  _lastActivatedProjectId = null
+}
+
+/**
+ * The open/attach⇒activate gesture (PRD §4.3.1). Call from every path that
+ * surfaces a workspace's chat to the client. Capability-gated + deduped.
+ */
+export function activateProject(projectId: string): void {
+  if (!projectId) return
+  if (!serverSupports('canonical-active')) return
+  // Dedup: skip when the foreground project is unchanged.
+  if (_lastActivatedProjectId === projectId) return
+  _lastActivatedProjectId = projectId
+  // Optimistic echo — the daemon's active_changed delta reconciles this.
+  useActiveStore.getState().echoActive(projectId)
+  void daemonCliPost('projects/activate', { projectId }).catch((e) =>
+    console.warn('[projects] activate failed:', e),
+  )
+}
 
 /** Phase 2.5 fix (finding #547) — flips on the first successful
  *  `fetchProjects` call. Gates `lastActiveProjectId` /
@@ -420,9 +466,12 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
     const project = state.projects.find((p) => p.id === id)
     if (project) {
-      // #657 — re-activating a project cancels any pending dismiss-reap
-      // of its pinned chat PTY so a quick return keeps the warm session.
-      tabsStore.cancelWorkspaceChatReap(id)
+      // #672 — opening/focusing a workspace is an ACTIVATION (PRD §4.3.1).
+      // POST projects/activate so the daemon keeps it in the canonical
+      // Active set and its daemon-side reaper won't touch it. Deduped on
+      // the foreground id; capability-gated. (Replaces the #657 renderer
+      // dismiss-reap cancel — the daemon now owns reaping.)
+      activateProject(id)
       const newWorkspaceId = project.workspaces[0]?.id ?? null
       set({
         activeProjectId: id,
@@ -461,9 +510,10 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
     const tabsStore = useTabsStore.getState()
 
-    // #657 — activating any workspace of this project cancels a pending
-    // dismiss-reap of its pinned chat PTY (return-within-grace path).
-    tabsStore.cancelWorkspaceChatReap(projectId)
+    // #672 — activating any workspace is an ACTIVATION (PRD §4.3.1): POST
+    // projects/activate so the daemon keeps it canonically Active and its
+    // reaper spares it. Deduped on the foreground id; capability-gated.
+    activateProject(projectId)
 
     // Stash current workspace (PTYs stay alive in background)
     if (state.activeProjectId && state.activeWorkspaceId) {
@@ -592,7 +642,20 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
 
   setManuallyActive: async (projectId: string, active: boolean) => {
     try {
-      await daemonCliPost('projects/update', { id: projectId, manuallyActive: active ? 1 : 0 })
+      // #672 — pin/unpin is a canonical-Active gesture. On a daemon that
+      // supports it, route through projects/pin so the daemon sets
+      // manually_active, recomputes the canonical set, and broadcasts the
+      // delta (the renderer mirrors it). Fall back to the legacy
+      // projects/update write against an un-updated daemon.
+      if (serverSupports('canonical-active')) {
+        // Optimistic echo so the bar reflects the pin immediately; the
+        // daemon's active_changed delta reconciles it.
+        if (active) useActiveStore.getState().echoActive(projectId)
+        else useActiveStore.getState().echoInactive(projectId)
+        await daemonCliPost('projects/pin', { projectId, pinned: active })
+      } else {
+        await daemonCliPost('projects/update', { id: projectId, manuallyActive: active ? 1 : 0 })
+      }
       emitProjectsChanged()
       await get().fetchProjects()
     } catch (err) {
@@ -634,6 +697,10 @@ onDaemonConnected(() => {
 // host's projects + its last-active selection.
 onActiveHostChange(() => {
   hasLoadedFromDaemon = false
+  // #672 — reset the activate dedup so the restore against the NEW host
+  // re-POSTs projects/activate for the landed-on workspace (a different
+  // daemon must see the activation fresh).
+  resetActivateDedup()
   useProjectsStore.setState({ activeProjectId: null, activeWorkspaceId: null })
   void useProjectsStore.getState().fetchProjects()
 })

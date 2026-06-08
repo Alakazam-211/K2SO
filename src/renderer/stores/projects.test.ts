@@ -71,6 +71,9 @@ vi.mock('./tabs', () => ({
   // tabs module at load time; the mock must expose the export so the
   // module-eval call resolves.
   registerActiveProjectIdGetter: vi.fn(),
+  // #672 — projects.ts also registers the canonical activate gesture on
+  // the tabs module at load time (open/attach⇒activate, PRD §4.3.1).
+  registerActivateProject: vi.fn(),
 }))
 vi.mock('./focus-groups', () => ({
   useFocusGroupsStore: {
@@ -201,13 +204,17 @@ describe('projects store — Plan B host-aware migration', () => {
     expect(emitMock).not.toHaveBeenCalledWith('sync:projects')
   })
 
-  it('setManuallyActive POSTs projects/update and emits sync:projects', async () => {
+  it('setManuallyActive POSTs projects/pin (canonical-active) and emits sync:projects', async () => {
+    // #672 — the active host is 'local' in tests, which serverSupports()
+    // treats as supporting every capability, so the pin gesture routes
+    // through the canonical projects/pin route (not the legacy
+    // projects/update write).
     daemonCliPost.mockResolvedValueOnce({ success: true })
     daemonCliGet.mockResolvedValue([])
 
     await useProjectsStore.getState().setManuallyActive('p1', true)
 
-    expect(daemonCliPost).toHaveBeenCalledWith('projects/update', { id: 'p1', manuallyActive: 1 })
+    expect(daemonCliPost).toHaveBeenCalledWith('projects/pin', { projectId: 'p1', pinned: true })
     expect(emitMock).toHaveBeenCalledWith('sync:projects')
   })
 

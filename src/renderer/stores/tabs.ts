@@ -1,9 +1,8 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
-import { agentDisplayName, setChatSession } from '@/lib/workspace-agent'
-import { terminalKill, terminalListRunning } from '@/lib/terminal-daemon'
-import { parseTerminalId } from '@/lib/terminal-id'
+import { agentDisplayName } from '@/lib/workspace-agent'
+import { terminalKill } from '@/lib/terminal-daemon'
 import type { MosaicNode, MosaicDirection } from 'react-mosaic-component'
 import { RESUMABLE_CLI_TOOLS } from '@shared/constants'
 import { useSettingsStore } from '@/stores/settings'
@@ -31,120 +30,21 @@ import {
  *  driven (tab open/close/move) rather than side-effects of UI mount. */
 let hasLoadedWorkspaceSessions = false
 
-// ── #657 dismiss-reap grace timers ──────────────────────────────────────
+// ── Renderer reaping REMOVED (#672, daemon-canonical-active.md §4.5/§6) ──
 //
-// When a workspace leaves the Active bar (dismiss), its PINNED Chat
-// (agent) PTY is reaped after a 15s grace delay to free memory. The
-// saved session lazily re-launches via `claude --resume` on return
-// (that path already works). The grace window lets a quick re-open /
-// re-activation cancel the reap so we don't churn the warm PTY.
-//
-// Module-level (not in the store) so the handle survives store updates
-// and is reachable from the cancel path without threading it through
-// React state.
-export const DISMISS_REAP_GRACE_MS = 15_000
-const _pendingChatReaps = new Map<string, ReturnType<typeof setTimeout>>()
-
-/** P2 — one workspace's inputs to the age-out sweep. The caller
- *  (ActiveBar's periodic recompute) supplies the per-project signals
- *  the renderer already holds in the projects store, plus the
- *  pre-computed Active-window verdict (so the predicate stays in one
- *  place — `isWithinActiveWindow` in ActiveBar). tabs.ts owns the
- *  background-snapshot + foreground checks and the reap scheduling. */
-export interface AgeOutSweepCandidate {
-  projectId: string
-  projectPath: string
-  /** True when this project's `lastInteractionAt` is OUTSIDE the
-   *  configured Active window (i.e. `isWithinActiveWindow(...) ===
-   *  false`). Computed by the caller against the same predicate the
-   *  Active Bar uses so there's a single source of truth. */
-  isAged: boolean
-  /** Pinned to Active (projects.manuallyActive !== 0). Never reaped. */
-  manuallyActive: boolean
-  /** Has an ENABLED heartbeat (projects.heartbeatEnabled !== 0). A
-   *  heartbeat-managed workspace is kept warm so an autonomous wake
-   *  doesn't land on a reaped PTY. Never reaped while enabled. */
-  heartbeatEnabled: boolean
-}
-
-/** P2 (LIVE-fix) — per-project age-out metadata, keyed by projectId.
- *  The DAEMON-driven sweep (`sweepAgedOutWorkspaceChatsFromDaemon`)
- *  enumerates candidates from the daemon's live PTY list rather than the
- *  Active-bar items, so it can reach workspaces that aged out WHILE HIDDEN
- *  (never opened in this renderer session, or restored on boot) — the
- *  exact set the Active-bar-fed `sweepAgedOutWorkspaceChats` could never
- *  see (an aged-out workspace is by definition NOT in the Active bar).
- *
- *  The caller supplies the same per-project signals the renderer already
- *  holds in the projects store; the sweep matches them by projectId
- *  against the live `agent-chat:<projectId>` PTYs. A projectId present in
- *  the running list but ABSENT from this map (e.g. a workspace the daemon
- *  is running but the renderer's projects store hasn't hydrated) is left
- *  alone — we never reap a workspace whose age-out verdict we can't
- *  compute. */
-export interface AgeOutProjectMeta {
-  projectPath: string
-  /** `isWithinActiveWindow(...) === false` — computed by the caller
-   *  against the same predicate the Active Bar uses. */
-  isAged: boolean
-  /** Pinned to Active (projects.manuallyActive !== 0). Never reaped. */
-  manuallyActive: boolean
-  /** Has an ENABLED heartbeat (projects.heartbeatEnabled !== 0). Kept
-   *  warm so an autonomous wake doesn't land on a reaped PTY. */
-  heartbeatEnabled: boolean
-}
-
-/** Test-only — clear every pending reap timer so vitest cases don't
- *  leak handles into each other. Not exported through the store API. */
-export function __clearPendingChatReapsForTests(): void {
-  for (const handle of _pendingChatReaps.values()) clearTimeout(handle)
-  _pendingChatReaps.clear()
-}
-
-/** Test-only — inspect whether a reap is currently scheduled for a
- *  given project. */
-export function __hasPendingChatReapForTests(projectId: string): boolean {
-  return _pendingChatReaps.has(projectId)
-}
-
-/** Find the pinned Chat agent item's persisted Claude session id for a
- *  project, scanning the live tabs first, then any stashed background
- *  workspace snapshots. Returns null when no chat item carries a
- *  sessionId (e.g. the chat never spawned). */
-function findChatSessionIdForProject(
-  state: TabsState,
-  projectId: string,
-): string | null {
-  const scanItems = (items: Item[]): string | null => {
-    for (const item of items) {
-      if (item.type !== 'agent') continue
-      const d = item.data as AgentItemData
-      if (d.section !== 'chat') continue
-      // Match by the project this agent item belongs to. The agent
-      // item carries projectPath; the projectId is the canonical
-      // identity used as the v2 session agent_name (see
-      // AgentChatPane's `attachAgentName={projectId}`).
-      if (d.sessionId) return d.sessionId
-    }
-    return null
-  }
-  for (const tab of state.tabs) {
-    for (const [, pg] of tab.paneGroups) {
-      const found = scanItems(pg.items)
-      if (found) return found
-    }
-  }
-  for (const [key, snapshot] of Object.entries(state.backgroundWorkspaces)) {
-    if (!key.startsWith(`${projectId}:`)) continue
-    for (const tab of snapshot.tabs) {
-      for (const [, pg] of tab.paneGroups) {
-        const found = scanItems(pg.items)
-        if (found) return found
-      }
-    }
-  }
-  return null
-}
+// The daemon now OWNS the Active set AND the grace-reap. The renderer no
+// longer schedules or fires reaps for age-out/dismiss — it is a pure
+// consumer of the canonical Active mirror (useActiveStore). What used to
+// live here (the 0.39.38 band-aid + the #657 reaper) is deleted:
+//   - DISMISS_REAP_GRACE_MS + the `_pendingChatReaps` timer map,
+//   - AgeOutSweepCandidate / AgeOutProjectMeta types,
+//   - scheduleWorkspaceChatReap / cancelWorkspaceChatReap,
+//   - sweepAgedOutWorkspaceChats / sweepAgedOutWorkspaceChatsFromDaemon
+//     (incl. the subscriberCount gate), and the findChatSessionIdForProject
+//     helper they used.
+// `closeV2Session` stays — it's the deliberate tab-close path
+// (closeTerminalForRenderer), not a reaper. The daemon reaper force-closes
+// v2 sessions server-side.
 
 // Lazy reference to presets store — avoids circular dependency (presets → tabs → presets).
 // Set by presets.ts on init via registerPresetsStore().
@@ -166,6 +66,24 @@ export function registerActiveProjectIdGetter(getter: () => string | null): void
 }
 function currentActiveProjectId(): string | null {
   return _activeProjectIdRef ? _activeProjectIdRef() : null
+}
+
+// #672 — lazy reference to projects.ts's `activateProject` (the canonical
+// open/attach⇒activate gesture, PRD §4.3.1). Same lazy-registration
+// pattern as the activeProjectId getter to avoid the projects → tabs →
+// projects static import cycle. projects.ts registers this on load; the
+// chat-surfacing chokepoint (`subscribeForActiveWorkspace`) calls it so
+// EVERY path that surfaces a workspace chat (initial open, workspace
+// restore, host-switch restore, K2 Connect remote-open, tab focus) is an
+// activation — the safety property daemon-side Active-only reaping leans
+// on. Falls back to a no-op when unregistered (e.g. a vitest unit that
+// never imports projects.ts).
+let _activateProjectRef: ((projectId: string) => void) | null = null
+export function registerActivateProject(fn: (projectId: string) => void): void {
+  _activateProjectRef = fn
+}
+function activateProjectViaRef(projectId: string): void {
+  _activateProjectRef?.(projectId)
 }
 
 // ── Daemon-authoritative session events (0.38.0 Commit 4) ────────────────
@@ -752,48 +670,11 @@ interface TabsState {
   restoreWorkspace: (key: string, cwd: string) => void
   serializeAllWorkspaces: (activeKey: string) => Promise<void>
   clearBackgroundWorkspace: (key: string) => void
-  /** #657 — schedule the dismissed workspace's PINNED Chat (agent) PTY
-   *  to be reaped after a 15s grace delay so its memory is freed. The
-   *  saved session lazily re-launches via `claude --resume` on return.
-   *  No-op (never schedules) when `projectId` is currently the
-   *  foreground `activeProjectId`. Ensures the chat session id is
-   *  persisted to the daemon DB before the close fires so `--resume`
-   *  has a target. Cancelled by `cancelWorkspaceChatReap` if the user
-   *  re-opens/re-activates the workspace within the window. */
-  scheduleWorkspaceChatReap: (projectId: string, projectPath: string) => void
-  /** #657 — cancel any pending dismiss-reap timer for this project.
-   *  Wired into the project-activation + re-add-to-Active paths so a
-   *  return within the 15s window keeps the warm chat PTY alive. */
-  cancelWorkspaceChatReap: (projectId: string) => void
-  /** P2 — age-out sweep. For each project holding a live pinned-Chat
-   *  PTY (a stashed `backgroundWorkspaces` snapshot), schedule the #657
-   *  dismiss-reap when ALL of: its `lastInteractionAt` is OUTSIDE the
-   *  Active window (`isAged`), it's NOT pinned (`manuallyActive`), it's
-   *  NOT the foreground workspace, and it has NO enabled heartbeat. So
-   *  "aged out of Active" behaves exactly like an implicit dismiss
-   *  (same 15s grace + cancel-on-return + fire-time foreground
-   *  re-check). Heartbeat-managed workspaces are kept warm so an
-   *  autonomous wake doesn't land on a reaped PTY. Idempotent and safe
-   *  to call on every ActiveBar tick — `scheduleWorkspaceChatReap`
-   *  de-dupes pending timers and a still-live chat that's already
-   *  scheduled just resets to the same grace. Driven by the renderer
-   *  (the daemon has no `lastInteractionAt` access). */
-  sweepAgedOutWorkspaceChats: (candidates: AgeOutSweepCandidate[]) => void
-  /** P2 (LIVE-fix) — the same age-out reap, but with the candidate set
-   *  derived from the DAEMON's live PTY list (`terminal/list-running`)
-   *  instead of the Active-bar items. Enumerates every live
-   *  `agent-chat:<projectId>` session — including workspaces that aged
-   *  out WHILE HIDDEN or were left running by a prior app session (which
-   *  the Active-bar-fed sweep can never see, since an aged-out workspace
-   *  is by definition absent from the Active bar). For each live-chat
-   *  projectId it looks up `metaByProjectId` for the age-out verdict and,
-   *  when aged + not pinned + not foreground + no heartbeat, schedules
-   *  the #657 reap. A live projectId with no entry in the map is skipped
-   *  (verdict unknown → never reap). Async because it polls the daemon;
-   *  safe to call on the same periodic tick. */
-  sweepAgedOutWorkspaceChatsFromDaemon: (
-    metaByProjectId: Record<string, AgeOutProjectMeta>,
-  ) => Promise<void>
+  // #672 — the renderer reaper API (scheduleWorkspaceChatReap /
+  // cancelWorkspaceChatReap / sweepAgedOutWorkspaceChats /
+  // sweepAgedOutWorkspaceChatsFromDaemon) was REMOVED. The daemon owns
+  // reaping now (daemon-canonical-active.md §4.5). Do not re-introduce a
+  // renderer reap — it would race the daemon's canonical decision.
   persistActiveWorkspace: () => void
   /** Add a tab to a workspace without switching to it. If the workspace is active,
    *  adds directly. If background/stashed, saves to DB session so it's there when restored.
@@ -3747,208 +3628,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
     set({ backgroundWorkspaces: remaining })
   },
 
-  scheduleWorkspaceChatReap: (projectId: string, projectPath: string) => {
-    // Rule 2: NEVER reap the workspace currently being viewed. If the
-    // dismissed project IS the foreground project, skip scheduling
-    // entirely — its chat PTY must stay alive.
-    const activeProjectId = currentActiveProjectId()
-    if (projectId === activeProjectId) return
-
-    // Idempotent: replace any existing pending timer so re-dismiss
-    // doesn't stack multiple reaps for the same project.
-    const existing = _pendingChatReaps.get(projectId)
-    if (existing) clearTimeout(existing)
-
-    const handle = setTimeout(() => {
-      _pendingChatReaps.delete(projectId)
-
-      // Re-check foreground at fire time — the user may have navigated
-      // back without going through a path that cancels (defense in
-      // depth on top of cancelWorkspaceChatReap).
-      const fgId = currentActiveProjectId()
-      if (projectId === fgId) return
-
-      // Rule 4: ensure the chat session id is persisted to the daemon
-      // DB BEFORE the close fires so `claude --resume` has a target.
-      // The renderer holds the canonical sessionId on the pinned chat
-      // agent item; stamp it through set-chat-session (idempotent) and
-      // only then reap. If we can't find a sessionId there's nothing
-      // resumable to protect — reap straight away.
-      const sessionId = findChatSessionIdForProject(get(), projectId)
-      const reap = async (): Promise<void> => {
-        // GH#22 fire-time re-check — a client (remote K2 Connect viewer
-        // or the host) may have ATTACHED during the 15s grace. Re-query
-        // the live attached-client count just before closing; if anyone
-        // is attached now, ABORT the reap — closing the v2 session would
-        // sever that live viewer's session. (The daemon's v2/close also
-        // guards this as belt-and-suspenders, but the renderer must not
-        // even fire against an attached session.) On a read error the
-        // helper returns -1 → we keep the PTY warm (fail closed).
-        const subs = await liveSubscriberCountForProject(projectId)
-        if (subs !== 0) {
-          console.warn(`[tabs] dismiss-reap: aborting reap for ${projectId} — ${subs < 0 ? 'attachment re-check failed' : `${subs} client(s) attached`}`)
-          return
-        }
-        // Reuse the canonical teardown path: the pinned chat's v2
-        // session is registered under the bare projectId agent_name
-        // (AgentChatPane passes `attachAgentName={projectId}`), so
-        // closing that v2 session unregisters + SIGHUP-reaps the PTY
-        // via the daemon's unregister chokepoint (DaemonPtySession::
-        // kill()). That chokepoint also clears the heartbeat row's
-        // active_terminal_id, so the next heartbeat fire resumes
-        // (Branch 3) instead of injecting into a dead PTY.
-        await closeV2Session(projectId)
-      }
-      if (sessionId) {
-        setChatSession(projectPath, sessionId)
-          .then(() => reap())
-          .catch((e) => {
-            // Persist failed — DO NOT reap. Without a saved session_id
-            // the resume path has no target; keeping the PTY warm is
-            // the safe failure mode (memory is reclaimed next time).
-            console.warn('[tabs] dismiss-reap: set-chat-session failed, keeping chat PTY alive:', e)
-          })
-      } else {
-        void reap()
-      }
-    }, DISMISS_REAP_GRACE_MS)
-
-    _pendingChatReaps.set(projectId, handle)
-  },
-
-  cancelWorkspaceChatReap: (projectId: string) => {
-    const handle = _pendingChatReaps.get(projectId)
-    if (!handle) return
-    clearTimeout(handle)
-    _pendingChatReaps.delete(projectId)
-  },
-
-  sweepAgedOutWorkspaceChats: (candidates: AgeOutSweepCandidate[]) => {
-    if (candidates.length === 0) return
-    const state = get()
-    const fgId = currentActiveProjectId()
-
-    for (const c of candidates) {
-      // Keep-warm gates — any one keeps the chat PTY alive:
-      //   - still inside the Active window (recent interaction),
-      //   - pinned to Active (explicit user signal),
-      //   - the workspace the user is looking at right now,
-      //   - an enabled heartbeat (autonomous wake would resume into it).
-      if (!c.isAged) continue
-      if (c.manuallyActive) continue
-      if (c.heartbeatEnabled) continue
-      if (c.projectId === fgId) continue
-
-      // Only reap workspaces that actually hold a live pinned-Chat
-      // session — i.e. a stashed `backgroundWorkspaces` snapshot whose
-      // chat agent item carries a persisted sessionId. The active
-      // workspace's chat lives in `tabs`, not a snapshot, and is
-      // already excluded by the foreground gate above. Skipping
-      // snapshot-less projects avoids scheduling no-op reaps (and the
-      // 1s/15s timer churn) for workspaces that never spawned a chat.
-      if (!findChatSessionIdForProject(state, c.projectId)) continue
-
-      // Reuse #657's dismiss path verbatim: 15s grace, cancel-on-return
-      // (wired into setActiveProject/setActiveWorkspace +
-      // "Keep in Active Bar"), and a fire-time foreground re-check. So
-      // an age-out is an implicit dismiss. Idempotent — a project
-      // already scheduled just resets to the same grace window.
-      get().scheduleWorkspaceChatReap(c.projectId, c.projectPath)
-    }
-  },
-
-  sweepAgedOutWorkspaceChatsFromDaemon: async (
-    metaByProjectId: Record<string, AgeOutProjectMeta>,
-  ): Promise<void> => {
-    // Enumerate the daemon's live PTYs and keep only the pinned-Chat
-    // sessions (`agent-chat:<projectId>`). This is the candidate source
-    // the Active-bar-fed sweep CAN'T provide: an aged-out workspace is
-    // absent from the Active bar by definition, and a workspace whose
-    // chat PTY survives from a prior app session was never stashed into
-    // this renderer's `backgroundWorkspaces`. The daemon, however, still
-    // holds the live PTY — and its terminal id encodes the projectId.
-    let running: Awaited<ReturnType<typeof terminalListRunning>>
-    try {
-      running = await terminalListRunning()
-    } catch (e) {
-      console.warn('[tabs] age-out daemon sweep: list-running failed:', e)
-      return
-    }
-
-    // GH#22 — never reap a session a CLIENT is attached to. `terminal/
-    // list-running` carries no attachment info, so fetch `/cli/agents/
-    // running` alongside it: that response reports `subscriberCount` per
-    // v2 session (REAL attached-client counts — a remote K2 Connect
-    // client or the host viewing the pinned chat). The pinned-chat v2
-    // session registers under the bare projectId as its agent_name
-    // (AgentChatPane's `attachAgentName={projectId}`), so we key the
-    // count by `agentName`. A workspace with subscriberCount > 0 has a
-    // live viewer — reaping it would kill that viewer's session, so we
-    // must NOT even schedule the reap.
-    let subscriberByProjectId = new Map<string, number>()
-    try {
-      const agents = await daemonCliGet<Array<{ agentName?: string; subscriberCount?: number }>>('agents/running')
-      const map = new Map<string, number>()
-      for (const a of agents ?? []) {
-        if (!a || typeof a.agentName !== 'string') continue
-        // Coalesce: the pinned-chat agent_name IS the projectId, so the
-        // max subscriberCount across any session sharing that name wins.
-        const prev = map.get(a.agentName) ?? 0
-        const next = typeof a.subscriberCount === 'number' ? a.subscriberCount : 0
-        map.set(a.agentName, Math.max(prev, next))
-      }
-      subscriberByProjectId = map
-    } catch (e) {
-      // Couldn't read attachment state — fail SAFE: skip the whole sweep
-      // rather than risk reaping an attached session. The next tick
-      // retries; a dormant chat surviving one extra cycle is harmless.
-      console.warn('[tabs] age-out daemon sweep: agents/running failed, skipping sweep:', e)
-      return
-    }
-
-    const fgId = currentActiveProjectId()
-    // De-dupe: a workspace can hold more than one chat-shaped PTY
-    // (legacy + bare-pid). One reap per projectId.
-    const seen = new Set<string>()
-
-    for (const term of running) {
-      const parsed = parseTerminalId(term.terminalId)
-      // Only the bare project-scoped chat session is reapable here. The
-      // v2 close uses the projectId as the agent_name (AgentChatPane's
-      // `attachAgentName={projectId}`), so worktree-/heartbeat-/legacy-
-      // scoped ids (which carry a different agent_name) are out of scope.
-      if (!parsed || parsed.kind !== 'agent_chat' || parsed.agent !== '') continue
-      const projectId = parsed.projectId
-      if (seen.has(projectId)) continue
-      seen.add(projectId)
-
-      const meta = metaByProjectId[projectId]
-      // No verdict for this live workspace (projects store hasn't
-      // hydrated it, or it's a remote/foreign id) — leave it alone.
-      if (!meta) continue
-
-      // Same keep-warm gates as `sweepAgedOutWorkspaceChats`.
-      if (!meta.isAged) continue
-      if (meta.manuallyActive) continue
-      if (meta.heartbeatEnabled) continue
-      if (projectId === fgId) continue
-
-      // GH#22 keep-warm gate: a client (remote or host) is attached to
-      // this workspace's pinned chat RIGHT NOW. Reaping would sever that
-      // live session — skip.
-      if ((subscriberByProjectId.get(projectId) ?? 0) > 0) continue
-
-      // The live PTY IS the proof there's something to reap (no renderer
-      // snapshot required), so we skip the `findChatSessionIdForProject`
-      // gate the snapshot sweep uses. `scheduleWorkspaceChatReap` re-checks
-      // foreground, persists any renderer-held sessionId first, then reaps
-      // via `closeV2Session(projectId)` — which works whether or not the
-      // session was ever opened in THIS renderer (the daemon already saved
-      // its session_id, so `--resume` has a target on return).
-      get().scheduleWorkspaceChatReap(projectId, meta.projectPath)
-    }
-  },
-
   persistActiveWorkspace: () => {
     // Debounced save of the active workspace to DB
     if (persistDebounceTimer) clearTimeout(persistDebounceTimer)
@@ -4260,6 +3939,18 @@ function subscribeForActiveWorkspace(
   workspaceId: string,
   cwd: string,
 ): void {
+  // #672 — THE load-bearing invariant (PRD §4.3.1): surfacing a
+  // workspace's chat to the client is an ACTIVATION. This function is the
+  // single chokepoint every chat-surfacing path funnels through —
+  // `loadLayoutForWorkspace` (initial open + host-switch restore +
+  // daemon-unreachable fallback) and `restoreWorkspace` (workspace switch
+  // / tab focus, incl. K2 Connect remote-open). Activating here (deduped,
+  // capability-gated inside `activateProject`) guarantees "a client is
+  // watching it ⇒ it is canonically Active ⇒ the daemon reaper won't touch
+  // it" — which the OLD renderer reaper failed to do for remote-opens
+  // (that was GH#22).
+  activateProjectViaRef(projectId)
+
   tearDownActiveWorkspaceSubscription()
   activeSessionEventsKey = key
 

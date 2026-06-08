@@ -55,6 +55,9 @@ import MemoDialog from './components/Timer/MemoDialog'
 import ExtendTimerDialog from './components/Timer/ExtendTimerDialog'
 import { useCursorMigrationCheck } from './hooks/useCursorMigrationCheck'
 import { prewarmDaemonWs } from './kessel/daemon-ws'
+// #672 — app-level canonical Active mirror (daemon-owned Active set).
+import { subscribeToActiveState, refreshActiveSnapshot } from './stores/session-events'
+import { onActiveHostChange } from './stores/connect-host'
 // TODO(0.39.x): rename src/renderer/kessel/ to a non-Kessel name.
 // Only daemon-ws.ts + config-context.tsx + config.ts remain after the
 // Kessel renderer deletion; these are shared terminal infrastructure
@@ -263,6 +266,30 @@ export default function App(): React.JSX.Element {
   // behind the rest of the initial render.
   useEffect(() => {
     prewarmDaemonWs()
+  }, [])
+
+  // #672 — open the single app-level Active-state subscription once at
+  // boot, and re-run the snapshot + re-subscribe on a real host switch so
+  // a remote host's canonical Active set mirrors 1:1 into useActiveStore.
+  // (The WS itself is cheap; against a daemon without `canonical-active`
+  // the snapshot route 404s and no deltas arrive — the Active bar then
+  // uses its local-derivation fallback. See daemon-canonical-active.md.)
+  useEffect(() => {
+    let unsub = subscribeToActiveState()
+    void refreshActiveSnapshot()
+    const offHostChange = onActiveHostChange(() => {
+      // Host flipped: tear down the old host's WS, open one against the
+      // new host, and pull its snapshot. onActiveHostChange fires AFTER
+      // `activeHost` has flipped, so the host-aware daemon layer targets
+      // the new host.
+      unsub()
+      unsub = subscribeToActiveState()
+      void refreshActiveSnapshot()
+    })
+    return () => {
+      offHostChange()
+      unsub()
+    }
   }, [])
 
   // K2 Connect remote-files Phase 3 — window-level "miss" drop handler.

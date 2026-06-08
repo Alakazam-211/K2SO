@@ -46,6 +46,17 @@ export const FEATURES = {
    *  0.39.35). Gates the future remote app-update path by remote daemon
    *  version; not yet wired to a control. */
   'remote-update-app': '0.39.35',
+  /** Canonical daemon-owned Active set + daemon-side reaping (#672,
+   *  .k2so/prds/daemon-canonical-active.md). The daemon owns the Active
+   *  set and the grace-reap; it exposes GET /cli/projects/active, POST
+   *  /cli/projects/{activate,pin,dismiss}, and pushes an `active_changed`
+   *  event over the session-events WS. When SUPPORTED the renderer mirrors
+   *  Active 1:1 from `useActiveStore` and routes gestures to those routes;
+   *  when NOT, it falls back to the thin local Active-window derivation for
+   *  DISPLAY only and does not call the new routes (an un-updated daemon
+   *  simply won't reap — accepted transitional degradation, since the
+   *  renderer reaper was deleted in this release). */
+  'canonical-active': '0.39.38',
 } as const
 
 export type FeatureKey = keyof typeof FEATURES

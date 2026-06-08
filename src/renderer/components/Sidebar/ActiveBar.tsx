@@ -1,6 +1,7 @@
 import { useMemo, useCallback, useState, useEffect, useRef, Fragment } from 'react'
 import { useProjectsStore } from '@/stores/projects'
 import { useTabsStore } from '@/stores/tabs'
+import { useActiveStore } from '@/stores/active'
 import { useActiveAgentsStore, projectHasLiveSession } from '@/stores/active-agents'
 import { useFocusGroupsStore } from '@/stores/focus-groups'
 import { useTerminalSettingsStore } from '@/stores/terminal-settings'
@@ -11,6 +12,10 @@ import { emit } from '@tauri-apps/api/event'
 // `sync:projects` for cross-window refresh; `touch-interaction-clear`
 // emitted no sync.
 import { daemonCliPost } from '@/lib/daemon-cli'
+// #672 — capability gate: when the daemon owns Active (canonical-active)
+// the bar reads the canonical mirror; otherwise it falls back to the thin
+// local Active-window derivation (display only).
+import { serverSupports, useServerSupports } from '@/lib/server-capabilities'
 // #625 — clear the local-ID-keyed Active Bar memory on a host switch.
 import { onActiveHostChange } from '@/stores/connect-host'
 import { showContextMenu } from '@/lib/context-menu'
@@ -156,8 +161,16 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
   const hasActiveAgents = useActiveAgentsStore((s) => s.hasActiveAgents())
   const paneStatuses = useActiveAgentsStore((s) => s.paneStatuses)
   const activeWindowHours = useSettingsStore((s) => s.activeWindowHours)
+  // #672 — PRIMARY path: the canonical daemon-owned Active set, mirrored
+  // 1:1 into useActiveStore (snapshot + active_changed deltas). When the
+  // active host supports `canonical-active` the bar's membership comes
+  // straight from this set (union of all clients' activity, daemon-owned).
+  const canonicalActive = useServerSupports('canonical-active')
+  const canonicalActiveIds = useActiveStore((s) => s.activeProjectIds)
 
-  // Refresh the 24h check periodically (every 60s)
+  // Refresh the 24h check periodically (every 60s) — FALLBACK-path cadence
+  // only (the canonical path re-renders on store deltas). Harmless when
+  // canonical.
   const [tick, setTick] = useState(0)
   useEffect(() => {
     const interval = setInterval(() => setTick((t) => t + 1), 60000)
@@ -180,59 +193,27 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
     prevActiveProjectIdRef.current = activeProjectId
   }, [activeProjectId])
 
-  // P2 — age-out sweep. Piggyback the existing 60s `tick`: any project
-  // that has aged out of the Active window (and isn't pinned / the
-  // foreground / heartbeat-managed) has its pinned-Chat PTY reaped via
-  // the #657 dismiss path, freeing RAM. The decision uses the SAME
-  // `isWithinActiveWindow` predicate the bar membership uses (single
-  // source of truth); tabs.ts owns the foreground gate and the
-  // 15s-grace scheduling. Renderer-driven because the daemon has no
-  // `lastInteractionAt` access.
-  //
-  // TWO candidate sources, run together so nothing aged-out escapes:
-  //
-  //   1. `sweepAgedOutWorkspaceChats` over the projects store — fast,
-  //      reaps workspaces whose chat PTY is stashed in THIS renderer's
-  //      `backgroundWorkspaces` snapshot.
-  //
-  //   2. `sweepAgedOutWorkspaceChatsFromDaemon` over the daemon's live
-  //      PTY list — reaches workspaces that aged out WHILE HIDDEN or
-  //      whose chat PTY survives from a PRIOR app session (never opened
-  //      in this renderer, so source 1 + the old Active-bar-fed sweep
-  //      could never see them — an aged-out workspace is absent from the
-  //      Active bar by construction). This is the LIVE-observed leak: 6
-  //      aged-out workspaces with live daemon chat PTYs that the
-  //      Active-bar-fed sweep never received as candidates.
-  useEffect(() => {
-    const now = Math.floor(Date.now() / 1000)
-    const candidates = projects.map((p) => ({
-      projectId: p.id,
-      projectPath: p.path,
-      isAged: !isWithinActiveWindow(p.lastInteractionAt, now, activeWindowHours),
-      manuallyActive: p.manuallyActive !== 0,
-      heartbeatEnabled: p.heartbeatEnabled !== 0,
-    }))
-    const tabsStore = useTabsStore.getState()
-    tabsStore.sweepAgedOutWorkspaceChats(candidates)
-
-    // Build the projectId-keyed verdict map for the daemon-driven sweep
-    // from the same per-project signals.
-    const metaByProjectId: Record<string, import('@/stores/tabs').AgeOutProjectMeta> = {}
-    for (const c of candidates) {
-      metaByProjectId[c.projectId] = {
-        projectPath: c.projectPath,
-        isAged: c.isAged,
-        manuallyActive: c.manuallyActive,
-        heartbeatEnabled: c.heartbeatEnabled,
-      }
-    }
-    void tabsStore.sweepAgedOutWorkspaceChatsFromDaemon(metaByProjectId)
-    // `tick` (the 60s interval) is the cadence driver; projects /
-    // activeWindowHours re-run it immediately on a relevant change.
-  }, [projects, activeWindowHours, tick])
+  // #672 — the renderer age-out sweep is GONE. The daemon owns the
+  // grace-reap now (daemon-canonical-active.md §4.5). The renderer is a
+  // pure consumer of the canonical Active mirror and never closes a v2
+  // session for age-out/dismiss.
 
   return useMemo(() => {
     const now = Math.floor(Date.now() / 1000)
+
+    // ── PRIMARY path (#672): canonical daemon-owned Active ──────────────
+    // Membership IS the daemon's set. No local derivation, no window math,
+    // no _activeBarMemory / _dismissedProjects heuristics — those existed
+    // to paper over the renderer-derived set; the daemon's set is exact.
+    if (canonicalActive) {
+      const result = projects.filter((p) => canonicalActiveIds.has(p.id))
+      return sortPinnedFirst(result)
+    }
+
+    // ── FALLBACK path: un-updated remote daemon (no canonical-active) ────
+    // Keep the thin local Active-window derivation so the bar still works
+    // against a daemon that doesn't push the canonical mirror. DISPLAY
+    // only — the new routes are not called in this mode.
 
     // Prune both TTL maps before reading. Guarantees explicit-dismiss
     // and 24h-auto-dismiss invariants hold without a separate
@@ -313,7 +294,7 @@ function useActiveBarItems(): ProjectWithWorkspaces[] {
     }
 
     return sortPinnedFirst(result)
-  }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick, activeWindowHours])
+  }, [projects, activeProjectId, backgroundWorkspaces, hasActiveAgents, paneStatuses, tick, activeWindowHours, canonicalActive, canonicalActiveIds])
 }
 
 /** Stable partition: manually-pinned (Active-pinned) workspaces float to the
@@ -461,23 +442,35 @@ export default function ActiveBar(): React.JSX.Element | null {
     } else if (clickedId === 'add-active') {
       // "Keep in Active Bar" is an explicit re-add — clears any
       // stale dismiss state so the manual flag wins immediately.
-      // #657 — also cancel any pending dismiss-reap of the chat PTY so
-      // a re-add inside the 15s grace keeps the warm session.
+      // #672 — `setManuallyActive` routes through POST projects/pin on a
+      // canonical-active daemon (which keeps it Active + spares it from the
+      // daemon reaper); the legacy projects/update write otherwise. The
+      // renderer no longer cancels a local reap — there is none.
       _dismissedProjects.delete(project.id)
-      useTabsStore.getState().cancelWorkspaceChatReap(project.id)
       await setManuallyActive(project.id, true)
     } else if (clickedId === 'dismiss' && !hasRunningAgent) {
-      // Clear from memory, DB, background workspaces, and local state.
-      // Also stamp the dismissed-bit so rules 3/4/5 don't re-add the
-      // project on the next render — this is the visible-immediately
-      // fix for "I dismissed the workspace I'm currently viewing
-      // and nothing changed until reload."
+      // #672 — explicit remove-from-Active. On a canonical-active daemon,
+      // POST projects/dismiss: the daemon clears manually_active, marks the
+      // chat eligible for the grace-reap NOW (no window wait), and emits the
+      // active_changed delta — the mirror updates and the daemon reaps the
+      // PTY server-side. The renderer NO LONGER closes the v2 session.
       const now = Math.floor(Date.now() / 1000)
       _activeBarMemory.delete(project.id)
       _dismissedProjects.set(project.id, now)
-      await daemonCliPost('projects/update', { id: project.id, manuallyActive: 0 })
-      void emit('sync:projects').catch(() => {})
-      await daemonCliPost('projects/touch-interaction-clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
+      if (serverSupports('canonical-active')) {
+        // Optimistic echo so the bar drops it immediately; the daemon's
+        // delta reconciles.
+        useActiveStore.getState().echoInactive(project.id)
+        await daemonCliPost('projects/dismiss', { projectId: project.id }).catch((e) => console.warn('[active-bar] dismiss failed:', e))
+      } else {
+        // Fallback (un-updated daemon): legacy unpin + clear-interaction so
+        // the local-derivation bar drops it. No reap happens against an old
+        // daemon (the renderer reaper is gone) — accepted transitional
+        // degradation per the PRD.
+        await daemonCliPost('projects/update', { id: project.id, manuallyActive: 0 })
+        void emit('sync:projects').catch(() => {})
+        await daemonCliPost('projects/touch-interaction-clear', { id: project.id }).catch((e) => console.warn('[active-bar]', e))
+      }
       // Clear background workspaces for this project (stashed terminals keep it visible)
       const tabsStore = useTabsStore.getState()
       for (const key of Object.keys(tabsStore.backgroundWorkspaces)) {
@@ -485,14 +478,6 @@ export default function ActiveBar(): React.JSX.Element | null {
           tabsStore.clearBackgroundWorkspace(key)
         }
       }
-      // #657 — schedule the pinned Chat (agent) PTY to be reaped after
-      // a 15s grace delay so its memory is freed. clearBackgroundWorkspace
-      // above only kills terminal items; the chat is an agent item and
-      // survives. The schedule action skips entirely if this project is
-      // still the foreground (rule 2) and re-checks at fire time; a
-      // re-open/re-activate within the window cancels it. On return the
-      // saved session lazily resumes via `claude --resume`.
-      tabsStore.scheduleWorkspaceChatReap(project.id, project.path)
       await useProjectsStore.getState().fetchProjects()
     }
   }, [activeProjectId, agentMap, setManuallyActive])
@@ -568,6 +553,13 @@ export function getActiveBarItems(): ProjectWithWorkspaces[] {
   const backgroundWorkspaces = useTabsStore.getState().backgroundWorkspaces
   const activeWindowHours = useSettingsStore.getState().activeWindowHours
   const now = Math.floor(Date.now() / 1000)
+
+  // #672 — PRIMARY path: mirror the canonical Active set so Cmd/⌥⌘ 1-9
+  // bind to exactly the items the bar shows.
+  if (serverSupports('canonical-active')) {
+    const ids = useActiveStore.getState().activeProjectIds
+    return sortPinnedFirst(projects.filter((p) => ids.has(p.id)))
+  }
 
   // Honor the same 24h TTLs as the hook version. Without these
   // prunes, stale entries would override the dismiss path here too.

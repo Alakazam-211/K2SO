@@ -1,30 +1,16 @@
-// P2 / OPEN-1 — boot-restore scope + boot-survivor reach.
+// OPEN-1 — boot-restore scope.
 //
-// LIVE-CORRECTED. The prior version of this suite asserted a single
-// invariant and attached a comment claiming it PROVED "app boot does not
-// keep any non-active workspace's chat session alive." A LIVE cold-boot
-// smoke test falsified that conclusion: 11 pinned-Chat PTYs were alive
-// (only ~4 active, 6 aged out) and survived multiple reaper ticks.
+// Locks the renderer's boot invariant: `loadWorkspaceSessionsFromDb`
+// caches saved layouts but restores NONE into live tabs /
+// `backgroundWorkspaces`, and `fetchProjects` mounts exactly ONE
+// workspace. So the renderer never SPAWNS non-active PTYs at boot.
 //
-// The renderer half of the original claim is still TRUE and is locked in
-// below: `loadWorkspaceSessionsFromDb` caches saved layouts but restores
-// NONE into live tabs / `backgroundWorkspaces`, and `fetchProjects`
-// mounts exactly ONE workspace. So the renderer never SPAWNS non-active
-// PTYs at boot.
-//
-// The falsified part was the unstated leap "…therefore no aged-out hidden
-// sessions exist to reap." They DO: the daemon keeps `agent-chat:<pid>`
-// PTYs alive ACROSS app restarts (daemon-authoritative), so a workspace
-// the user never re-opens this session still has a live daemon chat PTY.
-// Those are invisible to any renderer-snapshot-fed sweep. The boot-time
-// daemon sweep (`sweepAgedOutWorkspaceChatsFromDaemon`, run from the
-// ActiveBar effect as soon as `projects` hydrate) is what reaps them.
-//
-// This suite locks BOTH halves: (1) the renderer restores only the
-// active workspace at boot, and (2) the daemon sweep reaps the aged-out
-// boot survivors the renderer never mounted.
+// #672 — the boot-time daemon sweep half of this suite was REMOVED: the
+// renderer no longer reaps. The daemon now owns reaping (incl. its own
+// boot reconciliation that reaps aged-out survivors), keyed on the
+// canonical Active set. See .k2so/prds/daemon-canonical-active.md §4.3.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (cmd: string) => {
@@ -57,9 +43,6 @@ const h = vi.hoisted(() => {
   }
   return { SAVED, state }
 })
-function setRunningPtys(list: Array<{ terminalId: string; cwd: string; command: string | null }>): void {
-  h.state.runningPtys = list
-}
 vi.mock('@/lib/daemon-cli', () => ({
   daemonCliGet: vi.fn(async (route: string) => {
     if (route === 'workspace-layouts/load-all') return h.SAVED
@@ -76,7 +59,6 @@ vi.mock('@/lib/daemon-settings', () => ({
   settingsUpdate: vi.fn(async () => ({ settings: {} })),
   settingsReset: vi.fn(async () => ({ settings: {} })),
 }))
-const closedAgentNames: string[] = []
 vi.mock('@/kessel/daemon-ws', () => ({
   getDaemonWs: vi.fn(async () => ({ port: 9999, token: 'tok', host: '127.0.0.1' })),
   daemonHttpBase: vi.fn(() => 'http://127.0.0.1:9999'),
@@ -86,15 +68,7 @@ vi.mock('@/lib/workspace-agent', () => ({
   setChatSession: vi.fn(async () => undefined),
 }))
 
-import {
-  useTabsStore,
-  registerActiveProjectIdGetter,
-  DISMISS_REAP_GRACE_MS,
-  __clearPendingChatReapsForTests,
-  __hasPendingChatReapForTests,
-  type AgeOutProjectMeta,
-} from './tabs'
-import { agentChatId } from '@/lib/terminal-id'
+import { useTabsStore } from './tabs'
 
 describe('OPEN-1 — boot-restore does not spawn non-active sessions', () => {
   beforeEach(() => {
@@ -121,67 +95,5 @@ describe('OPEN-1 — boot-restore does not spawn non-active sessions', () => {
     expect(s.tabs).toEqual([])
     expect(s.backgroundWorkspaces).toEqual({})
     expect(s.activeTabId).toBeNull()
-  })
-})
-
-describe('LIVE-fix — boot-time daemon sweep reaps aged-out boot survivors', () => {
-  const fetchSpy = vi.fn(async (_url: string, init?: { body?: string }) => {
-    if (init?.body) {
-      try {
-        const parsed = JSON.parse(init.body)
-        if (parsed.agent_name) closedAgentNames.push(parsed.agent_name)
-      } catch { /* ignore */ }
-    }
-    return { ok: true, status: 200, text: async () => 'ok' } as unknown as Response
-  })
-
-  beforeEach(() => {
-    vi.useFakeTimers()
-    closedAgentNames.length = 0
-    fetchSpy.mockClear()
-    vi.stubGlobal('fetch', fetchSpy)
-    __clearPendingChatReapsForTests()
-    setRunningPtys([])
-    // The active workspace at boot is `projA` — never reaped.
-    registerActiveProjectIdGetter(() => 'projA')
-    // Boot survivors are daemon-side ONLY: no renderer tabs/snapshots.
-    useTabsStore.setState({ tabs: [], backgroundWorkspaces: {} })
-  })
-
-  afterEach(() => {
-    __clearPendingChatReapsForTests()
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-  })
-
-  it('reaps the aged-out survivors but spares the active one — exactly the LIVE scenario', async () => {
-    // Model the LIVE boot: the daemon holds chat PTYs from a prior app
-    // session. `projA` is the workspace the user landed on (active, fresh);
-    // `projAged1`/`projAged2` aged out while the user was away and were
-    // never opened this session.
-    setRunningPtys([
-      { terminalId: agentChatId('projA', ''), cwd: '/work/projA', command: 'claude' },
-      { terminalId: agentChatId('projAged1', ''), cwd: '/work/projAged1', command: 'claude' },
-      { terminalId: agentChatId('projAged2', ''), cwd: '/work/projAged2', command: 'claude' },
-    ])
-
-    const metaByProjectId: Record<string, AgeOutProjectMeta> = {
-      // Active + fresh → spared (foreground gate + isAged=false both hold).
-      projA: { projectPath: '/work/projA', isAged: false, manuallyActive: false, heartbeatEnabled: false },
-      projAged1: { projectPath: '/work/projAged1', isAged: true, manuallyActive: false, heartbeatEnabled: false },
-      projAged2: { projectPath: '/work/projAged2', isAged: true, manuallyActive: false, heartbeatEnabled: false },
-    }
-
-    await useTabsStore.getState().sweepAgedOutWorkspaceChatsFromDaemon(metaByProjectId)
-
-    expect(__hasPendingChatReapForTests('projA')).toBe(false)
-    expect(__hasPendingChatReapForTests('projAged1')).toBe(true)
-    expect(__hasPendingChatReapForTests('projAged2')).toBe(true)
-
-    vi.advanceTimersByTime(DISMISS_REAP_GRACE_MS)
-    await vi.runAllTimersAsync()
-
-    expect(closedAgentNames.sort()).toEqual(['projAged1', 'projAged2'])
-    expect(closedAgentNames).not.toContain('projA')
   })
 })
