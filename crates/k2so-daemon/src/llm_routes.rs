@@ -37,6 +37,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli_response::CliResponse;
 use crate::llm_host::{self, GenerateError, LlmHost};
+use crate::session_events::{self, SessionEvent};
+
+/// 0.39.39 (#675.1) — push the current LLM host status onto the
+/// `/cli/sessions/events` broadcast so the renderer can drop its
+/// `/cli/llm/status` poll (assistant.ts). Best-effort; the broadcast
+/// `let _ =`-swallows the no-subscribers case. `download_percent` is
+/// carried only on progress emits (None otherwise).
+pub(crate) fn emit_llm_status(download_percent: Option<f64>) {
+    let status = llm_host::shared().status();
+    let _ = session_events::emit(SessionEvent::LlmStatusChanged {
+        loaded: status.loaded,
+        model_path: status.model_path,
+        downloading: status.downloading,
+        download_percent,
+    });
+}
 
 // ─── Request / response shapes ───────────────────────────────────────
 
@@ -141,6 +157,8 @@ pub fn handle_load_model(body: &[u8]) -> CliResponse {
 
     let host = llm_host::shared();
     host.set_model_path(final_path.clone());
+    // #675.1 — model is now loaded/ready; push the new status.
+    emit_llm_status(None);
     CliResponse::ok_json(format!(
         r#"{{"path":{}}}"#,
         serde_json::to_string(&final_path).unwrap_or_else(|_| "\"\"".into())
@@ -172,13 +190,17 @@ pub fn handle_download_default(event_tx: &Arc<tokio::sync::broadcast::Sender<cra
     let host_for_thread = host.clone();
     let event_tx_for_thread = event_tx.clone();
 
+    // #675.1 — download just began (downloading flag is now set).
+    emit_llm_status(Some(0.0));
+
     std::thread::spawn(move || {
         let event_tx_progress = event_tx_for_thread.clone();
         let result = k2so_core::llm::download::download_model(
             &url,
             &dest_str,
             move |p| {
-                // Emit progress over the daemon's event channel.
+                // Emit progress over the daemon's legacy event channel
+                // (kept for back-compat) …
                 let _ = event_tx_progress.send(crate::events::WireEvent {
                     event: "assistant:download-progress".to_string(),
                     payload: serde_json::json!({
@@ -187,6 +209,9 @@ pub fn handle_download_default(event_tx: &Arc<tokio::sync::broadcast::Sender<cra
                         "totalBytes": p.total_bytes,
                     }),
                 });
+                // … and #675.1 over the canonical session-events spine so
+                // the renderer can consolidate onto one subscription.
+                emit_llm_status(Some(p.percent));
             },
         );
 
@@ -201,6 +226,9 @@ pub fn handle_download_default(event_tx: &Arc<tokio::sync::broadcast::Sender<cra
                 log_debug!("[llm-host] default model download failed: {e}");
             }
         }
+        // #675.1 — download finished (success or failure): push the
+        // final status (downloading flag now cleared).
+        emit_llm_status(None);
     });
 
     CliResponse::ok_json(r#"{"started":true}"#.to_string())

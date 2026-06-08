@@ -441,6 +441,11 @@ pub fn dispatch_get(
                         let _ = k2so_core::db::schema::AgentHeartbeat::save_active_terminal_id(
                             &conn, &project_id, &name, &new_tid,
                         );
+                        // #677.1 — reconcile re-bound this heartbeat to a
+                        // live PTY; broadcast the live flip.
+                        crate::session_events::emit_heartbeat_live(
+                            "", &project_id, &name, true,
+                        );
                         active_id = Some(new_tid);
                         active_agent_name = Some(nm.clone());
                         session_alive = true;

@@ -170,7 +170,7 @@ pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
             .unwrap_or_default();
         let _ = crate::session_events::emit(
             crate::session_events::SessionEvent::SessionRemoved {
-                workspace_path: cwd_emit,
+                workspace_path: cwd_emit.clone(),
                 pane_group_id: crate::session_events::pane_group_id_from_agent(agent_name),
                 agent_name: agent_name.to_string(),
             },
@@ -179,6 +179,26 @@ pub fn unregister(agent_name: &str) -> Option<Arc<DaemonPtySession>> {
         let terminal_id = session.session_id.to_string();
         let db = k2so_core::db::shared();
         let conn = db.lock();
+        // 0.39.39 (#677.1) — a heartbeat session's live state flips to
+        // false when its PTY exits. Resolve which heartbeat(s) pointed at
+        // this terminal BEFORE we null the column, then broadcast
+        // `HeartbeatStateChanged{live:false}` so every client converges
+        // the live-dot without polling. Best-effort: the broadcast
+        // `let _ =`-swallows the no-subscribers case.
+        if let Ok(hbs) =
+            k2so_core::db::schema::AgentHeartbeat::find_by_active_terminal(&conn, &terminal_id)
+        {
+            for (project_id, name) in hbs {
+                let _ = crate::session_events::emit(
+                    crate::session_events::SessionEvent::HeartbeatStateChanged {
+                        workspace_path: cwd_emit.clone(),
+                        project: project_id,
+                        agent: name,
+                        live: false,
+                    },
+                );
+            }
+        }
         let _ = k2so_core::db::schema::AgentHeartbeat::clear_active_terminal_id_by_terminal(
             &conn,
             &terminal_id,

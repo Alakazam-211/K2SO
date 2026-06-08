@@ -124,6 +124,174 @@ pub enum SessionEvent {
         pane_group_id: Option<String>,
         title: String,
     },
+
+    // ─── 0.39.39 daemon-canonical broadcast spine (#675/#676/#677) ───
+    //
+    // These variants let the renderer DROP its polling intervals and
+    // subscribe to the daemon's source-of-truth instead. Each is emitted
+    // at the daemon's canonical mutation point. Wire-frozen: the renderer
+    // Wave-C consumers code against the EXACT `kind` tag + field names
+    // below. Adding fields later is breaking — append a new variant
+    // instead. Field names are camelCase on the wire (per-field
+    // `rename`), matching the existing SessionEvent convention.
+    //
+    // **Routing classes** (see `session_events_ws::event_matches_workspace`):
+    //   - APP-LEVEL  (forwarded to EVERY subscriber regardless of `?path=`):
+    //     `LlmStatusChanged`, `TunnelStatusChanged`, `AgentStatusChanged`.
+    //   - WORKSPACE-SCOPED (forwarded only when the carried path matches
+    //     the subscriber's `?path=` via the cwd-prefix rule):
+    //     `ReviewQueueChanged`, `ReviewChanged`, `TabTitleChanged`,
+    //     `TabOrderChanged`, `HeartbeatStateChanged` — each carries a
+    //     `workspacePath` used by the prefix filter.
+
+    /// #675.1 — local LLM (AI Workspace Assistant) model status changed.
+    /// APP-LEVEL. Replaces the renderer's `/cli/llm/status` poll
+    /// (assistant.ts). Emitted on every transition that the renderer
+    /// cares about: model load, download begin/end, and download
+    /// progress ticks.
+    ///
+    /// Wire: `{ "kind": "llm_status_changed", "loaded": bool,
+    /// "modelPath": string|null, "downloading": bool,
+    /// "downloadPercent": number|null }`.
+    ///
+    /// `downloadPercent` is `Some(0.0..=100.0)` while a download is in
+    /// flight (carried on the progress emits), `None` otherwise.
+    LlmStatusChanged {
+        loaded: bool,
+        #[serde(rename = "modelPath")]
+        model_path: Option<String>,
+        downloading: bool,
+        #[serde(rename = "downloadPercent")]
+        download_percent: Option<f64>,
+    },
+
+    /// #675.2 — an agent's working/idle status flipped. APP-LEVEL.
+    /// Replaces the renderer's terminal/list-running + agent-status poll
+    /// (active-agents.ts) so spinners are push-driven. Emitted from the
+    /// daemon's agent-lifecycle hook chokepoint
+    /// (`handle_hook_complete`), which maps every raw harness hook into
+    /// the canonical `start`/`stop`/`permission` buckets.
+    ///
+    /// Wire: `{ "kind": "agent_status_changed", "paneId": string,
+    /// "tabId": string, "status": "start"|"stop"|"permission" }`.
+    ///
+    /// `paneId` is the `K2SO_PANE_ID` (== terminal id) the PTY was
+    /// spawned with — the same key `agent:lifecycle` carries today and
+    /// the renderer already correlates spinners against.
+    AgentStatusChanged {
+        #[serde(rename = "paneId")]
+        pane_id: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        /// Canonical bucket: `start` (working) | `stop` (idle) |
+        /// `permission` (awaiting approval).
+        status: String,
+    },
+
+    /// #675.3 — the per-workspace review queue changed (a review was
+    /// approved / rejected / had changes requested, or a checklist
+    /// mutation altered queue membership). WORKSPACE-SCOPED. Replaces
+    /// the renderer's `/cli/agents/review-queue` poll (review-queue.ts).
+    ///
+    /// Wire: `{ "kind": "review_queue_changed", "workspacePath":
+    /// string }`. The renderer re-fetches the queue for the matching
+    /// workspace on receipt.
+    ReviewQueueChanged {
+        #[serde(rename = "workspacePath")]
+        workspace_path: String,
+    },
+
+    /// #675.4 + #677.2 — a specific review (or its checklist) changed.
+    /// WORKSPACE-SCOPED. Replaces the renderer's reviews+chats poll
+    /// (ReviewPanel.tsx) AND the review-checklist poll — ONE event
+    /// covers both. Emitted on review approve/reject/request-changes
+    /// and on every review-checklist write/toggle/init.
+    ///
+    /// Wire: `{ "kind": "review_changed", "workspacePath": string,
+    /// "agent": string|null }`. `agent` is the agent/branch the review
+    /// belongs to when the mutation point knows it (checklist + queue
+    /// mutations carry it); `null` for queue-wide changes. The renderer
+    /// re-fetches the review detail + checklist for the matching
+    /// workspace on receipt.
+    ReviewChanged {
+        #[serde(rename = "workspacePath")]
+        workspace_path: String,
+        agent: Option<String>,
+    },
+
+    /// #675.5 — K2 Connect tunnel connector state transitioned.
+    /// APP-LEVEL. Replaces the renderer's `/cli/tunnel/status` poll
+    /// (CompanionSection.tsx). Emitted on start / stop. Carries the
+    /// new `running` flag + predicted public URL so the renderer can
+    /// render without an immediate follow-up GET.
+    ///
+    /// Wire: `{ "kind": "tunnel_status_changed", "running": bool,
+    /// "publicUrl": string|null }`.
+    TunnelStatusChanged {
+        running: bool,
+        #[serde(rename = "publicUrl")]
+        public_url: Option<String>,
+    },
+
+    /// #676 — a tab title was set daemon-side. WORKSPACE-SCOPED.
+    /// Push counterpart to the new `POST /cli/workspace/set-tab-title`
+    /// route + the daemon-canonical `tab_titles` store. Replaces the
+    /// renderer-local-only `setTabTitle` so a rename in window A shows
+    /// up in window B + the mobile companion.
+    ///
+    /// Wire: `{ "kind": "tab_title_changed", "workspacePath": string,
+    /// "project": string, "tabId": string, "title": string }`.
+    /// `workspacePath` is the project path used by the prefix filter;
+    /// `project` is the same value echoed under the contract name the
+    /// route request uses (kept distinct so the filter field can't
+    /// drift from the addressing field).
+    TabTitleChanged {
+        #[serde(rename = "workspacePath")]
+        workspace_path: String,
+        project: String,
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        title: String,
+    },
+
+    /// #677.3 — workspace tab-order persistence advanced. WORKSPACE-
+    /// SCOPED. Carries the monotonic `revision` the daemon stamped on
+    /// the write so concurrent clients resolve last-write-wins
+    /// deterministically: a renderer drops a stale local write whose
+    /// base revision is behind this one.
+    ///
+    /// Wire: `{ "kind": "tab_order_changed", "workspacePath": string,
+    /// "project": string, "workspace": string, "revision": number }`.
+    /// `project` + `workspace` are the `(project_id, workspace_id)` key
+    /// of the `workspace_layouts` row; `workspacePath` is the project
+    /// path used by the prefix filter.
+    TabOrderChanged {
+        #[serde(rename = "workspacePath")]
+        workspace_path: String,
+        project: String,
+        workspace: String,
+        revision: i64,
+    },
+
+    /// #677.1 — a heartbeat session's live (PTY-attached) state flipped.
+    /// WORKSPACE-SCOPED. The daemon owns the PTY lifecycle; this fires
+    /// when a heartbeat's `active_terminal_id` is stamped (live=true on
+    /// wake/spawn) or nulled (live=false on PTY exit). Lets every client
+    /// converge the heartbeat live-dot without polling.
+    ///
+    /// Wire: `{ "kind": "heartbeat_state_changed", "workspacePath":
+    /// string, "project": string, "agent": string, "live": bool }`.
+    /// `project` is the project_id; `agent` is the heartbeat name;
+    /// `workspacePath` is the project path used by the prefix filter
+    /// (empty string when the spawn path doesn't have it resolved — the
+    /// renderer then matches on `project`).
+    HeartbeatStateChanged {
+        #[serde(rename = "workspacePath")]
+        workspace_path: String,
+        project: String,
+        agent: String,
+        live: bool,
+    },
 }
 
 static SENDER: OnceLock<broadcast::Sender<SessionEvent>> = OnceLock::new();
@@ -148,6 +316,22 @@ pub fn subscribe() -> broadcast::Receiver<SessionEvent> {
 /// per subscriber.
 pub fn emit(event: SessionEvent) -> Result<usize, broadcast::error::SendError<SessionEvent>> {
     sender().send(event)
+}
+
+/// 0.39.39 (#677.1) — best-effort broadcast that a heartbeat session's
+/// live (PTY-attached) state flipped. Call with `live=true` right after
+/// stamping `active_terminal_id` on a heartbeat spawn, and `live=false`
+/// when the PTY exits (the unregister chokepoint does the latter). The
+/// broadcast `let _ =`-swallows the no-subscribers case. `workspace_path`
+/// may be empty when the spawn path doesn't have it resolved — the
+/// renderer then matches on `project` (the project_id).
+pub fn emit_heartbeat_live(workspace_path: &str, project_id: &str, agent: &str, live: bool) {
+    let _ = emit(SessionEvent::HeartbeatStateChanged {
+        workspace_path: workspace_path.to_string(),
+        project: project_id.to_string(),
+        agent: agent.to_string(),
+        live,
+    });
 }
 
 /// Extract `tab-<paneGroupId>` from a `v2_session_map` agent_name.
@@ -190,6 +374,153 @@ mod tests {
         // Exactly the three documented keys.
         let obj = json.as_object().unwrap();
         assert_eq!(obj.len(), 3, "unexpected extra fields: {obj:?}");
+    }
+
+    // ── 0.39.39 (#675/#676/#677) FROZEN WIRE CONTRACTS ──────────────
+    // Each test pins the EXACT serialized `kind` tag + the EXACT field
+    // key set the Wave-C renderer consumers code against. A field rename
+    // or tag drift fails CI loudly.
+
+    fn as_json(ev: &SessionEvent) -> serde_json::Value {
+        serde_json::from_str(&serde_json::to_string(ev).unwrap()).unwrap()
+    }
+
+    fn assert_keys(json: &serde_json::Value, keys: &[&str]) {
+        let obj = json.as_object().unwrap();
+        for k in keys {
+            assert!(obj.contains_key(*k), "missing key {k} in {obj:?}");
+        }
+        assert_eq!(
+            obj.len(),
+            keys.len(),
+            "unexpected key set: {obj:?} (expected exactly {keys:?})"
+        );
+    }
+
+    #[test]
+    fn llm_status_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::LlmStatusChanged {
+            loaded: true,
+            model_path: Some("/m/q.gguf".into()),
+            downloading: false,
+            download_percent: Some(42.5),
+        });
+        assert_eq!(json["kind"], "llm_status_changed");
+        assert_eq!(json["loaded"], true);
+        assert_eq!(json["modelPath"], "/m/q.gguf");
+        assert_eq!(json["downloading"], false);
+        assert_eq!(json["downloadPercent"], 42.5);
+        assert_keys(&json, &["kind", "loaded", "modelPath", "downloading", "downloadPercent"]);
+        // null model_path + percent serialize as JSON null (present key).
+        let json2 = as_json(&SessionEvent::LlmStatusChanged {
+            loaded: false,
+            model_path: None,
+            downloading: true,
+            download_percent: None,
+        });
+        assert!(json2["modelPath"].is_null());
+        assert!(json2["downloadPercent"].is_null());
+    }
+
+    #[test]
+    fn agent_status_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::AgentStatusChanged {
+            pane_id: "term-1".into(),
+            tab_id: "tab-1".into(),
+            status: "start".into(),
+        });
+        assert_eq!(json["kind"], "agent_status_changed");
+        assert_eq!(json["paneId"], "term-1");
+        assert_eq!(json["tabId"], "tab-1");
+        assert_eq!(json["status"], "start");
+        assert_keys(&json, &["kind", "paneId", "tabId", "status"]);
+    }
+
+    #[test]
+    fn review_queue_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::ReviewQueueChanged {
+            workspace_path: "/x/foo".into(),
+        });
+        assert_eq!(json["kind"], "review_queue_changed");
+        assert_eq!(json["workspacePath"], "/x/foo");
+        assert_keys(&json, &["kind", "workspacePath"]);
+    }
+
+    #[test]
+    fn review_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::ReviewChanged {
+            workspace_path: "/x/foo".into(),
+            agent: Some("scout".into()),
+        });
+        assert_eq!(json["kind"], "review_changed");
+        assert_eq!(json["workspacePath"], "/x/foo");
+        assert_eq!(json["agent"], "scout");
+        assert_keys(&json, &["kind", "workspacePath", "agent"]);
+        let json2 = as_json(&SessionEvent::ReviewChanged {
+            workspace_path: "/x/foo".into(),
+            agent: None,
+        });
+        assert!(json2["agent"].is_null());
+    }
+
+    #[test]
+    fn tunnel_status_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::TunnelStatusChanged {
+            running: true,
+            public_url: Some("https://rosson.k2.dev".into()),
+        });
+        assert_eq!(json["kind"], "tunnel_status_changed");
+        assert_eq!(json["running"], true);
+        assert_eq!(json["publicUrl"], "https://rosson.k2.dev");
+        assert_keys(&json, &["kind", "running", "publicUrl"]);
+    }
+
+    #[test]
+    fn tab_title_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::TabTitleChanged {
+            workspace_path: "/x/foo".into(),
+            project: "proj-uuid".into(),
+            tab_id: "tab-7".into(),
+            title: "My Tab".into(),
+        });
+        assert_eq!(json["kind"], "tab_title_changed");
+        assert_eq!(json["workspacePath"], "/x/foo");
+        assert_eq!(json["project"], "proj-uuid");
+        assert_eq!(json["tabId"], "tab-7");
+        assert_eq!(json["title"], "My Tab");
+        assert_keys(&json, &["kind", "workspacePath", "project", "tabId", "title"]);
+    }
+
+    #[test]
+    fn tab_order_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::TabOrderChanged {
+            workspace_path: "/x/foo".into(),
+            project: "proj-uuid".into(),
+            workspace: "ws-uuid".into(),
+            revision: 5,
+        });
+        assert_eq!(json["kind"], "tab_order_changed");
+        assert_eq!(json["workspacePath"], "/x/foo");
+        assert_eq!(json["project"], "proj-uuid");
+        assert_eq!(json["workspace"], "ws-uuid");
+        assert_eq!(json["revision"], 5);
+        assert_keys(&json, &["kind", "workspacePath", "project", "workspace", "revision"]);
+    }
+
+    #[test]
+    fn heartbeat_state_changed_frozen_contract() {
+        let json = as_json(&SessionEvent::HeartbeatStateChanged {
+            workspace_path: "/x/foo".into(),
+            project: "proj-uuid".into(),
+            agent: "nightly".into(),
+            live: true,
+        });
+        assert_eq!(json["kind"], "heartbeat_state_changed");
+        assert_eq!(json["workspacePath"], "/x/foo");
+        assert_eq!(json["project"], "proj-uuid");
+        assert_eq!(json["agent"], "nightly");
+        assert_eq!(json["live"], true);
+        assert_keys(&json, &["kind", "workspacePath", "project", "agent", "live"]);
     }
 
     #[test]

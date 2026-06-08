@@ -267,6 +267,7 @@ pub(crate) fn purge_orphan_project_children(conn: &Connection) -> Result<()> {
         "heartbeat_fires",
         "activity_feed",
         "workspace_layouts",
+        "tab_titles",
     ];
 
     // FK enforcement off for the cleanup so we don't trip
@@ -391,6 +392,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         // workspace==agent insight — a connection between two workspaces implies bidirectional
         // awareness, so explicit A→B + B→A pairs collapse to one row with merged relation_type.
         ("0051_dedup_symmetric_workspace_relations", include_str!("../../drizzle_sql/0051_dedup_symmetric_workspace_relations.sql")),
+        // 0052 (added in 0.39.39): #676 daemon-canonical tab_titles table +
+        // #677.3 workspace_layouts.revision (monotonic LWW tab-order).
+        ("0052_tab_titles_and_layout_revision", include_str!("../../drizzle_sql/0052_tab_titles_and_layout_revision.sql")),
     ];
 
     for (name, sql) in migrations {

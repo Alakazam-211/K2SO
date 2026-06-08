@@ -390,13 +390,12 @@ async fn handle_one_request(
             | "/cli/relations/create"
             | "/cli/relations/delete"
             // K2SO 0.39.39 — daemon-owned pinned-chat session lifecycle
-            // (decision D1: ONE idempotent endpoint w/ forceRespawn).
-            // JSON body carries {project, forceRespawn}; find-or-spawn
-            // under the canonical key. Method-gated per-handler below
-            // (feedback_post_only_route_guards) — the top-level dispatch
-            // lets a GET through on POST-allowlisted routes, so the arm
-            // re-asserts `require_post`.
+            // (decision D1: ONE idempotent endpoint w/ forceRespawn);
+            // re-asserts require_post per-handler below.
             | "/cli/workspace/ensure-pinned-chat"
+            // 0.39.39 #676 — daemon-canonical tab title write (token_ok
+            // auth in the isolated arm below).
+            | "/cli/workspace/set-tab-title"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -968,10 +967,22 @@ async fn handle_one_request(
             .await
             .unwrap_or_else(|e| Err(format!("worker join: {e}")));
             let resp = match result {
-                Ok(status) => crate::cli::CliResponse::ok_json(
-                    serde_json::to_string(&status)
-                        .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-                ),
+                Ok(status) => {
+                    // #675.5 — connector transitioned to running; push the
+                    // new status onto the session-events spine so the
+                    // renderer can drop its `/cli/tunnel/status` poll
+                    // (CompanionSection.tsx).
+                    let _ = crate::session_events::emit(
+                        crate::session_events::SessionEvent::TunnelStatusChanged {
+                            running: status.running,
+                            public_url: status.public_url.clone(),
+                        },
+                    );
+                    crate::cli::CliResponse::ok_json(
+                        serde_json::to_string(&status)
+                            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+                    )
+                }
                 Err(e) => crate::cli::CliResponse::bad_request(e),
             };
             super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
@@ -987,7 +998,16 @@ async fn handle_one_request(
             }
             let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
             let resp = match k2so_core::tunnel::stop_tunnel() {
-                Ok(()) => crate::cli::CliResponse::ok_json(r#"{"ok":true}"#.to_string()),
+                Ok(()) => {
+                    // #675.5 — connector stopped; push the cleared status.
+                    let _ = crate::session_events::emit(
+                        crate::session_events::SessionEvent::TunnelStatusChanged {
+                            running: false,
+                            public_url: None,
+                        },
+                    );
+                    crate::cli::CliResponse::ok_json(r#"{"ok":true}"#.to_string())
+                }
                 Err(e) => crate::cli::CliResponse::bad_request(e),
             };
             super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body)
@@ -1885,6 +1905,40 @@ async fn handle_one_request(
         // through to the catchall → 404, never a silent mutation).
         // Token-gated like every /cli data route. F5: FS-walk / DB-lock
         // work runs on a blocking thread.
+        // 0.39.39 #676 — POST /cli/workspace/set-tab-title. Daemon-
+        // canonical tab title write { project, tabId, title }; upserts
+        // the `tab_titles` store + broadcasts `TabTitleChanged`. Owner-
+        // OR-connect-user auth (token_ok) — a remote connect-user driving
+        // a host's tabs is legitimate, same tier as every other /cli data
+        // write. Method-gated by this explicit arm (a GET falls through to
+        // the catchall → 404, never a silent mutation). DB-lock work runs
+        // on a blocking thread (F5).
+        p if is_post && post_allowed && p == "/cli/workspace/set-tab-title" => {
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::db_routes::handle_set_tab_title(&body_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            super::http::send_response(&mut *stream, result.status, result.content_type, &result.body)
+                .await;
+        }
         p if is_post
             && post_allowed
             && (p.starts_with("/cli/skills/")

@@ -1698,6 +1698,28 @@ impl AgentHeartbeat {
         Ok(rows)
     }
 
+    /// 0.39.39 (#677.1) — find the (project_id, name) of every heartbeat
+    /// row currently pointing at `terminal_id`. The daemon's PTY-exit
+    /// chokepoint (`v2_session_map::unregister`) knows the terminal_id
+    /// that died but not which heartbeat owned it; this resolves the
+    /// identity so it can broadcast `HeartbeatStateChanged{live:false}`
+    /// BEFORE nulling the column. Usually 0 or 1 rows.
+    pub fn find_by_active_terminal(
+        conn: &Connection,
+        terminal_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT project_id, name FROM workspace_heartbeats \
+             WHERE active_terminal_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![terminal_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Soft-archive: set archived_at to now. Idempotent — re-archiving an
     /// already-archived row is a no-op (timestamp unchanged). Called by
     /// the Settings "Archive" button (replaced the previous hard-delete

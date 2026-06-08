@@ -181,29 +181,51 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
             Ok(p) => {
                 let branch = str_param(params, "branch");
                 let agent = str_param(params, "agent");
+                let agent_for_emit = agent.clone();
+                let project_for_emit = p.clone();
                 match k2so_core::workspace::reviews::review_approve(p, branch, agent) {
-                    Ok(msg) => CliResponse::ok_json(
-                        serde_json::json!({"success": true, "message": msg}).to_string(),
-                    ),
+                    Ok(msg) => {
+                        // #675.3/.4 — the queue + this review changed.
+                        emit_review_changed(&project_for_emit, Some(&agent_for_emit));
+                        CliResponse::ok_json(
+                            serde_json::json!({"success": true, "message": msg}).to_string(),
+                        )
+                    }
                     Err(e) => CliResponse::bad_request(e),
                 }
             }
             Err(r) => r,
         },
         "/cli/review/reject" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::workspace::reviews::review_reject(
-                p,
-                str_param(params, "agent"),
-                opt_param(params, "reason"),
-            )),
+            Ok(p) => {
+                let agent = str_param(params, "agent");
+                let project_for_emit = p.clone();
+                let result = k2so_core::workspace::reviews::review_reject(
+                    p,
+                    agent.clone(),
+                    opt_param(params, "reason"),
+                );
+                if result.is_ok() {
+                    emit_review_changed(&project_for_emit, Some(&agent));
+                }
+                respond_unit(result)
+            }
             Err(r) => r,
         },
         "/cli/review/feedback" => match need_project(params) {
-            Ok(p) => respond_unit(k2so_core::workspace::reviews::review_request_changes(
-                p,
-                str_param(params, "agent"),
-                str_param(params, "feedback"),
-            )),
+            Ok(p) => {
+                let agent = str_param(params, "agent");
+                let project_for_emit = p.clone();
+                let result = k2so_core::workspace::reviews::review_request_changes(
+                    p,
+                    agent.clone(),
+                    str_param(params, "feedback"),
+                );
+                if result.is_ok() {
+                    emit_review_changed(&project_for_emit, Some(&agent));
+                }
+                respond_unit(result)
+            }
             Err(r) => r,
         },
 
@@ -854,6 +876,8 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
         "/cli/sections/list" => crate::db_routes::handle_sections_list(params),
         "/cli/workspace-layouts/load" => crate::db_routes::handle_layout_load(params),
         "/cli/workspace-layouts/load-all" => crate::db_routes::handle_layout_load_all(),
+        // 0.39.39 #676 — daemon-canonical tab titles read (GET).
+        "/cli/workspace/tab-titles" => crate::db_routes::handle_tab_titles_list(params),
         "/cli/timer/entries-list" => crate::db_routes::handle_timer_entries_list(params),
         "/cli/timer/entries-export" => crate::db_routes::handle_timer_entries_export(params),
         "/cli/presets/list" => crate::db_routes::handle_presets_list(),
@@ -896,4 +920,22 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
         _ => return None,
     };
     Some(resp)
+}
+
+/// 0.39.39 (#675.3 + #675.4) — push the canonical review-queue +
+/// review-detail change onto the `/cli/sessions/events` spine so the
+/// renderer can drop the `/cli/agents/review-queue` poll (review-queue.ts)
+/// AND the reviews+chats poll (ReviewPanel.tsx). ONE call emits BOTH a
+/// `ReviewQueueChanged` (queue membership may have shifted) and a
+/// `ReviewChanged` (this specific review's detail/checklist changed).
+/// Best-effort: the broadcast `let _ =`-swallows the no-subscribers case.
+pub(crate) fn emit_review_changed(workspace_path: &str, agent: Option<&str>) {
+    use crate::session_events::{self, SessionEvent};
+    let _ = session_events::emit(SessionEvent::ReviewQueueChanged {
+        workspace_path: workspace_path.to_string(),
+    });
+    let _ = session_events::emit(SessionEvent::ReviewChanged {
+        workspace_path: workspace_path.to_string(),
+        agent: agent.map(|a| a.to_string()),
+    });
 }

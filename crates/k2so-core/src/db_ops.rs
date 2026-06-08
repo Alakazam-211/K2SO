@@ -408,6 +408,47 @@ pub fn workspace_layout_save(
     Ok(())
 }
 
+/// 0.39.39 (#677.3) — save a workspace layout AND bump its monotonic
+/// `revision`, returning the NEW revision. The revision is the
+/// deterministic last-write-wins token concurrent clients use to drop
+/// stale tab-order writes (`updated_at` is second-granular and collides
+/// under burst writes; an explicit incrementing integer never does).
+///
+/// On INSERT the row starts at revision 1; on UPDATE the stored
+/// revision is incremented by 1. The new value is read back inside the
+/// same locked connection so callers always observe their own write's
+/// revision (no read-after-write race).
+pub fn workspace_layout_save_with_revision(
+    project_id: &str,
+    workspace_id: &str,
+    layout_json: &str,
+) -> Result<i64, String> {
+    let db = db::shared();
+    let conn = db.lock();
+    let id = format!("{}:{}", project_id, workspace_id);
+
+    conn.execute(
+        "INSERT INTO workspace_layouts (id, project_id, workspace_id, layout_json, updated_at, revision)
+         VALUES (?1, ?2, ?3, ?4, unixepoch(), 1)
+         ON CONFLICT(project_id, workspace_id)
+         DO UPDATE SET layout_json = excluded.layout_json,
+                       updated_at = unixepoch(),
+                       revision = workspace_layouts.revision + 1",
+        rusqlite::params![id, project_id, workspace_id, layout_json],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM workspace_layouts WHERE project_id = ?1 AND workspace_id = ?2",
+            rusqlite::params![project_id, workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(revision)
+}
+
 pub fn workspace_layout_load(
     project_id: &str,
     workspace_id: &str,
@@ -466,6 +507,59 @@ pub fn workspace_layout_delete(
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ── Tab titles (0.39.39 #676, daemon-canonical) ────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabTitle {
+    pub project_id: String,
+    pub tab_id: String,
+    pub title: String,
+}
+
+/// Upsert a daemon-canonical tab title keyed by (project_id, tab_id).
+/// Replaces the renderer-local-only `setTabTitle`. The route layer
+/// broadcasts `TabTitleChanged` after this returns so other clients
+/// converge.
+pub fn tab_title_set(project_id: &str, tab_id: &str, title: &str) -> Result<(), String> {
+    let db = db::shared();
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO tab_titles (project_id, tab_id, title, updated_at)
+         VALUES (?1, ?2, ?3, unixepoch())
+         ON CONFLICT(project_id, tab_id)
+         DO UPDATE SET title = excluded.title, updated_at = unixepoch()",
+        rusqlite::params![project_id, tab_id, title],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// All tab titles for a project. The renderer hydrates its tab labels
+/// from this on workspace load instead of from local layout state.
+pub fn tab_titles_for_project(project_id: &str) -> Result<Vec<TabTitle>, String> {
+    let db = db::shared();
+    let conn = db.lock();
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_id, tab_id, title FROM tab_titles WHERE project_id = ?1 \
+             ORDER BY tab_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![project_id], |row| {
+            Ok(TabTitle {
+                project_id: row.get(0)?,
+                tab_id: row.get(1)?,
+                title: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
 }
 
 // ── Time entries (timer) ───────────────────────────────────────────────
@@ -753,5 +847,126 @@ pub fn migrate_workspace_layouts_to_db() {
                 let _ = std::fs::rename(&tmp, &settings_path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tab_title_and_revision_tests {
+    //! 0.39.39 (#676 + #677.3) — daemon-canonical tab titles +
+    //! monotonic tab-order revision.
+    //!
+    //! `db::shared()` is a PROCESS-GLOBAL in-memory test DB, so these
+    //! tests serialize on a single mutex and use unique ids so they
+    //! don't collide with each other or other modules' rows. FK
+    //! enforcement is ON in the test DB, so each test seeds its
+    //! `projects` (+ `workspaces`) parent rows first.
+
+    use super::*;
+    use crate::db;
+    use parking_lot::Mutex as PLMutex;
+
+    static TEST_LOCK: PLMutex<()> = PLMutex::new(());
+
+    fn unique(suffix: &str) -> String {
+        format!(
+            "tt-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            suffix
+        )
+    }
+
+    fn seed_project(project_id: &str) {
+        let dbh = db::shared();
+        let conn = dbh.lock();
+        crate::db::schema::Project::create(
+            &conn,
+            project_id,
+            "Test Project",
+            &format!("/tmp/{project_id}"),
+            "#fff",
+            0,
+            0,
+            None,
+            None,
+        )
+        .expect("seed project");
+    }
+
+    fn seed_workspace(workspace_id: &str, project_id: &str) {
+        let dbh = db::shared();
+        let conn = dbh.lock();
+        crate::db::schema::Workspace::create(
+            &conn,
+            workspace_id,
+            project_id,
+            None,
+            "default",
+            None,
+            "main",
+            0,
+            None,
+        )
+        .expect("seed workspace");
+    }
+
+    #[test]
+    fn tab_title_set_upserts_and_lists() {
+        let _g = TEST_LOCK.lock();
+        let project_id = unique("p");
+        seed_project(&project_id);
+
+        // Insert.
+        tab_title_set(&project_id, "tab-a", "First").expect("set");
+        let titles = tab_titles_for_project(&project_id).expect("list");
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles[0].tab_id, "tab-a");
+        assert_eq!(titles[0].title, "First");
+
+        // Upsert same key — title replaced, still one row.
+        tab_title_set(&project_id, "tab-a", "Renamed").expect("upsert");
+        let titles = tab_titles_for_project(&project_id).expect("list2");
+        assert_eq!(titles.len(), 1, "upsert must not add a row");
+        assert_eq!(titles[0].title, "Renamed");
+
+        // Second tab — two rows now.
+        tab_title_set(&project_id, "tab-b", "Second").expect("set b");
+        let titles = tab_titles_for_project(&project_id).expect("list3");
+        assert_eq!(titles.len(), 2);
+    }
+
+    #[test]
+    fn layout_save_revision_is_monotonic_for_lww() {
+        let _g = TEST_LOCK.lock();
+        let project_id = unique("p");
+        let workspace_id = unique("w");
+        seed_project(&project_id);
+        seed_workspace(&workspace_id, &project_id);
+
+        // First save → revision 1.
+        let r1 = workspace_layout_save_with_revision(&project_id, &workspace_id, r#"{"a":1}"#)
+            .expect("save1");
+        assert_eq!(r1, 1, "first write starts at revision 1");
+
+        // Concurrent-write simulation: two more writes → 2, then 3.
+        // A client whose base revision is r1(=1) would see r3(=3) on the
+        // broadcast and drop its stale write — LWW resolves
+        // deterministically because the revision strictly increases.
+        let r2 = workspace_layout_save_with_revision(&project_id, &workspace_id, r#"{"a":2}"#)
+            .expect("save2");
+        let r3 = workspace_layout_save_with_revision(&project_id, &workspace_id, r#"{"a":3}"#)
+            .expect("save3");
+        assert_eq!(r2, 2);
+        assert_eq!(r3, 3);
+        assert!(r3 > r2 && r2 > r1, "revision must be strictly monotonic");
+
+        // The latest layout_json is the last write's.
+        let loaded = workspace_layout_load(&project_id, &workspace_id)
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded, r#"{"a":3}"#);
     }
 }

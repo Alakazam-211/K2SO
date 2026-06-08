@@ -115,6 +115,106 @@ pub fn handle_layout_load_all() -> CliResponse {
     serialized(dops::workspace_layout_load_all())
 }
 
+// ── Tab titles (0.39.39 #676, daemon-canonical) ────────────────────────
+
+/// `GET /cli/workspace/tab-titles?project=<path>` — all daemon-canonical
+/// tab titles for a workspace. The renderer hydrates its tab labels from
+/// this on workspace load instead of from local layout state. Accepts a
+/// project PATH (resolved to project_id); also accepts `project_id`
+/// directly for callers that already hold the id.
+pub fn handle_tab_titles_list(params: &HashMap<String, String>) -> CliResponse {
+    let project_id = match resolve_project_id_param(params) {
+        Ok(pid) => pid,
+        Err(r) => return r,
+    };
+    serialized(dops::tab_titles_for_project(&project_id))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetTabTitleBody {
+    /// Project PATH (the contract field the renderer sends). Resolved to
+    /// project_id below. `project_id` is accepted as an alias.
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default, rename = "projectId")]
+    project_id: Option<String>,
+    tab_id: String,
+    title: String,
+}
+
+/// `POST /cli/workspace/set-tab-title { project, tabId, title }` (#676).
+/// Upserts the daemon-canonical tab title + broadcasts `TabTitleChanged`
+/// so a rename in window A shows up in window B + the mobile companion.
+/// `project` is the workspace PATH; the handler resolves it to the
+/// project_id the storage is keyed by.
+pub fn handle_set_tab_title(body: &[u8]) -> CliResponse {
+    let b: SetTabTitleBody = match parse_body(body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if b.tab_id.is_empty() {
+        return CliResponse::bad_request("Missing 'tabId'");
+    }
+    // Resolve project_id from either the path (`project`) or an explicit
+    // `projectId`. Capture the project PATH too for the event's
+    // workspace-scoped filter field.
+    let (project_id, project_path) = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        if let Some(pid) = b.project_id.as_deref().filter(|s| !s.is_empty()) {
+            let path = k2so_core::db::schema::Project::get(&conn, pid)
+                .ok()
+                .map(|p| p.path)
+                .unwrap_or_default();
+            (pid.to_string(), path)
+        } else if let Some(path) = b.project.as_deref().filter(|s| !s.is_empty()) {
+            match k2so_core::workspace::agent_identity::resolve_project_id(&conn, path) {
+                Some(pid) => (pid, path.to_string()),
+                None => {
+                    return CliResponse::bad_request(format!(
+                        "project not registered: {path}"
+                    ))
+                }
+            }
+        } else {
+            return CliResponse::bad_request("Missing 'project' (or 'projectId')");
+        }
+    };
+
+    match dops::tab_title_set(&project_id, &b.tab_id, &b.title) {
+        Ok(()) => {
+            let _ = crate::session_events::emit(
+                crate::session_events::SessionEvent::TabTitleChanged {
+                    workspace_path: project_path,
+                    project: project_id.clone(),
+                    tab_id: b.tab_id.clone(),
+                    title: b.title.clone(),
+                },
+            );
+            CliResponse::ok_json(r#"{"success":true}"#.to_string())
+        }
+        Err(e) => CliResponse::bad_request(e),
+    }
+}
+
+/// Resolve a project_id from query params accepting either `project_id`
+/// or a project `project`/`project_path` PATH.
+fn resolve_project_id_param(params: &HashMap<String, String>) -> Result<String, CliResponse> {
+    if let Some(pid) = params.get("project_id").filter(|s| !s.is_empty()) {
+        return Ok(pid.clone());
+    }
+    let path = params
+        .get("project")
+        .or_else(|| params.get("project_path"))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CliResponse::bad_request("Missing 'project' or 'project_id'"))?;
+    let db = k2so_core::db::shared();
+    let conn = db.lock();
+    k2so_core::workspace::agent_identity::resolve_project_id(&conn, path)
+        .ok_or_else(|| CliResponse::bad_request(format!("project not registered: {path}")))
+}
+
 // ── Timer ─────────────────────────────────────────────────────────────
 
 pub fn handle_timer_entries_list(params: &HashMap<String, String>) -> CliResponse {
@@ -490,11 +590,44 @@ pub fn handle_layout_save(body: &[u8]) -> CliResponse {
         Ok(v) => v,
         Err(r) => return r,
     };
-    unit_ok(dops::workspace_layout_save(
+    // 0.39.39 (#677.3) — revision-aware save: the daemon stamps a
+    // monotonic revision so concurrent tab-order writes from multiple
+    // clients resolve last-write-wins deterministically. The new
+    // revision rides back in the response (additive — old clients
+    // ignore it) and out on the `TabOrderChanged` broadcast so every
+    // OTHER client can drop a stale local write whose base is behind.
+    match dops::workspace_layout_save_with_revision(
         &b.project_id,
         &b.workspace_id,
         &b.layout_json,
-    ))
+    ) {
+        Ok(revision) => {
+            // Resolve the project PATH for the workspace-scoped event
+            // filter. Best-effort: if the project row is gone the event
+            // still carries project_id/workspace_id (which the renderer
+            // can match on directly) with an empty workspacePath.
+            let workspace_path = {
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+                k2so_core::db::schema::Project::get(&conn, &b.project_id)
+                    .ok()
+                    .map(|p| p.path)
+                    .unwrap_or_default()
+            };
+            let _ = crate::session_events::emit(
+                crate::session_events::SessionEvent::TabOrderChanged {
+                    workspace_path,
+                    project: b.project_id.clone(),
+                    workspace: b.workspace_id.clone(),
+                    revision,
+                },
+            );
+            CliResponse::ok_json(
+                serde_json::json!({ "success": true, "revision": revision }).to_string(),
+            )
+        }
+        Err(e) => CliResponse::bad_request(e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1060,5 +1193,117 @@ pub fn dispatch_unit4_post(path: &str, body: &[u8]) -> CliResponse {
         }
 
         _ => CliResponse::not_found(),
+    }
+}
+
+#[cfg(test)]
+mod set_tab_title_tests {
+    //! 0.39.39 (#676) — `POST /cli/workspace/set-tab-title` persists the
+    //! daemon-canonical title AND broadcasts `TabTitleChanged`.
+
+    use super::*;
+    use crate::session_events::{self, SessionEvent};
+    use parking_lot::Mutex as PLMutex;
+
+    static TEST_LOCK: PLMutex<()> = PLMutex::new(());
+
+    fn unique(suffix: &str) -> String {
+        format!(
+            "stt-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            suffix
+        )
+    }
+
+    fn seed_project(project_id: &str, path: &str) {
+        let dbh = k2so_core::db::shared();
+        let conn = dbh.lock();
+        k2so_core::db::schema::Project::create(
+            &conn, project_id, "Test", path, "#fff", 0, 0, None, None,
+        )
+        .expect("seed project");
+    }
+
+    #[test]
+    fn set_tab_title_persists_and_emits() {
+        let _g = TEST_LOCK.lock();
+        let project_id = unique("p");
+        let path = format!("/tmp/{project_id}");
+        seed_project(&project_id, &path);
+
+        // Subscribe BEFORE the write so we capture the emit.
+        let mut rx = session_events::subscribe();
+
+        let body = serde_json::json!({
+            "project": path,
+            "tabId": "tab-xyz",
+            "title": "Hello Tab",
+        })
+        .to_string();
+        let resp = handle_set_tab_title(body.as_bytes());
+        assert_eq!(resp.status, "200 OK", "body={}", resp.body);
+        assert!(resp.body.contains("\"success\":true"));
+
+        // Persisted under the resolved project_id.
+        let titles = dops::tab_titles_for_project(&project_id).expect("list");
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles[0].tab_id, "tab-xyz");
+        assert_eq!(titles[0].title, "Hello Tab");
+
+        // Broadcast carried the exact contract. The bus is process-
+        // global, so drain until we find our probe (by tabId).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "no TabTitleChanged seen");
+            match rx.try_recv() {
+                Ok(SessionEvent::TabTitleChanged {
+                    workspace_path,
+                    project,
+                    tab_id,
+                    title,
+                }) if tab_id == "tab-xyz" => {
+                    assert_eq!(workspace_path, path);
+                    assert_eq!(project, project_id);
+                    assert_eq!(title, "Hello Tab");
+                    break;
+                }
+                Ok(_) => continue,           // contamination from another test
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("recv error: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn set_tab_title_rejects_unregistered_project() {
+        let _g = TEST_LOCK.lock();
+        let body = serde_json::json!({
+            "project": "/tmp/definitely-not-registered-xyz",
+            "tabId": "t",
+            "title": "x",
+        })
+        .to_string();
+        let resp = handle_set_tab_title(body.as_bytes());
+        assert_eq!(resp.status, "400 Bad Request", "body={}", resp.body);
+        assert!(resp.body.contains("not registered"));
+    }
+
+    #[test]
+    fn set_tab_title_rejects_missing_tab_id() {
+        let _g = TEST_LOCK.lock();
+        let project_id = unique("p");
+        let path = format!("/tmp/{project_id}");
+        seed_project(&project_id, &path);
+        let body = serde_json::json!({ "project": path, "tabId": "", "title": "x" })
+            .to_string();
+        let resp = handle_set_tab_title(body.as_bytes());
+        assert_eq!(resp.status, "400 Bad Request", "body={}", resp.body);
+        assert!(resp.body.contains("tabId"));
     }
 }

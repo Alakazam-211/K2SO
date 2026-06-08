@@ -187,6 +187,28 @@ fn event_matches_workspace(event: &SessionEvent, workspace_path: &str) -> bool {
         // The renderer's app-level `subscribeToActiveState` consumer
         // filters for `kind === "active_changed"`.
         SessionEvent::ActiveChanged { .. } => return true,
+
+        // 0.39.39 (#675) APP-LEVEL events — daemon-global state with no
+        // single workspace. Forward to EVERY subscriber so each client
+        // mirrors the truth regardless of `?path=`. The renderer's
+        // app-level consumers filter by `kind`.
+        //   - LlmStatusChanged    — one model host per daemon.
+        //   - TunnelStatusChanged — one tunnel per daemon.
+        //   - AgentStatusChanged  — keyed by paneId (terminal id), not a
+        //     workspace path; the renderer correlates by paneId (same as
+        //     the existing `agent:lifecycle` consumer).
+        SessionEvent::LlmStatusChanged { .. }
+        | SessionEvent::TunnelStatusChanged { .. }
+        | SessionEvent::AgentStatusChanged { .. } => return true,
+
+        // 0.39.39 WORKSPACE-SCOPED events — each carries a project path
+        // in `workspace_path`; the cwd-prefix filter below routes them to
+        // the matching subscriber exactly like SessionAdded/Removed.
+        SessionEvent::ReviewQueueChanged { workspace_path: cwd } => cwd,
+        SessionEvent::ReviewChanged { workspace_path: cwd, .. } => cwd,
+        SessionEvent::TabTitleChanged { workspace_path: cwd, .. } => cwd,
+        SessionEvent::TabOrderChanged { workspace_path: cwd, .. } => cwd,
+        SessionEvent::HeartbeatStateChanged { workspace_path: cwd, .. } => cwd,
     };
     let trimmed = workspace_path.trim_end_matches('/');
     let prefix_with_slash = if trimmed.is_empty() {
@@ -282,5 +304,71 @@ mod tests {
     fn trailing_slash_tolerance() {
         assert!(event_matches_workspace(&added("/x/foo/"), "/x/foo"));
         assert!(event_matches_workspace(&added("/x/foo"), "/x/foo/"));
+    }
+
+    // ── 0.39.39 routing classes ──────────────────────────────────────
+
+    #[test]
+    fn app_level_events_forward_to_every_subscriber() {
+        // LLM / tunnel / agent-status are daemon-global: must match ANY
+        // ?path= (same rule as ActiveChanged).
+        let llm = SessionEvent::LlmStatusChanged {
+            loaded: true,
+            model_path: None,
+            downloading: false,
+            download_percent: None,
+        };
+        let tunnel = SessionEvent::TunnelStatusChanged {
+            running: true,
+            public_url: None,
+        };
+        let agent = SessionEvent::AgentStatusChanged {
+            pane_id: "t".into(),
+            tab_id: "tab".into(),
+            status: "start".into(),
+        };
+        for ev in [&llm, &tunnel, &agent] {
+            assert!(event_matches_workspace(ev, "/x/foo"));
+            assert!(event_matches_workspace(ev, "/totally/unrelated"));
+            assert!(event_matches_workspace(ev, ""));
+        }
+    }
+
+    #[test]
+    fn workspace_scoped_events_use_prefix_filter() {
+        let review = SessionEvent::ReviewChanged {
+            workspace_path: "/x/foo".into(),
+            agent: None,
+        };
+        let queue = SessionEvent::ReviewQueueChanged {
+            workspace_path: "/x/foo".into(),
+        };
+        let title = SessionEvent::TabTitleChanged {
+            workspace_path: "/x/foo".into(),
+            project: "p".into(),
+            tab_id: "t".into(),
+            title: "T".into(),
+        };
+        let order = SessionEvent::TabOrderChanged {
+            workspace_path: "/x/foo".into(),
+            project: "p".into(),
+            workspace: "w".into(),
+            revision: 1,
+        };
+        let hb = SessionEvent::HeartbeatStateChanged {
+            workspace_path: "/x/foo".into(),
+            project: "p".into(),
+            agent: "a".into(),
+            live: true,
+        };
+        for ev in [&review, &queue, &title, &order, &hb] {
+            // Matches its own workspace + descendants.
+            assert!(event_matches_workspace(ev, "/x/foo"));
+            assert!(event_matches_workspace(ev, "/x"));
+            // Sibling with shared prefix must NOT match.
+            assert!(!event_matches_workspace(ev, "/x/foobar"));
+            // Unrelated workspace must NOT match.
+            assert!(!event_matches_workspace(ev, "/y/bar"));
+        }
     }
 }

@@ -43,7 +43,15 @@ pub fn handle_write(body: &[u8]) -> CliResponse {
         &parsed.agent_name,
         &parsed.branch,
     ) {
-        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Ok(()) => {
+            // #677.2 — checklist mutation is a review change. ONE event
+            // (ReviewChanged) covers review detail + checklist.
+            crate::misc_routes::emit_review_changed(
+                &parsed.workspace_path,
+                Some(&parsed.agent_name),
+            );
+            CliResponse::ok_json(r#"{"success":true}"#.to_string())
+        }
         Err(e) => CliResponse::bad_request(e),
     }
 }
@@ -67,9 +75,16 @@ pub fn handle_toggle(body: &[u8]) -> CliResponse {
         &parsed.agent_name,
         &parsed.branch,
     ) {
-        Ok(items) => CliResponse::ok_json(
-            serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()),
-        ),
+        Ok(items) => {
+            // #677.2 — checklist toggle is a review change.
+            crate::misc_routes::emit_review_changed(
+                &parsed.workspace_path,
+                Some(&parsed.agent_name),
+            );
+            CliResponse::ok_json(
+                serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()),
+            )
+        }
         Err(e) => CliResponse::bad_request(e),
     }
 }
@@ -85,7 +100,14 @@ pub fn handle_init(body: &[u8]) -> CliResponse {
         &parsed.agent_name,
         &parsed.branch,
     ) {
-        Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
+        Ok(()) => {
+            // #677.2 — checklist init is a review change.
+            crate::misc_routes::emit_review_changed(
+                &parsed.workspace_path,
+                Some(&parsed.agent_name),
+            );
+            CliResponse::ok_json(r#"{"success":true}"#.to_string())
+        }
         Err(e) => CliResponse::bad_request(e),
     }
 }

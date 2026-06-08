@@ -67,6 +67,38 @@ impl DaemonBroadcastSink {
 
 impl AgentHookEventSink for DaemonBroadcastSink {
     fn emit(&self, event: HookEvent, payload: serde_json::Value) {
+        // 0.39.39 (#675.2) — mirror agent lifecycle onto the canonical
+        // `/cli/sessions/events` spine as `AgentStatusChanged` so the
+        // renderer's spinners are push-driven and it can drop the
+        // terminal/list-running + agent-status poll (active-agents.ts).
+        // This is the SAME daemon-side chokepoint that already fans
+        // `agent:lifecycle` onto the legacy `/events` WS — we add a
+        // second, additive emit onto the consolidated bus. Best-effort:
+        // `let _ =` swallows the no-subscribers case.
+        if matches!(event, HookEvent::AgentLifecycle) {
+            let pane_id = payload
+                .get("paneId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let tab_id = payload
+                .get("tabId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // `eventType` is the canonical bucket (start/stop/permission)
+            // that `handle_hook_complete` already mapped before emitting.
+            if let Some(status) = payload.get("eventType").and_then(|v| v.as_str()) {
+                let _ = crate::session_events::emit(
+                    crate::session_events::SessionEvent::AgentStatusChanged {
+                        pane_id,
+                        tab_id,
+                        status: status.to_string(),
+                    },
+                );
+            }
+        }
+
         let frame = WireEvent {
             event: event.event_name().to_string(),
             payload,

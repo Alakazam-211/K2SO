@@ -223,6 +223,8 @@ pub fn spawn_wake_headless(
             let _ = k2so_core::db::schema::AgentHeartbeat::save_active_terminal_id(
                 &conn, pid, hb_name, &terminal_id,
             );
+            // #677.1 — heartbeat just went live (PTY attached).
+            crate::session_events::emit_heartbeat_live("", pid, hb_name, true);
         }
         log_debug!(
             "[daemon/wake] pinned heartbeat '{}' session id: {} terminal: {}",

@@ -573,6 +573,8 @@ fn run_inject(
             &conn, project_id, &hb.name, &target_id,
         );
     }
+    // #677.1 — heartbeat is now live (injected into an existing PTY).
+    crate::session_events::emit_heartbeat_live("", project_id, &hb.name, true);
 
     write_audit(project_id, agent_name, hb, "fired",
         &format!("smart_launch: injected into live session {target_id}"));
@@ -657,6 +659,10 @@ fn run_resume_and_fire(
                     &conn, project_id, &hb.name, &out.session_id.to_string(),
                 );
             }
+            // #677.1 — heartbeat just went live (fresh PTY spawned).
+            crate::session_events::emit_heartbeat_live(
+                project_path, project_id, &hb.name, true,
+            );
             // Surface the new PTY to any attached UI so a tab gets
             // created (gated by show_heartbeat_sessions on the
             // renderer side per P2.6).
