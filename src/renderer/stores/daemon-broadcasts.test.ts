@@ -45,6 +45,8 @@ const ev = vi.hoisted(() => {
     agent: [] as Fn[],
     tunnel: [] as Fn[],
     appHello: [] as Fn[],
+    sessionAdded: [] as Fn[],
+    sessionRemoved: [] as Fn[],
     reviewSubs: [] as Array<{ path: string; handlers: Record<string, Fn> }>,
     tabSubs: [] as Array<{ path: string; handlers: Record<string, Fn> }>,
   }
@@ -66,6 +68,14 @@ vi.mock('@/stores/session-events', () => ({
   onAppHello: vi.fn((fn: (...a: unknown[]) => void) => {
     ev.reg.appHello.push(fn)
     return () => void (ev.reg.appHello = ev.reg.appHello.filter((f) => f !== fn))
+  }),
+  onSessionAddedApp: vi.fn((fn: (...a: unknown[]) => void) => {
+    ev.reg.sessionAdded.push(fn)
+    return () => void (ev.reg.sessionAdded = ev.reg.sessionAdded.filter((f) => f !== fn))
+  }),
+  onSessionRemovedApp: vi.fn((fn: (...a: unknown[]) => void) => {
+    ev.reg.sessionRemoved.push(fn)
+    return () => void (ev.reg.sessionRemoved = ev.reg.sessionRemoved.filter((f) => f !== fn))
   }),
   subscribeToWorkspaceReviewEvents: vi.fn(
     (path: string, handlers: Record<string, (...a: unknown[]) => void>) => {
@@ -150,6 +160,8 @@ beforeEach(() => {
   ev.reg.agent = []
   ev.reg.tunnel = []
   ev.reg.appHello = []
+  ev.reg.sessionAdded = []
+  ev.reg.sessionRemoved = []
   ev.reg.reviewSubs = []
   ev.reg.tabSubs = []
   cli.posts = []
@@ -201,6 +213,130 @@ describe('active-agents — agent_status_changed cutover', () => {
     startAgentPolling()
     expect(ev.reg.agent.length).toBe(0)
     expect(setInterval).toHaveBeenCalledTimes(1)
+
+    stopAgentPolling()
+  })
+})
+
+// ── #688 — live-session dot from SessionAdded/SessionRemoved (NO poll) ─────
+//
+// Bug: the Active-bar "live session" dot stayed grey for a daemon-owned
+// pinned chat opened AFTER startup. `liveSessionCwds` was rebuilt only in
+// `pollOnce`, which (post Wave C-1) runs only at startup + reconnect. The
+// fix subscribes APP-LEVEL to the daemon's SessionAdded/SessionRemoved and
+// keeps `liveSessionCwds` fresh push-style. These tests prove the cwd is
+// added on SessionAdded (dot turns green) and removed on SessionRemoved —
+// with NO poll firing.
+
+describe('active-agents — live-session dot push (#688)', () => {
+  it('SessionAdded adds the cwd to liveSessionCwds (dot turns green, no poll)', async () => {
+    vi.useFakeTimers()
+    const { startAgentPolling, stopAgentPolling, useActiveAgentsStore, projectHasLiveSession } =
+      await import('./active-agents')
+    vi.spyOn(useActiveAgentsStore.getState(), 'pollOnce').mockResolvedValue(undefined)
+
+    startAgentPolling()
+    expect(ev.reg.sessionAdded.length).toBe(1)
+    expect(ev.reg.sessionRemoved.length).toBe(1)
+
+    // Baseline: workspace cwd is NOT live.
+    expect(
+      projectHasLiveSession(
+        useActiveAgentsStore.getState().liveSessionCwds,
+        '/ws/pinned',
+      ),
+    ).toBe(false)
+
+    // A daemon-owned pinned chat opened after startup → SessionAdded.
+    ev.reg.sessionAdded[0]({
+      kind: 'session_added',
+      workspace_path: '/ws/pinned',
+      pane_group_id: null,
+      agent_name: 'projP',
+      command: 'claude',
+      args: [],
+      session_id: 'sess-1',
+      isV2: true,
+    })
+
+    // Dot turns green WITHOUT a poll.
+    expect(useActiveAgentsStore.getState().liveSessionCwds.has('/ws/pinned')).toBe(true)
+    expect(
+      projectHasLiveSession(
+        useActiveAgentsStore.getState().liveSessionCwds,
+        '/ws/pinned',
+      ),
+    ).toBe(true)
+
+    stopAgentPolling()
+  })
+
+  it('SessionRemoved removes the cwd from liveSessionCwds (dot greys)', async () => {
+    vi.useFakeTimers()
+    const { startAgentPolling, stopAgentPolling, useActiveAgentsStore } = await import(
+      './active-agents'
+    )
+    vi.spyOn(useActiveAgentsStore.getState(), 'pollOnce').mockResolvedValue(undefined)
+
+    startAgentPolling()
+
+    ev.reg.sessionAdded[0]({
+      kind: 'session_added',
+      workspace_path: '/ws/pinned',
+      pane_group_id: null,
+      agent_name: 'projP',
+      command: 'claude',
+      args: [],
+      session_id: 'sess-1',
+      isV2: true,
+    })
+    expect(useActiveAgentsStore.getState().liveSessionCwds.has('/ws/pinned')).toBe(true)
+
+    // The pinned chat exits → SessionRemoved (carries the same cwd + key).
+    ev.reg.sessionRemoved[0]({
+      kind: 'session_removed',
+      workspace_path: '/ws/pinned',
+      pane_group_id: null,
+      agent_name: 'projP',
+    })
+    expect(useActiveAgentsStore.getState().liveSessionCwds.has('/ws/pinned')).toBe(false)
+
+    stopAgentPolling()
+  })
+
+  it('SessionRemoved keeps the cwd green while another session shares it', async () => {
+    vi.useFakeTimers()
+    const { startAgentPolling, stopAgentPolling, useActiveAgentsStore } = await import(
+      './active-agents'
+    )
+    vi.spyOn(useActiveAgentsStore.getState(), 'pollOnce').mockResolvedValue(undefined)
+
+    startAgentPolling()
+
+    // Two live sessions in the SAME cwd.
+    ev.reg.sessionAdded[0]({
+      kind: 'session_added', workspace_path: '/ws/shared', pane_group_id: null,
+      agent_name: 'keyA', command: 'claude', args: [], session_id: 's-a', isV2: true,
+    })
+    ev.reg.sessionAdded[0]({
+      kind: 'session_added', workspace_path: '/ws/shared', pane_group_id: 'tab-x',
+      agent_name: 'tab-x', command: 'claude', args: [], session_id: 's-b', isV2: true,
+    })
+    expect(useActiveAgentsStore.getState().liveSessionCwds.has('/ws/shared')).toBe(true)
+
+    // Closing ONE must not grey the dot — the other still lives there.
+    ev.reg.sessionRemoved[0]({
+      kind: 'session_removed', workspace_path: '/ws/shared', pane_group_id: null,
+      agent_name: 'keyA',
+    })
+    expect(useActiveAgentsStore.getState().liveSessionCwds.has('/ws/shared')).toBe(true)
+
+    // Closing the last one greys it.
+    ev.reg.sessionRemoved[0]({
+      kind: 'session_removed', workspace_path: '/ws/shared', pane_group_id: 'tab-x',
+      agent_name: 'tab-x',
+    })
+    expect(useActiveAgentsStore.getState().liveSessionCwds.has('/ws/shared')).toBe(false)
 
     stopAgentPolling()
   })

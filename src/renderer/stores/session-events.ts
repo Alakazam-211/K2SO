@@ -442,11 +442,24 @@ type LlmStatusHandler = (e: LlmStatusChangedEvent) => void
 type AgentStatusHandler = (e: AgentStatusChangedEvent) => void
 type TunnelStatusHandler = (e: TunnelStatusChangedEvent) => void
 type AppHelloHandler = () => void
+// #688 — app-level session add/remove. The per-workspace
+// `subscribeToWorkspaceSessionEvents` only sees its OWN cwd; the
+// Active-bar "live session" dot needs liveness across EVERY workspace
+// without a poll. `SessionAdded`/`SessionRemoved` carry the session cwd
+// in `workspace_path`, and the daemon's `event_matches_workspace` forwards
+// any absolute-cwd event to the empty-`?path=` app-level subscriber (the
+// `cwd.starts_with("/")` branch), so they DO arrive here. We dispatch them
+// to these registries so `stores/active-agents.ts` can keep
+// `liveSessionCwds` fresh push-style (no return to the 2.5s poll).
+type SessionAddedHandler = (e: SessionAddedEvent) => void
+type SessionRemovedHandler = (e: SessionRemovedEvent) => void
 
 const _llmStatusHandlers = new Set<LlmStatusHandler>()
 const _agentStatusHandlers = new Set<AgentStatusHandler>()
 const _tunnelStatusHandlers = new Set<TunnelStatusHandler>()
 const _appHelloHandlers = new Set<AppHelloHandler>()
+const _appSessionAddedHandlers = new Set<SessionAddedHandler>()
+const _appSessionRemovedHandlers = new Set<SessionRemovedHandler>()
 
 /** Subscribe to APP-LEVEL `llm_status_changed`. Returns an unsubscribe fn. */
 export function onLlmStatusChanged(fn: LlmStatusHandler): UnsubscribeFn {
@@ -473,6 +486,23 @@ export function onAppHello(fn: AppHelloHandler): UnsubscribeFn {
   return () => void _appHelloHandlers.delete(fn)
 }
 
+/** #688 — subscribe to APP-LEVEL `session_added` (EVERY workspace, not just
+ *  the active one). The Active-bar live-session dot uses this to add the new
+ *  session's cwd to `liveSessionCwds` the instant a PTY is registered (e.g.
+ *  a pinned chat opened after startup), without the retired 2.5s poll.
+ *  Returns an unsubscribe fn. */
+export function onSessionAddedApp(fn: SessionAddedHandler): UnsubscribeFn {
+  _appSessionAddedHandlers.add(fn)
+  return () => void _appSessionAddedHandlers.delete(fn)
+}
+
+/** #688 — subscribe to APP-LEVEL `session_removed` (EVERY workspace).
+ *  Returns an unsubscribe fn. */
+export function onSessionRemovedApp(fn: SessionRemovedHandler): UnsubscribeFn {
+  _appSessionRemovedHandlers.add(fn)
+  return () => void _appSessionRemovedHandlers.delete(fn)
+}
+
 function dispatchAppEvent(msg: SessionEventMessage): void {
   switch (msg.kind) {
     case 'llm_status_changed':
@@ -483,6 +513,12 @@ function dispatchAppEvent(msg: SessionEventMessage): void {
       break
     case 'tunnel_status_changed':
       for (const h of _tunnelStatusHandlers) h(msg)
+      break
+    case 'session_added':
+      for (const h of _appSessionAddedHandlers) h(msg)
+      break
+    case 'session_removed':
+      for (const h of _appSessionRemovedHandlers) h(msg)
       break
     default:
       break
@@ -598,8 +634,18 @@ export function subscribeToActiveState(): UnsubscribeFn {
         dispatchAppEvent(msg)
         return
       }
-      // session_added / session_removed / session_renamed / review_* —
-      // owned by the per-workspace subscriber; ignore on the app-level socket.
+      // #688 — session_added / session_removed ALSO ride this app-level
+      // socket (the daemon forwards any absolute-cwd event to the empty-
+      // `?path=` subscriber). They drive the cross-workspace live-session
+      // dot in `stores/active-agents.ts`; dispatch to those app-level
+      // registries. The per-workspace subscriber still owns its own tab
+      // adoption — this is a SEPARATE, additive consumer.
+      if (msg.kind === 'session_added' || msg.kind === 'session_removed') {
+        dispatchAppEvent(msg)
+        return
+      }
+      // session_renamed / review_* / tab_* / heartbeat_* — owned by the
+      // per-workspace subscriber; ignore on the app-level socket.
     }
 
     ws.onerror = () => {

@@ -21,6 +21,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+import { useEffect } from 'react'
 
 // ── Hoisted spies / controllable state ───────────────────────────────────
 
@@ -62,6 +63,10 @@ const h = vi.hoisted(() => {
     unsubscribe: vi.fn(),
     // Probe TerminalPane props.
     terminalProps: { current: null as null | Record<string, unknown> },
+    // #689 — TerminalPane mount counter. A remount (key bump) unmounts +
+    // mounts a fresh instance, incrementing this. A no-op (no key change)
+    // leaves it untouched. Lets the tests prove the attachNonce guard.
+    terminalMountCount: { value: 0 },
   }
 })
 
@@ -85,6 +90,13 @@ vi.mock('@/stores/session-events', () => ({
 vi.mock('@/terminal-v2/TerminalPane', () => ({
   TerminalPane: (props: Record<string, unknown>) => {
     h.terminalProps.current = props
+    // Count mounts so a test can detect a remount (key bump). Empty deps →
+    // fires once per mounted instance; a key-driven remount creates a new
+    // instance and fires again.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useEffect(() => {
+      h.terminalMountCount.value += 1
+    }, [])
     return (
       <div
         data-testid="terminal-pane"
@@ -144,6 +156,7 @@ beforeEach(() => {
   h.unsubscribe.mockClear()
   h.sessionHandlers.current = null
   h.terminalProps.current = null
+  h.terminalMountCount.value = 0
 })
 
 function ensureBodies(): Array<Record<string, unknown>> {
@@ -279,6 +292,84 @@ describe('#683 daemon-owned path — broadcast re-attach / idle', () => {
     await waitFor(() => expect(screen.queryByTestId('terminal-pane')).not.toBeNull())
     unmount()
     expect(h.unsubscribe).toHaveBeenCalled()
+  })
+})
+
+// ── #689 — remount guard: don't react to your own SessionAdded echo ───────
+//
+// Bug: mount → ensure(false) → daemon emits SessionAdded for the session we
+// JUST ensured → onAdded bumped attachNonce → TerminalPane REMOUNTED (the
+// 1–3s flicker + tab icon/label reset). Fix: track the attached session id;
+// a SessionAdded echoing it is a no-op. A DIFFERENT session id (or a
+// forceRespawn we initiated) DOES re-attach.
+
+describe('#689 remount guard — SessionAdded echo is a no-op', () => {
+  it('SessionAdded for the ALREADY-ATTACHED session does NOT remount TerminalPane', async () => {
+    render(<AgentChatPane agentName="agent" projectPath="/ws" />)
+    await waitFor(() => expect(screen.queryByTestId('terminal-pane')).not.toBeNull())
+    // mount = ensure(false) → ready with sessionId 'sess-1' (the mock).
+    // TerminalPane mounted exactly once.
+    expect(h.terminalMountCount.value).toBe(1)
+
+    // The daemon echoes SessionAdded for the SAME session we just ensured.
+    h.sessionHandlers.current!.onAdded!({
+      agent_name: 'proj-1',
+      workspace_path: '/ws',
+      session_id: 'sess-1',
+    })
+
+    // No remount — still the original instance (no flicker, icon stable).
+    await Promise.resolve()
+    expect(h.terminalMountCount.value).toBe(1)
+    expect(screen.queryByTestId('terminal-pane')).not.toBeNull()
+  })
+
+  it('SessionAdded for a DIFFERENT session DOES re-attach (remount)', async () => {
+    render(<AgentChatPane agentName="agent" projectPath="/ws" />)
+    await waitFor(() => expect(screen.queryByTestId('terminal-pane')).not.toBeNull())
+    expect(h.terminalMountCount.value).toBe(1)
+
+    // A genuine change — the daemon respawned on a new session.
+    h.sessionHandlers.current!.onAdded!({
+      agent_name: 'proj-1',
+      workspace_path: '/ws',
+      session_id: 'sess-DIFFERENT',
+    })
+
+    // Remount happened (attachNonce bumped) → fresh TerminalPane instance.
+    await waitFor(() => expect(h.terminalMountCount.value).toBe(2))
+  })
+
+  it('refresh (forceRespawn) re-attaches, and the new session’s echo is then a no-op', async () => {
+    // mount returns sess-1; the refresh ensure returns sess-2.
+    render(<AgentChatPane agentName="agent" projectPath="/ws" />)
+    await waitFor(() => expect(screen.queryByTestId('terminal-pane')).not.toBeNull())
+    expect(h.terminalMountCount.value).toBe(1)
+
+    h.daemonCliPost.mockResolvedValueOnce({
+      sessionId: 'sess-2',
+      claudeSessionId: 'claude-2',
+      resumedExisting: false,
+      command: 'claude',
+      args: [],
+      cols: 120,
+      rows: 40,
+      reused: false,
+    })
+    fireEvent.click(screen.getByLabelText('Refresh chat session'))
+
+    // forceRespawn bumped attachNonce → remount onto the new PTY.
+    await waitFor(() => expect(h.terminalMountCount.value).toBe(2))
+
+    // The daemon's SessionAdded echo for sess-2 (the one we just respawned)
+    // must NOT remount again — ensure() already stamped the ref to sess-2.
+    h.sessionHandlers.current!.onAdded!({
+      agent_name: 'proj-1',
+      workspace_path: '/ws',
+      session_id: 'sess-2',
+    })
+    await Promise.resolve()
+    expect(h.terminalMountCount.value).toBe(2)
   })
 })
 

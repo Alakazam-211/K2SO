@@ -400,6 +400,18 @@ function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSe
   // re-runs its idempotent spawn POST and binds to the NEW PTY.
   const [attachNonce, setAttachNonce] = useState(0)
 
+  // #689 — the session id TerminalPane is currently attached to. The
+  // remount-guard: a SessionAdded broadcast only forces a re-attach
+  // (attachNonce bump) when it represents a GENUINE change — a session id
+  // different from the one we already attached to. Without this guard the
+  // mount path's OWN side-effect re-attached the pane: mount → ensure(false)
+  // → daemon emits SessionAdded for the session we just ensured → onAdded
+  // bumped attachNonce → TerminalPane REMOUNTED (the 1–3s flicker + the tab
+  // icon/label reset on the throwaway mount). Same "don't react to your own
+  // side-effect" class as #682. `ensure()` and `onAdded` both stamp this ref
+  // with the session they settled on, so the echo for that session no-ops.
+  const attachedSessionIdRef = useRef<string | null>(null)
+
   // The claude session id currently pinned (from the last ensure / the
   // SessionAdded event). Drives the dropdown highlight + title lookup.
   const claudeSessionId =
@@ -422,9 +434,15 @@ function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSe
           sessionId: res.sessionId,
           claudeSessionId: res.claudeSessionId,
         })
+        // #689 — record which session we're now attached to so the
+        // SessionAdded echo for THIS session is recognised as our own
+        // side-effect and doesn't trigger a spurious remount.
+        attachedSessionIdRef.current = res.sessionId
         // A respawn produced a NEW PTY; force TerminalPane to re-attach so
-        // it binds to it (the SessionAdded broadcast double-covers this —
-        // both routes bump the nonce idempotently).
+        // it binds to it. We stamped the ref FIRST so the daemon's
+        // SessionAdded echo for this same new session won't double-bump.
+        // (A cold mount with forceRespawn=false does NOT bump — TerminalPane
+        // just mounted once and is already on the right PTY.)
         if (forceRespawn) setAttachNonce((n) => n + 1)
       } catch (err) {
         console.error('[AgentChatPane] ensure-pinned-chat failed:', err)
@@ -457,6 +475,14 @@ function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSe
     const unsubscribe = subscribeToWorkspaceSessionEvents(projectPath, {
       onAdded: (event) => {
         if (event.agent_name !== projectId) return
+        // #689 — remount-guard. Only re-attach on a GENUINE session change.
+        // A SessionAdded echoing the session we already ensured/attached
+        // (our own mount/refresh side-effect) must be a no-op — bumping
+        // attachNonce here was what remounted TerminalPane in the first
+        // 1–3s and reset the tab icon/label (the flicker). When the session
+        // id matches what we're attached to, do nothing.
+        if (event.session_id === attachedSessionIdRef.current) return
+        attachedSessionIdRef.current = event.session_id
         setPhase({
           kind: 'ready',
           sessionId: event.session_id,
@@ -466,6 +492,10 @@ function AgentChatTerminalDaemon({ agentName, projectId, projectPath, restoredSe
       },
       onRemoved: (event) => {
         if (event.agent_name !== projectId) return
+        // #689 — the attached session is gone; clear the guard ref so a
+        // later fresh session (Retry) is recognised as a genuine change and
+        // re-attaches.
+        attachedSessionIdRef.current = null
         setPhase({ kind: 'idle' })
       },
     })

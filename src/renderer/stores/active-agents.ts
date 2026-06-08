@@ -17,7 +17,12 @@ import { agentChatId, worktreeChatId, parseTerminalId } from '@/lib/terminal-id'
 // #625 — reset agent pane state on a host switch.
 import { onActiveHostChange } from '@/stores/connect-host'
 import { serverSupports } from '@/lib/server-capabilities'
-import { onAgentStatusChanged, onAppHello } from '@/stores/session-events'
+import {
+  onAgentStatusChanged,
+  onAppHello,
+  onSessionAddedApp,
+  onSessionRemovedApp,
+} from '@/stores/session-events'
 
 export type PaneStatus = 'idle' | 'working' | 'permission' | 'review'
 
@@ -123,6 +128,14 @@ interface ActiveAgentsState {
   handleLifecycleEvent: (paneId: string, tabId: string, eventType: string) => void
   addBackgroundSpawn: (spawn: BackgroundSpawn) => void
   removeBackgroundSpawn: (id: string) => void
+  /** #688 — push a live PTY's cwd into `liveSessionCwds` (from a daemon
+   *  `SessionAdded` broadcast) so the Active-bar dot turns green without a
+   *  poll. Idempotent; keeps the existing Set reference when the cwd is
+   *  already present so subscribers don't re-render needlessly. */
+  addLiveSessionCwd: (cwd: string) => void
+  /** #688 — drop a cwd from `liveSessionCwds` (from a daemon
+   *  `SessionRemoved` broadcast). Idempotent. */
+  removeLiveSessionCwd: (cwd: string) => void
 
   pollOnce: () => Promise<void>
 }
@@ -141,6 +154,23 @@ export const useActiveAgentsStore = create<ActiveAgentsState>((set, get) => ({
   },
   removeBackgroundSpawn: (id: string) => {
     set((s) => ({ backgroundSpawns: s.backgroundSpawns.filter((b) => b.id !== id) }))
+  },
+
+  addLiveSessionCwd: (cwd: string) => {
+    if (!cwd) return
+    const prev = get().liveSessionCwds
+    if (prev.has(cwd)) return
+    const next = new Set(prev)
+    next.add(cwd)
+    set({ liveSessionCwds: next })
+  },
+  removeLiveSessionCwd: (cwd: string) => {
+    if (!cwd) return
+    const prev = get().liveSessionCwds
+    if (!prev.has(cwd)) return
+    const next = new Set(prev)
+    next.delete(cwd)
+    set({ liveSessionCwds: next })
   },
 
   hasActiveAgents: () => {
@@ -633,6 +663,41 @@ let hookUnlisten: (() => void) | null = null
 // app-hello re-snapshot). Module-level so stopAgentPolling can clean them up.
 let agentStatusUnsub: (() => void) | null = null
 let agentHelloUnsub: (() => void) | null = null
+// #688 — app-level SessionAdded/SessionRemoved teardowns. These keep
+// `liveSessionCwds` fresh push-style (the 2.5s poll that used to do it is
+// gone). Module-level so stopAgentPolling can clean them up.
+let sessionAddedUnsub: (() => void) | null = null
+let sessionRemovedUnsub: (() => void) | null = null
+
+// #688 — map a session's canonical key (`agent_name`, the v2_session_map
+// key, stable across its add/remove pair) → the cwd it reported. Lets a
+// SessionRemoved drop the right cwd from `liveSessionCwds` ONLY when no
+// other tracked session still shares that cwd (a workspace can hold several
+// live PTYs in the same cwd — blindly removing on the first close would
+// false-grey the dot). `pollOnce` (startup + reconnect) is the snapshot
+// baseline that re-seeds liveSessionCwds + heals any drift in this map.
+const _liveSessionCwdByKey = new Map<string, string>()
+
+/** #688 — fold a daemon SessionAdded into the live-session cwd tracking.
+ *  Records the key→cwd association and lights the cwd. */
+function trackSessionAdded(agentName: string, cwd: string): void {
+  if (!cwd) return
+  _liveSessionCwdByKey.set(agentName, cwd)
+  useActiveAgentsStore.getState().addLiveSessionCwd(cwd)
+}
+
+/** #688 — fold a daemon SessionRemoved into the live-session cwd tracking.
+ *  Drops the key and ungreys the cwd ONLY when no other tracked session
+ *  still lives in it. */
+function trackSessionRemoved(agentName: string, cwdHint: string): void {
+  const cwd = _liveSessionCwdByKey.get(agentName) ?? cwdHint
+  _liveSessionCwdByKey.delete(agentName)
+  if (!cwd) return
+  for (const remaining of _liveSessionCwdByKey.values()) {
+    if (remaining === cwd) return // another live session keeps it green
+  }
+  useActiveAgentsStore.getState().removeLiveSessionCwd(cwd)
+}
 
 export function startAgentPolling(): void {
   if (pollInterval || agentStatusUnsub) return
@@ -655,6 +720,20 @@ export function startAgentPolling(): void {
     })
     agentHelloUnsub = onAppHello(() => {
       useActiveAgentsStore.getState().pollOnce()
+    })
+    // #688 — keep the Active-bar live-session dot fresh push-style. The
+    // retired 2.5s poll was the ONLY thing updating `liveSessionCwds`, so a
+    // PTY opened after startup (e.g. a daemon-owned pinned chat via
+    // ensure-pinned-chat → SessionAdded) never lit the dot until the next
+    // reconnect re-poll. Subscribe APP-LEVEL (every workspace, not just the
+    // active one) to the daemon's SessionAdded/SessionRemoved lifecycle and
+    // light / ungrey the cwd directly. `pollOnce` (startup + reconnect via
+    // onAppHello above) remains the snapshot baseline.
+    sessionAddedUnsub = onSessionAddedApp((e) => {
+      trackSessionAdded(e.agent_name, e.workspace_path)
+    })
+    sessionRemovedUnsub = onSessionRemovedApp((e) => {
+      trackSessionRemoved(e.agent_name, e.workspace_path)
     })
   } else {
     // Fallback: legacy ~2.5s poll loop (older / remote daemon, no broadcasts).
@@ -1210,6 +1289,15 @@ export function stopAgentPolling(): void {
     agentHelloUnsub()
     agentHelloUnsub = null
   }
+  if (sessionAddedUnsub) {
+    sessionAddedUnsub()
+    sessionAddedUnsub = null
+  }
+  if (sessionRemovedUnsub) {
+    sessionRemovedUnsub()
+    sessionRemovedUnsub = null
+  }
+  _liveSessionCwdByKey.clear()
   if (hookUnlisten) {
     hookUnlisten()
     hookUnlisten = null
@@ -1247,12 +1335,18 @@ export function __resetAgentStateForHostSwitch(): void {
   _hookEventAt.clear()
   _agentStartTimes.clear()
   _launchRetries.clear()
+  // #688 — the live-session cwd tracking is keyed by the LOCAL host's
+  // sessions; wipe it on a host change so the new host's snapshot poll
+  // re-seeds `liveSessionCwds` cleanly (and a stale local key can't keep a
+  // remote cwd falsely green).
+  _liveSessionCwdByKey.clear()
   useActiveAgentsStore.setState({
     agents: new Map(),
     outputTimestamps: new Map(),
     paneStatuses: new Map(),
     paneProjectMap: new Map(),
     backgroundSpawns: [],
+    liveSessionCwds: new Set(),
   })
 }
 
