@@ -557,6 +557,117 @@ describe('tabs — tab-order revision conflict (#677.3)', () => {
   })
 })
 
+// ── tabs: silent remote-reorder adoption — no echo loop (#676/#677) ──────
+//
+// The 0.39.39 regression: with ≥2 clients on one daemon, adopting a peer's
+// reorder triggered a fresh `workspace-layouts/save` (via the store's
+// debounced autosave subscription firing on the `restoreLayout` set), which
+// bumped the revision and re-broadcast `tab_order_changed` → the other client
+// adopted → re-saved → infinite ping-pong. The fix makes adoption SILENT.
+describe('tabs — silent remote-reorder adoption (no echo loop) (#676/#677)', () => {
+  it('adopts a newer tab_order_changed WITHOUT echoing workspace-layouts/save', async () => {
+    vi.useFakeTimers()
+    const tabsMod = await import('./tabs')
+    const { useTabsStore, __setLayoutRevisionForTests } = tabsMod
+    const { handlers } = await openWorkspaceWithLiveTab(tabsMod, 'projB:wsB', '/ws/b')
+
+    __setLayoutRevisionForTests('projB:wsB', 2)
+    const remoteLayout = {
+      version: 2,
+      tabs: [
+        { id: 'tab-remote', title: 'Remote', mosaicTree: 'pg-r', paneGroups: { 'pg-r': { id: 'pg-r', items: [], activeItemIndex: 0 } } },
+      ],
+      activeTabId: 'tab-remote',
+      splitCount: 1,
+      activeGroupIndex: 0,
+    }
+    cli.getImpl = async (route: string) =>
+      route === 'workspace-layouts/load' ? JSON.stringify(remoteLayout) : null
+
+    // Clear the restore's own (legitimate) layout saves before the adoption.
+    cli.posts = []
+
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed',
+      workspacePath: '/ws/b',
+      project: 'projB',
+      workspace: 'wsB',
+      revision: 7,
+    })
+
+    // Flush the async re-fetch (GET → JSON.parse → restoreLayout) AND advance
+    // past the 1000ms autosave debounce window. If the adoption echoed, the
+    // debounced `workspace-layouts/save` would have fired by now.
+    await vi.runAllTimersAsync()
+
+    // The peer's layout was adopted locally...
+    const tabs = useTabsStore.getState().tabs
+    expect(tabs.length).toBe(1)
+    expect(tabs[0].title).toBe('Remote')
+
+    // ...but the adopting client did NOT echo a save back (the loop-breaker).
+    expect(cli.posts.find((p) => p.route === 'workspace-layouts/save')).toBeUndefined()
+  })
+
+  it('two-client convergence: a second adoption at the same revision is a no-op (no re-fetch, no save)', async () => {
+    vi.useFakeTimers()
+    const tabsMod = await import('./tabs')
+    const { __setLayoutRevisionForTests, __getLayoutRevisionForTests } = tabsMod
+    const { handlers } = await openWorkspaceWithLiveTab(tabsMod, 'projB:wsB', '/ws/b')
+
+    __setLayoutRevisionForTests('projB:wsB', 2)
+    const remoteLayout = {
+      version: 2,
+      tabs: [
+        { id: 'tab-remote', title: 'Remote', mosaicTree: 'pg-r', paneGroups: { 'pg-r': { id: 'pg-r', items: [], activeItemIndex: 0 } } },
+      ],
+      activeTabId: 'tab-remote',
+      splitCount: 1,
+      activeGroupIndex: 0,
+    }
+    const getSpy = vi.fn(async (route: string) =>
+      route === 'workspace-layouts/load' ? JSON.stringify(remoteLayout) : null,
+    )
+    cli.getImpl = getSpy as never
+    cli.posts = []
+
+    // First adoption: base 2 < revision 7 → fetch + adopt, base advances to 7.
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed', workspacePath: '/ws/b', project: 'projB', workspace: 'wsB', revision: 7,
+    })
+    await vi.runAllTimersAsync()
+    expect(__getLayoutRevisionForTests('projB:wsB')).toBe(7)
+    const fetchesAfterFirst = getSpy.mock.calls.length
+
+    // Second client re-broadcasts at the SAME revision (the daemon echoes the
+    // canonical state). Because the adoption did NOT bump the revision, this is
+    // <= our base → a pure no-op: no re-fetch, no save. This is what makes two
+    // clients converge instead of ping-ponging.
+    handlers.onTabOrderChanged({
+      kind: 'tab_order_changed', workspacePath: '/ws/b', project: 'projB', workspace: 'wsB', revision: 7,
+    })
+    await vi.runAllTimersAsync()
+
+    expect(getSpy.mock.calls.length).toBe(fetchesAfterFirst) // no new layout fetch
+    expect(cli.posts.find((p) => p.route === 'workspace-layouts/save')).toBeUndefined()
+    expect(__getLayoutRevisionForTests('projB:wsB')).toBe(7)
+  })
+
+  it('does NOT suppress a legitimate user-initiated save (drag-reorder) outside the adoption window', async () => {
+    vi.useFakeTimers()
+    const tabsMod = await import('./tabs')
+    const { useTabsStore } = tabsMod
+    await openWorkspaceWithLiveTab(tabsMod, 'projB:wsB', '/ws/b')
+    cli.posts = []
+
+    // A normal local layout save (e.g. drag-reorder commit) must still POST.
+    useTabsStore.getState().saveLayoutForWorkspace('projB', 'wsB')
+    await vi.runAllTimersAsync()
+
+    expect(cli.posts.find((p) => p.route === 'workspace-layouts/save')).toBeDefined()
+  })
+})
+
 // ── heartbeat-sessions: heartbeat_state_changed (#677.1) ────────────────
 
 describe('heartbeat-sessions — heartbeat-live cutover (#677.1)', () => {

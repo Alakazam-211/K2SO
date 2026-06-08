@@ -327,6 +327,17 @@ export function subscribeToWorkspaceSessionEvents(
           // ignores it; `subscribeToActiveState` consumes it. Swallow
           // here so it doesn't hit the unknown-kind warning.
           break
+        case 'tab_title_changed':
+        case 'tab_order_changed':
+        case 'heartbeat_state_changed':
+          // 0.39.39 (#676/#677) — these workspace-scoped broadcasts share the
+          // `/cli/sessions/events` channel but are OWNED by
+          // `subscribeToWorkspaceTabEvents` (it adopts the reorder / applies the
+          // title). This session-events subscriber doesn't handle them; swallow
+          // here so it doesn't warn "unknown event kind" on every broadcast
+          // frame (the daemon emits `tab_order_changed` ~4×/sec during a remote
+          // reorder). No double-adoption: only the tab-events subscriber acts.
+          break
         default: {
           // Unknown kind — forward-compat, just log.
           const unknown = (msg as { kind?: string }).kind ?? 'unknown'

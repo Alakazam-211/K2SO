@@ -121,6 +121,45 @@ export function __getLayoutRevisionForTests(key: string): number {
   return layoutRevisions.get(key) ?? 0
 }
 
+// 0.39.39 (#676/#677) regression fix — adopting a remote tab-order/layout
+// reorder must be SILENT: applying the peer's layout to local state must NOT
+// re-POST `workspace-layouts/save` (which would bump the revision and
+// re-broadcast `TabOrderChanged`, making two clients ping-pong forever — the
+// monotonic-revision LWW guard can't stop it because each adoption genuinely
+// produces a higher revision). This depth counter is raised around the
+// `restoreLayout` call in `refetchLayoutForRemoteReorder` and checked at the
+// top of both `saveLayoutForWorkspace` and `persistActiveWorkspace`. The
+// store's autosave subscription (see bottom of file) fires SYNCHRONOUSLY
+// inside `restoreLayout`'s `set(...)`, so a synchronous raise/lower around
+// that call suppresses the echo before the debounce timer is even scheduled.
+// Legitimate user-initiated saves (drag-reorder, add/close/split tab) run
+// outside this window and are unaffected.
+let suppressLayoutSaveDepth = 0
+
+/** True while a remote-reorder adoption is applying the peer's layout — the
+ *  adopting client must not echo a save back to the daemon. */
+function isLayoutSaveSuppressed(): boolean {
+  return suppressLayoutSaveDepth > 0
+}
+
+/** Run `fn` with layout-save suppression raised, so any save triggered while
+ *  adopting a peer's layout (synchronous autosave subscription or a direct
+ *  `saveLayoutForWorkspace` call) is a no-op. Always lowers the depth, even on
+ *  throw. */
+function withLayoutSaveSuppressed<T>(fn: () => T): T {
+  suppressLayoutSaveDepth++
+  try {
+    return fn()
+  } finally {
+    suppressLayoutSaveDepth--
+  }
+}
+
+/** Test-only read of the suppression depth (regression test for the echo loop). */
+export function __isLayoutSaveSuppressedForTests(): boolean {
+  return isLayoutSaveSuppressed()
+}
+
 /** Test-only override of the last-known layout revision (#677.3 LWW). */
 export function __setLayoutRevisionForTests(key: string, revision: number): void {
   layoutRevisions.set(key, revision)
@@ -973,6 +1012,17 @@ function serializeSnapshot(snapshot: WorkspaceTabSnapshot): SerializedLayout {
 
 /** Debounce timer for auto-saving the active workspace. */
 let persistDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Cancel a pending debounced autosave (see `persistActiveWorkspace`). Used by
+ *  the silent remote-reorder adoption path (#676/#677) so a pre-adoption save
+ *  scheduled before suppression can't fire ~1s later and serialize the
+ *  just-adopted layout, re-emitting the echo we suppressed. */
+function cancelPendingLayoutSave(): void {
+  if (persistDebounceTimer) {
+    clearTimeout(persistDebounceTimer)
+    persistDebounceTimer = null
+  }
+}
 
 function removePaneFromTree(
   tree: MosaicNode<string> | null,
@@ -3051,6 +3101,9 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   saveLayoutForWorkspace: (projectId: string, workspaceId: string) => {
+    // 0.39.39 (#676/#677) — silent remote-reorder adoption: never echo a save
+    // back while applying a peer's layout (would re-broadcast and ping-pong).
+    if (isLayoutSaveSuppressed()) return
     const state = get()
     const key = `${projectId}:${workspaceId}`
 
@@ -3735,9 +3788,16 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   persistActiveWorkspace: () => {
+    // 0.39.39 (#676/#677) — silent remote-reorder adoption. The autosave
+    // subscription calls this synchronously inside `restoreLayout`'s `set(...)`
+    // while adopting a peer's layout; bail before scheduling so no echoing
+    // save fires. (Second guard inside the timer is defensive in case a future
+    // caller schedules from within a suppressed window.)
+    if (isLayoutSaveSuppressed()) return
     // Debounced save of the active workspace to DB
     if (persistDebounceTimer) clearTimeout(persistDebounceTimer)
     persistDebounceTimer = setTimeout(() => {
+      if (isLayoutSaveSuppressed()) return
       const state = get()
       if (!state.activeWorkspaceKey) return
       if (state.tabs.length === 0 && state.extraGroups.length === 0) return
@@ -4276,7 +4336,22 @@ async function refetchLayoutForRemoteReorder(
     const layout = JSON.parse(json) as SerializedLayout
     if (!layout.tabs || layout.tabs.length === 0) return
     useTabsStore.setState((s) => ({ workspaceLayouts: { ...s.workspaceLayouts, [key]: layout } }))
-    useTabsStore.getState().restoreLayout(layout, cwd)
+    // Adopt the peer's layout SILENTLY. `restoreLayout`'s `set(...)` fires the
+    // autosave subscription synchronously; suppressing across that call stops
+    // the echoing `workspace-layouts/save` that would re-broadcast and make two
+    // clients ping-pong forever (#676/#677 0.39.39 regression). The base
+    // revision was already advanced via `recordLayoutRevision` at the call
+    // site, so a duplicate broadcast at this revision stays a no-op.
+    //
+    // Also cancel any pending pre-adoption autosave: its debounced timer fires
+    // ~1s later (after suppression has lowered) and would serialize CURRENT
+    // (= the just-adopted) state, re-emitting the echo we just suppressed. The
+    // peer's canonical layout supersedes that stale local write (LWW — it has a
+    // higher revision), so dropping the pending save is correct, not lossy.
+    cancelPendingLayoutSave()
+    withLayoutSaveSuppressed(() => {
+      useTabsStore.getState().restoreLayout(layout, cwd)
+    })
     console.warn(`[tabs] adopted remote tab-order reorder for ${key}`)
   } catch (err) {
     console.warn('[tabs] remote-reorder re-fetch failed:', err)
