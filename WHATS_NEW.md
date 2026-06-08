@@ -3,6 +3,18 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.44 — Clone-to actually brings your Claude chat history
+
+- **Cloned workspaces now arrive with their conversations.** A folder-naming
+  mismatch meant K2SO and Claude Code looked in *different* directories for a
+  workspace's sessions whenever the path had an underscore (or a dotted name, or
+  lived under a symlinked location) — so a "Clone to" could report success yet
+  bring **zero** chat history, and `/resume` came up empty. K2SO now names those
+  folders exactly the way Claude Code does, so sessions — including worktree
+  history — bundle, transfer, and resume correctly. A one-time self-heal repairs
+  earlier clones (and local workspaces) that had landed in the wrong folder, and
+  the clone now logs how many sessions it moved.
+
 ## 0.39.43 — Right-sized terminals + reliable pinned-chat switching
 
 - **The terminal sizes for whoever's actually looking.** With multiple clients on
