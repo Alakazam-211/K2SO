@@ -154,6 +154,30 @@ trait SessionProvider {
 
 ---
 
+## Validation findings (Explore, 2026-06-08 — resolved)
+- **Encoder safe to change globally.** Every `claude_project_hash` caller uses it
+  to FIND Claude dirs (clone `inventory.rs:48`, `unpack.rs:60`, `repair.rs:32`,
+  `chat_history` resume/exists/newest), never to WRITE — so matching Claude is a
+  pure bug-fix. The hidden-dirs golden (`/.k2so`→`--k2so`) survives (old + new
+  both emit `--`); add `_`/mid-`.`/symlink goldens; flip any test asserting `_`
+  is preserved.
+- **Part B already implemented.** `inventory.rs:254-279` walks `slug_dir` +
+  every `<slug>-*` worktree sibling when `include_all_history=true`.
+  `include_all_history` **defaults TRUE** (`mod.rs:95-97`; daemon maps
+  `live_only` checkbox → `!live_only`, `clone_routes.rs:54,116`) and is fully
+  threaded — so #25 Finding-1 cause #2 is NOT the bug. **Once the encoder is
+  fixed, the `.scout-worktrees` case bundles automatically — Part B needs no new
+  code.**
+- **#23 cwd rewrite confirmed** at `unpack.rs:123-124` (recompute dest slug at
+  `:60`, byte-replace SOURCE→DEST on session entries).
+- **No receive-side log** in `clone_routes.rs:164-223` (Part D needed).
+- **Phase-1 verdict: the encoder fix ALONE resolves #25 for Claude** (bundling +
+  worktrees + unpack + `/resume`) AND the Issue-B dropdown path-divergence.
+- **Per-provider order (Part C):** 3a Gemini + Codex (easy) → 3b Pi (moderate)
+  → 3c Cursor (hard — SQLite `store.db`, workspace path in a hex-JSON blob at
+  `meta` key '0'; `md5_hex(cwd)` slug IS recomputable, but the re-root rewrite
+  needs a SQLite/blob deep-dive; own phase).
+
 ## Phasing
 1. **Phase 1 (0.39.44, small + high-value):** Part A encoder fix + self-heal +
    Part D send/receive logging. This alone fixes #25 for Claude (bundling +
