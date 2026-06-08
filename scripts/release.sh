@@ -411,8 +411,44 @@ gh release create "$TAG" "${ASSETS[@]}" \
     --title "$TAG" \
     --notes-file "$NOTES_SRC"
 
+# ── Step 10: Verify the updater can actually FETCH valid JSON ──
+# We GENERATE latest.json + daemon-latest.json above, but a release is only
+# good if the updater's real endpoints serve valid JSON. The app updater +
+# the daemon self-update both fetch via GitHub's
+# `/releases/latest/download/<name>` alias — which can lag for a few seconds
+# after publish, and the asset CDN occasionally 504s. So retry, then FAIL
+# LOUDLY (the release is already live) rather than let a broken updater pass
+# silently. Validates HTTP body actually contains `"version": "<VERSION>"`
+# (a 504 HTML page or a stale manifest both fail this).
+echo ""
+echo "Step 10: Verifying updater endpoints serve valid v${VERSION} JSON..."
+VERIFY_BASE="https://github.com/Alakazam-211/K2SO/releases/latest/download"
+VERIFY_FAILED=""
+verify_manifest() {
+    local label="$1" url="$2" ok="" body=""
+    for attempt in $(seq 1 8); do
+        body="$(curl -sL --max-time 20 "$url" 2>/dev/null)"
+        if printf '%s' "$body" | grep -q "\"version\"[[:space:]]*:[[:space:]]*\"${VERSION}\""; then
+            ok=1; break
+        fi
+        echo "    ${label}: not ready (attempt ${attempt}/8), retrying in 15s..."
+        sleep 15
+    done
+    if [ -n "$ok" ]; then
+        echo "  ✓ ${label} → valid JSON, version ${VERSION}"
+    else
+        echo "  ✗ ${label} did NOT serve valid v${VERSION} JSON: ${url}" >&2
+        echo "     (release IS published, but the in-app/daemon updater will fail until this clears —" >&2
+        echo "      usually a transient GitHub 504 / latest-alias lag; re-run the check or wait a minute)" >&2
+        VERIFY_FAILED=1
+    fi
+}
+verify_manifest "app latest.json"    "${VERIFY_BASE}/latest.json"
+verify_manifest "daemon-latest.json" "${VERIFY_BASE}/daemon-latest.json"
+
 echo ""
 echo "═══════════════════════════════════════════════════"
 echo "  Release ${TAG} complete!"
 echo "  https://github.com/Alakazam-211/K2SO/releases/tag/${TAG}"
+[ -n "$VERIFY_FAILED" ] && echo "  ⚠  UPDATER MANIFEST CHECK FAILED — see Step 10 above (updater may 'Could not fetch a valid release JSON' until it clears)"
 echo "═══════════════════════════════════════════════════"
