@@ -7,8 +7,13 @@ files in the repo root for the full developer-facing changelog.
 
 - **Remote chat sessions no longer die after ~15 seconds.** When you opened a
   dormant workspace's chat from a connected client, the host could mistake it
-  for a closed tab and reap the session out from under you. The host now knows
-  when a client is attached and refuses to close a session anyone is watching.
+  for a closed tab and reap the session out from under you. "Active" workspaces
+  and the cleanup that acts on them now live on the server itself, so opening a
+  workspace from *any* device keeps it alive — and the host (or a headless
+  server) does the cleanup correctly on its own.
+- **Everyone on a server sees the same Active workspaces.** When two people use
+  one server, each sees the other's open workspaces appear in the Active bar —
+  one shared, live picture of what's in use, mirrored to every connected device.
 - **"Clone to" now migrates your *entire* chat history.** It used to bundle only
   the single newest session per workspace; it now brings every session by
   default. A new **"Include all chat history"** toggle (on by default) lets you
