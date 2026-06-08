@@ -3,6 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.43 — Right-sized terminals + reliable pinned-chat switching
+
+- **The terminal sizes for whoever's actually looking.** With multiple clients on
+  one server, the PTY now follows the active viewer — the focused client's (or
+  whoever just typed) screen dimensions are used — so a remote viewer no longer
+  gets a terminal clipped to someone else's window. Whoever last interacts owns
+  the size, and it hands back cleanly when the other side takes over.
+- **Switching the pinned chat's session works again.** Picking a different
+  conversation from the pinned-tab dropdown now reliably loads it: your explicit
+  choice is honored instead of being quietly reverted to the most-recent session.
+
 ## 0.39.42 — Tabs behave when two clients share a server
 
 - **No more tab/terminal flicker with multiple clients.** When two windows — or
