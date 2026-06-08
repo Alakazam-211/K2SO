@@ -3,6 +3,20 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.40 — Clone-to chat history lands, and remote pinned chats settle down
+
+- **Cloned workspaces keep their chat history on the new machine.** After a
+  "Clone to", Claude's `/resume` came up empty on the destination because each
+  session still pointed at the *source* machine's folder. Clones now rewrite
+  those paths on arrival, and a one-time self-heal repairs workspaces you
+  already cloned — your conversations show up where they belong.
+- **Pinned chat no longer churns when viewed remotely.** Opening a workspace's
+  pinned chat from a connected/companion client could spin in a loop, minting a
+  brand-new session on every reconnect instead of resuming the real one. It now
+  resumes the workspace's actual session and stays put.
+- **Settings top-bar alignment.** "K2 ‹Server Name›" now sits flush in the
+  Settings top-bar instead of dropping below the window's traffic lights.
+
 ## 0.39.39 — The server runs the show (steadier chats, less chatter)
 
 - **Pinned chats are server-owned and steadier.** The daemon now owns the pinned
