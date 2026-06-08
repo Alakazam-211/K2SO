@@ -466,6 +466,17 @@ async fn async_main() {
     // closed, and on remote daemons that have no Tauri at all.
     run_workspace_legacy_migrations_sweep();
 
+    // GH#23 (0.39.40) self-heal — repair workspaces Clone-to'd on
+    // 0.39.38/0.39.39 before the unpack-time embedded-path rewrite landed.
+    // Those clones left every session `.jsonl`'s embedded `cwd` pointing at
+    // the SOURCE machine's path, so Claude `/resume` showed zero sessions
+    // on the destination. This rewrites the stale source path (read from
+    // the file's own embedded cwd) → the registered project path. Fast
+    // (mismatch check reads one line per slug dir), idempotent (no-op once
+    // they match), and fully non-fatal. Runs every boot — cheap on clean
+    // installs, self-correcting for affected ones.
+    run_repair_cloned_session_paths();
+
     // 0.39.0 K2 Connect prep: `legacy_agent_types_v1` migration moved
     // from `src-tauri/src/lib.rs` (where it ran only on Tauri startup).
     // Headless daemons / K2 Connect now pick up the pre-0.34 pod-
@@ -1067,6 +1078,68 @@ fn run_enable_fanout_for_enabled_agents_migration() {
         "[daemon/migrations] enable_fanout_for_enabled_agents_v1: opted {} enabled-agent workspaces in; future boots will skip",
         outcome.enabled_count
     );
+}
+
+/// GH#23 (0.39.40) — daemon-side runner for the Clone-to embedded-path
+/// self-heal ([`k2so_core::clone::repair_cloned_session_paths`]).
+///
+/// Workspaces migrated via Clone-to on 0.39.38/0.39.39 got their session
+/// `.jsonl` files into the right recomputed slug dir but kept every
+/// embedded `cwd` pointing at the SOURCE machine's absolute path. Claude
+/// `/resume` filters sessions by matching that embedded `cwd` against the
+/// process cwd, so the picker came up empty on the destination. This
+/// derives the stale source path PER-MACHINE from each slug dir's own
+/// embedded cwd and rewrites it to the registered project path (the
+/// authoritative dest on THIS machine).
+///
+/// NOT code_migrations-gated: it's a cheap, idempotent reconciliation —
+/// the mismatch check reads only the first line per slug dir and
+/// short-circuits when the embedded cwd already matches, so a clean boot
+/// does no work. Running every boot also self-corrects any workspace
+/// cloned on an affected build that lands here later. Non-fatal: a parse/
+/// read error on one file skips it; nothing here can abort boot.
+fn run_repair_cloned_session_paths() {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            log_debug!("[daemon/gh23] WARN: no home dir — skipping clone session-path repair");
+            return;
+        }
+    };
+
+    let project_paths: Vec<String> = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows.into_iter().map(|p| p.path).collect(),
+            Err(e) => {
+                log_debug!("[daemon/gh23] WARN: list projects: {e}; skipping repair");
+                return;
+            }
+        }
+    };
+    if project_paths.is_empty() {
+        return;
+    }
+
+    let report = k2so_core::clone::repair_cloned_session_paths(&home, &project_paths);
+    if report.repaired.is_empty() {
+        return;
+    }
+    log_debug!(
+        "[daemon/gh23] repaired {} workspace(s) ({} session file(s)) with stale Clone-to embedded cwd",
+        report.repaired.len(),
+        report.total_files_rewritten(),
+    );
+    for r in &report.repaired {
+        log_debug!(
+            "[daemon/gh23]   {} : {} file(s) rewritten ({} -> {})",
+            r.project_path,
+            r.files_rewritten,
+            r.stale_source_path,
+            r.project_path,
+        );
+    }
 }
 
 /// 0.39.0 K2 Connect prep — daemon-side runner for the

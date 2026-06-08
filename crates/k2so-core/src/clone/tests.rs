@@ -579,6 +579,193 @@ fn bundle_carries_secrets_when_opted_in() {
     );
 }
 
+// ── GH#23: unpack-time embedded-path rewrite ────────────────────────
+//
+// These build a bundle BY HAND (manifest.json + one session entry) so the
+// test fully controls `source_project_path` — including an arbitrary
+// source path WITH SPACES and the back-compat empty-source case — then
+// runs the real `unpack_bundle` and inspects the on-disk session `.jsonl`.
+
+/// Tar+gz a `manifest.json` + the given session archive entries into
+/// `out`. Each session entry is `(archive_rel, contents)` where
+/// `archive_rel` starts with `sessions/`.
+fn build_manual_bundle(out: &Path, manifest: &CloneManifest, sessions: &[(&str, &str)]) {
+    let f = fs::File::create(out).unwrap();
+    let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+    let mut builder = tar::Builder::new(enc);
+
+    let manifest_json = serde_json::to_vec(manifest).unwrap();
+    let mut hdr = tar::Header::new_gnu();
+    hdr.set_size(manifest_json.len() as u64);
+    hdr.set_mode(0o644);
+    hdr.set_cksum();
+    builder
+        .append_data(&mut hdr, "manifest.json", &manifest_json[..])
+        .unwrap();
+
+    for (rel, contents) in sessions {
+        let bytes = contents.as_bytes();
+        let mut h = tar::Header::new_gnu();
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        builder.append_data(&mut h, rel, bytes).unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap();
+}
+
+/// A minimal manifest for the hand-built bundle. `source_project_path` is
+/// arbitrary (the rewrite source); `source_slug` is its claude hash.
+fn manual_manifest(source_project_path: &str) -> CloneManifest {
+    CloneManifest {
+        version: 1,
+        source_slug: claude_project_hash(source_project_path),
+        source_project_path: source_project_path.to_string(),
+        created_at: "2026-06-05T00:00:00Z".to_string(),
+        carry_secrets: false,
+        include_all_history: true,
+        entries: vec![],
+        reauth: ReauthChecklist {
+            secret_paths: vec![],
+            items: vec![],
+        },
+        settings: None,
+    }
+}
+
+#[test]
+fn unpack_rewrites_embedded_cwd_for_arbitrary_spaced_paths() {
+    let root = TempDir::new("gh23-unpack");
+    // SOURCE machine path — arbitrary user/parent, WITH SPACES.
+    let source = "/Users/z3thon/DevProjects/Nelson Specialty Industrial/nsi-plan01";
+    // DEST machine: a real temp parent (also containing a space) + home.
+    let dest_parent = root.path().join("AI Projects");
+    fs::create_dir_all(&dest_parent).unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Session lines embed the SOURCE path in cwd, originalCwd, and a
+    // tool-call file_path — the slug dir name uses the SOURCE slug shape.
+    let session_line = format!(
+        r#"{{"type":"user","cwd":{source:?},"originalCwd":{source:?},"tool":{{"file_path":{file:?}}}}}"#,
+        file = format!("{source}/src/main.rs"),
+    );
+    let source_slug = claude_project_hash(source);
+    let session_rel = format!("sessions/{source_slug}/abcd.jsonl");
+    let worktree_rel = format!("sessions/{source_slug}-feature-x/efgh.jsonl");
+
+    let manifest = manual_manifest(source);
+    let bundle = root.path().join("bundle.tar.gz");
+    build_manual_bundle(
+        &bundle,
+        &manifest,
+        &[
+            (&session_rel, &session_line),
+            (&worktree_rel, &session_line),
+        ],
+    );
+
+    let (res, _m) = unpack_bundle(&bundle, &dest_parent, &home).unwrap();
+    let dest = res.dest_path.to_string_lossy().to_string();
+    assert!(dest.contains("AI Projects"), "dest under spaced parent");
+    assert_eq!(res.dest_path.file_name().unwrap(), "nsi-plan01");
+
+    // The slug dir is the DEST slug (original→dest remap handled).
+    let projects_dir = home.join(".claude").join("projects");
+    let dest_slug = res.remote_slug.clone();
+    let main_session = projects_dir.join(&dest_slug).join("abcd.jsonl");
+    let wt_session = projects_dir
+        .join(format!("{dest_slug}-feature-x"))
+        .join("efgh.jsonl");
+    assert!(main_session.exists(), "main session landed at dest slug dir");
+    assert!(wt_session.exists(), "worktree session landed at dest slug dir");
+
+    // Embedded paths rewritten SOURCE → DEST in BOTH the slug-dir session
+    // and the worktree-variant session.
+    for f in [&main_session, &wt_session] {
+        let body = fs::read_to_string(f).unwrap();
+        assert!(
+            !body.contains(source),
+            "no stale source path remains in {f:?}: {body}"
+        );
+        assert!(body.contains(&dest), "cwd rewritten to dest in {f:?}: {body}");
+        assert!(
+            body.contains(&format!("{dest}/src/main.rs")),
+            "tool-call file_path rewritten in {f:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn unpack_no_rewrite_when_source_equals_dest() {
+    // When the source path happens to equal the dest path (same-machine
+    // clone), the rewrite is a no-op — content is byte-identical.
+    let root = TempDir::new("gh23-unpack-same");
+    let dest_parent = root.path().join("parent");
+    fs::create_dir_all(&dest_parent).unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Make source == the dest path the unpack WILL compute.
+    let source = dest_parent.join("proj").to_string_lossy().to_string();
+    let source_slug = claude_project_hash(&source);
+    let line = format!(r#"{{"cwd":{source:?},"x":1}}"#);
+    let rel = format!("sessions/{source_slug}/s.jsonl");
+
+    let bundle = root.path().join("b.tar.gz");
+    build_manual_bundle(&bundle, &manual_manifest(&source), &[(&rel, &line)]);
+
+    let (res, _m) = unpack_bundle(&bundle, &dest_parent, &home).unwrap();
+    let f = home
+        .join(".claude")
+        .join("projects")
+        .join(&res.remote_slug)
+        .join("s.jsonl");
+    let body = fs::read_to_string(&f).unwrap();
+    assert!(body.contains(&source), "same path retained, got {body}");
+}
+
+#[test]
+fn unpack_back_compat_skips_when_manifest_lacks_source_path() {
+    // A bundle whose manifest has an EMPTY source_project_path (older /
+    // hand-built) must NOT crash and must NOT rewrite — the session file's
+    // embedded cwd is left as-is (degrades to pre-fix behavior). The slug
+    // remap still happens so the file still lands in the right dir.
+    let root = TempDir::new("gh23-unpack-backcompat");
+    let dest_parent = root.path().join("parent");
+    fs::create_dir_all(&dest_parent).unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let stale = "/Users/whoever/old/place/proj";
+    let stale_slug = claude_project_hash(stale);
+    let line = format!(r#"{{"cwd":{stale:?},"x":1}}"#);
+    let rel = format!("sessions/{stale_slug}/s.jsonl");
+
+    // Empty source_project_path → rewrite disabled.
+    let mut manifest = manual_manifest("");
+    // basename of "" → falls back to "workspace"; give a real source_slug
+    // so the slug-remap branch is exercised against the stale dir name.
+    manifest.source_slug = stale_slug.clone();
+    manifest.source_project_path = String::new();
+
+    let bundle = root.path().join("b.tar.gz");
+    build_manual_bundle(&bundle, &manifest, &[(&rel, &line)]);
+
+    let (res, _m) = unpack_bundle(&bundle, &dest_parent, &home).unwrap();
+    let f = home
+        .join(".claude")
+        .join("projects")
+        .join(&res.remote_slug)
+        .join("s.jsonl");
+    assert!(f.exists(), "session still placed at recomputed slug dir");
+    let body = fs::read_to_string(&f).unwrap();
+    assert!(
+        body.contains(stale),
+        "back-compat: no source path on manifest → embedded cwd left untouched, got {body}"
+    );
+}
+
 /// Untar a `.tar.gz` into `dest`, returning the set of archived entry
 /// names (`/`-joined, relative to the archive root).
 fn untar(bundle: &Path, dest: &Path) -> HashSet<String> {

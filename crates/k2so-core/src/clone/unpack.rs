@@ -60,6 +60,25 @@ pub fn unpack_bundle(
     let remote_slug = claude_project_hash(&dest_path.to_string_lossy());
     let source_slug = manifest.source_slug.clone();
 
+    // ── source/dest ABS workspace paths for the embedded-path rewrite ──
+    // GH#23: the slug DIR name is remapped (above), but every session
+    // `.jsonl` ALSO embeds the source machine's absolute workspace path in
+    // its `cwd` (and `originalCwd`, worktree paths, tool-call `file_path`
+    // args). Claude `/resume` filters by matching that embedded `cwd`
+    // against the process cwd, so a stale source path → zero sessions on
+    // the destination. We rewrite SOURCE→DEST as a raw substring pass over
+    // each session line below (issue's recommended option 2 — one pass,
+    // covers every embedded reference).
+    //
+    // `source_project_path` is a non-Option field present on every manifest
+    // (version 1+). A pathological empty value (older/hand-built bundle
+    // without it) disables the rewrite gracefully — the slug remap still
+    // runs, so we degrade to the pre-fix behavior rather than crash.
+    let source_project_path = manifest.source_project_path.clone();
+    let dest_project_path = dest_path.to_string_lossy().to_string();
+    let session_rewrite =
+        SessionPathRewrite::new(&source_project_path, &dest_project_path);
+
     let projects_dir = home.join(".claude").join("projects");
     let remote_slug_dir = projects_dir.join(&remote_slug);
 
@@ -94,6 +113,17 @@ pub fn unpack_bundle(
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut buf)
             .map_err(|e| format!("read entry {}: {e}", archive_path.display()))?;
+
+        // GH#23: rewrite embedded SOURCE→DEST workspace paths inside session
+        // `.jsonl` files only (the `sessions/` class). A no-op when the
+        // rewrite is disabled (source == dest, or no source path on the
+        // manifest). Raw byte substring replace — handles spaces/odd chars
+        // and covers `cwd`, `originalCwd`, worktree paths, and tool-call
+        // `file_path` args in a single pass.
+        if is_session_entry(&archive_path) {
+            session_rewrite.apply_in_place(&mut buf);
+        }
+
         std::fs::write(&out, &buf)
             .map_err(|e| format!("write {}: {e}", out.display()))?;
     }
@@ -168,6 +198,84 @@ fn reroot_session_rel(rel: &Path, source_slug: &str, remote_slug: &str) -> PathB
     } else {
         PathBuf::from(new_dir).join(remainder)
     }
+}
+
+/// True when a bundle archive path belongs to the `sessions/` class
+/// (a `<session-id>.jsonl` whose embedded paths we must rewrite).
+fn is_session_entry(archive_path: &Path) -> bool {
+    archive_path
+        .components()
+        .next()
+        .map(|c| c.as_os_str() == std::ffi::OsStr::new("sessions"))
+        .unwrap_or(false)
+}
+
+/// A SOURCE→DEST workspace-path substring rewrite for session `.jsonl`
+/// bytes (GH#23). Constructed once per unpack; `apply_in_place` runs over
+/// each session file's raw bytes.
+///
+/// Disabled (a no-op) when `from` is empty (no source path on the
+/// manifest — back-compat) or `from == to` (same-machine clone, nothing
+/// to rewrite). Operates on raw bytes so paths with spaces or other odd
+/// characters are handled verbatim, exactly like the manual `sed` users
+/// run today.
+struct SessionPathRewrite {
+    from: Vec<u8>,
+    to: Vec<u8>,
+    enabled: bool,
+}
+
+impl SessionPathRewrite {
+    fn new(from: &str, to: &str) -> Self {
+        let enabled = !from.is_empty() && from != to;
+        Self {
+            from: from.as_bytes().to_vec(),
+            to: to.as_bytes().to_vec(),
+            enabled,
+        }
+    }
+
+    /// Replace every occurrence of `from` with `to` in `buf`, in place.
+    /// No-op when disabled or when `from` doesn't appear.
+    fn apply_in_place(&self, buf: &mut Vec<u8>) {
+        if !self.enabled || self.from.is_empty() {
+            return;
+        }
+        if let Some(rewritten) = replace_bytes(buf, &self.from, &self.to) {
+            *buf = rewritten;
+        }
+    }
+}
+
+/// Replace every non-overlapping occurrence of `needle` in `haystack`
+/// with `replacement`. Returns `Some(new_bytes)` when at least one match
+/// was found, `None` when there were none (so the caller can skip the
+/// allocation). `needle` is assumed non-empty (caller guarantees it).
+pub(super) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+    let mut matches: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            matches.push(i);
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    if matches.is_empty() {
+        return None;
+    }
+
+    let mut out =
+        Vec::with_capacity(haystack.len() + matches.len() * replacement.len().saturating_sub(needle.len()).max(0));
+    let mut prev = 0;
+    for &m in &matches {
+        out.extend_from_slice(&haystack[prev..m]);
+        out.extend_from_slice(replacement);
+        prev = m + needle.len();
+    }
+    out.extend_from_slice(&haystack[prev..]);
+    Some(out)
 }
 
 /// `<parent>/<name>`, or `<parent>/name (1)`, `name (2)`, … if taken.
