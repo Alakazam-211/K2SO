@@ -199,7 +199,13 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_name: projectId }),
+          // force: this is a deliberate USER refresh/switch — the user IS the
+          // attached client, so the daemon's attached-client close-guard
+          // (GH#22 reaper defense) must be bypassed or the live PTY survives
+          // and the remount reattaches the OLD session instead of resuming
+          // the selected one. The reaper is daemon-side + canonical-Active
+          // driven; this renderer path is only ever user-initiated.
+          body: JSON.stringify({ agent_name: projectId, force: true }),
         },
       ).catch(() => {})
     } catch { /* ignore — refresh proceeds either way */ }

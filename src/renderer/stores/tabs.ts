@@ -239,7 +239,11 @@ async function closeV2Session(agentName: string): Promise<void> {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_name: agentName }),
+        // force: deliberate user tab-close — bypass the daemon's attached-
+        // client close-guard (GH#22 reaper defense). The user closing the tab
+        // IS the attached client; the guard only exists to stop the daemon
+        // reaper, which never routes through here.
+        body: JSON.stringify({ agent_name: agentName, force: true }),
       },
     )
     if (!res.ok) {
