@@ -56,6 +56,18 @@ pub fn unpack_bundle(
     // ── collision-safe dest path ──────────────────────────────────────
     let dest_path = collision_safe_dir(dest_parent, &source_name);
 
+    // Create the dest workspace dir UP FRONT so the slug below is computed
+    // from a path that EXISTS — `claude_project_hash` canonicalizes symlinks
+    // (GH#25), and canonicalize only resolves an existing path. On macOS the
+    // dest commonly lives under a symlinked prefix (`/tmp`→`/private/tmp`,
+    // `/var`→`/private/var`); if we slug the not-yet-created path we'd get the
+    // pre-canonical form, while Claude + every later caller (the registered
+    // project path → resume/exists-check/#23 repair) slug the canonical form
+    // — sessions would land in a dir Claude never reads. Creating it first
+    // makes the unpack slug match what the rest of the system computes.
+    std::fs::create_dir_all(&dest_path)
+        .map_err(|e| format!("create dest dir {}: {e}", dest_path.display()))?;
+
     // ── recompute remote slug from the FINAL dest path ────────────────
     let remote_slug = claude_project_hash(&dest_path.to_string_lossy());
     let source_slug = manifest.source_slug.clone();

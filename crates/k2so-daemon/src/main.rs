@@ -466,6 +466,16 @@ async fn async_main() {
     // closed, and on remote daemons that have no Tauri at all.
     run_workspace_legacy_migrations_sweep();
 
+    // GH#25 (0.39.44) self-heal — migrate session dirs an EARLIER K2SO
+    // build wrote under the OLD (underscore/literal-path-preserving) Claude
+    // slug into the correct NEW-encoder slug dir. Before 0.39.44 the encoder
+    // preserved `_`/mid-`.` and didn't canonicalize symlinks, so a prior
+    // clone could unpack sessions into the wrong slug dir that the corrected
+    // encoder (and Claude) never reads. This moves/merges them to the right
+    // dir. Runs BEFORE the #23 repair below so the migrated files get their
+    // embedded cwd repaired in the SAME boot. Idempotent + non-fatal.
+    run_migrate_legacy_slug_dirs();
+
     // GH#23 (0.39.40) self-heal — repair workspaces Clone-to'd on
     // 0.39.38/0.39.39 before the unpack-time embedded-path rewrite landed.
     // Those clones left every session `.jsonl`'s embedded `cwd` pointing at
@@ -1078,6 +1088,62 @@ fn run_enable_fanout_for_enabled_agents_migration() {
         "[daemon/migrations] enable_fanout_for_enabled_agents_v1: opted {} enabled-agent workspaces in; future boots will skip",
         outcome.enabled_count
     );
+}
+
+/// GH#25 (0.39.44) — daemon-side runner for the legacy-slug migration
+/// ([`k2so_core::clone::migrate_legacy_slug_dirs`]).
+///
+/// Before 0.39.44, `claude_project_hash` preserved `_` and mid-component
+/// `.` and didn't canonicalize symlinks, so a Clone-to unpack on an
+/// affected workspace path wrote sessions into the WRONG slug dir — one the
+/// corrected encoder (and Claude itself) never reads. This moves/merges
+/// those stale dirs into the correct new-encoder slug dir. Non-fatal,
+/// idempotent, cheap on clean installs (per-project `is_dir()` check on the
+/// legacy slug, only for paths whose two encodings diverge). Runs every
+/// boot, immediately BEFORE the #23 embedded-cwd repair so migrated files
+/// are also cwd-rewritten in the same boot.
+fn run_migrate_legacy_slug_dirs() {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            log_debug!("[daemon/gh25] WARN: no home dir — skipping legacy-slug migration");
+            return;
+        }
+    };
+
+    let project_paths: Vec<String> = {
+        let db = k2so_core::db::shared();
+        let conn = db.lock();
+        match k2so_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows.into_iter().map(|p| p.path).collect(),
+            Err(e) => {
+                log_debug!("[daemon/gh25] WARN: list projects: {e}; skipping legacy-slug migration");
+                return;
+            }
+        }
+    };
+    if project_paths.is_empty() {
+        return;
+    }
+
+    let report = k2so_core::clone::migrate_legacy_slug_dirs(&home, &project_paths);
+    if report.migrated.is_empty() {
+        return;
+    }
+    log_debug!(
+        "[daemon/gh25] migrated {} workspace(s) ({} session file(s)) from legacy slug dirs",
+        report.migrated.len(),
+        report.total_files_moved(),
+    );
+    for m in &report.migrated {
+        log_debug!(
+            "[daemon/gh25]   {} : {} file(s) moved ({} -> {})",
+            m.project_path,
+            m.files_moved,
+            m.legacy_slug,
+            m.new_slug,
+        );
+    }
 }
 
 /// GH#23 (0.39.40) — daemon-side runner for the Clone-to embedded-path

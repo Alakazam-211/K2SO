@@ -17,8 +17,10 @@
 
 use crate::cli_response::CliResponse;
 use k2so_core::clone;
+use k2so_core::clone::DestinationClass;
 use k2so_core::db;
 use k2so_core::db::schema::Project;
+use k2so_core::log_debug;
 use k2so_core::projects_ops as pops;
 use serde::Deserialize;
 
@@ -100,6 +102,33 @@ pub fn handle_clone_bundle(body: &[u8]) -> CliResponse {
     let scrubbed_count = inv.scrubbed_secrets.len();
     let entry_count = inv.entries.len();
 
+    // GH#25 observability (send side): make the session count VISIBLE in
+    // daemon.stderr.log so a "bundled 0 sessions" outcome is diagnosable.
+    // Before the 0.39.44 encoder fix, the bundler enumerated the WRONG slug
+    // dir and silently shipped 0 sessions; if it's still 0 after the fix,
+    // emit a prominent warning so the operator knows BEFORE the bundle ships.
+    let session_count = inv
+        .entries
+        .iter()
+        .filter(|e| e.class == DestinationClass::Session)
+        .count();
+    if session_count == 0 {
+        log_debug!(
+            "[daemon/clone] WARN: bundling workspace {} — 0 chat sessions found to migrate \
+             (no `.jsonl` under ~/.claude/projects/{}/ or its worktree siblings)",
+            inv.project_path,
+            inv.slug,
+        );
+    } else {
+        log_debug!(
+            "[daemon/clone] bundling workspace {} (slug {}): {} chat session(s), {} total file(s)",
+            inv.project_path,
+            inv.slug,
+            session_count,
+            entry_count,
+        );
+    }
+
     if let Err(e) = clone::build_bundle(&inv, &opts, created_at, settings, &bundle_path) {
         return CliResponse::internal_error(format!("build bundle: {e}"));
     }
@@ -169,6 +198,39 @@ pub fn unpack_and_register(
     // 1. Extract files at recomputed paths; get the manifest back.
     let (result, manifest) = clone::unpack_bundle(bundle_path, dest_parent, home)?;
     let dest_path = result.dest_path.to_string_lossy().to_string();
+
+    // GH#25 observability (receive side): the prior unpack handler emitted NO
+    // log line at all, so a destination had no signal of what (if anything)
+    // arrived. Summarize the unpack to daemon.stderr.log: per-class counts +
+    // the recomputed dest slug the sessions/memory landed under.
+    {
+        let mut workspace_files = 0usize;
+        let mut memory_files = 0usize;
+        let mut session_files = 0usize;
+        for e in &manifest.entries {
+            match e.class {
+                DestinationClass::Workspace => workspace_files += 1,
+                DestinationClass::Memory => memory_files += 1,
+                DestinationClass::Session => session_files += 1,
+            }
+        }
+        log_debug!(
+            "[daemon/clone] unpacked workspace -> {} (dest slug {}): {} workspace file(s), \
+             {} memory file(s), {} chat session(s) [from source {}]",
+            dest_path,
+            result.remote_slug,
+            workspace_files,
+            memory_files,
+            session_files,
+            manifest.source_project_path,
+        );
+        if session_files == 0 {
+            log_debug!(
+                "[daemon/clone] WARN: unpacked bundle carried 0 chat sessions — \
+                 /resume will be empty on this destination"
+            );
+        }
+    }
 
     // Best-effort: the uploaded bundle has now been fully extracted, so
     // delete it to avoid leaking `~/.k2so/clone-tmp/*.tar.gz` on the

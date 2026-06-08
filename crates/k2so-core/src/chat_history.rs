@@ -45,24 +45,49 @@ pub fn claude_history_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("history.jsonl"))
 }
 
-/// Convert a project path to Claude's project-hash directory name.
-/// Claude Code turns `/Users/.../TestingK2SO/.k2so/agents/foo` into
-/// `-Users-...-TestingK2SO--k2so-agents-foo` — leading `/` → `-`,
-/// `/.` → `/-` (hidden dir prefix preserved), remaining `/` → `-`.
+/// Convert a project path to Claude Code's project-slug directory name —
+/// the `~/.claude/projects/<slug>/` folder Claude writes a workspace's
+/// sessions into.
 ///
-/// **0.37.5:** also replaces spaces in path components with hyphens.
-/// Claude Code does this for paths like `/Users/.../Alakazam Labs/...`
-/// — the on-disk dir is `-Users-...-Alakazam-Labs-...` (hyphenated),
-/// not `-Users-...-Alakazam Labs-...`. Pre-0.37.5 our hash kept the
-/// space so `claude_session_file_exists` always returned false for
-/// spaced-path workspaces, breaking `--resume` continuity (refresh
-/// button on the pinned chat tab kept producing fresh sessions
-/// instead of resuming the existing JSONL).
+/// **The rule (empirically verified against `claude -p` on disk):** Claude
+/// (a) canonicalizes the path (resolving symlinks, e.g. `/tmp`→`/private/tmp`,
+/// `/var`→`/private/var`), then (b) maps EVERY character that isn't
+/// `[a-zA-Z0-9]` or `-` to `-`. So `/`, `.`, `_`, ` ` all collapse to `-`,
+/// and `--` runs (e.g. for a hidden `/.k2so` segment) are preserved as-is.
+/// A live probe in `/tmp/k2so_slug_probe_a_b/has_under_score.dotted`
+/// produced `-private-tmp-k2so-slug-probe-a-b-has-under-score-dotted`.
+///
+/// **Why this changed (GH#25 root cause):** the pre-0.39.44 encoder used
+/// `replace("/.","/-").replace('/',"-").replace(' ',"-")`, which PRESERVED
+/// `_` and any mid-component `.` (and never canonicalized symlinks). So for
+/// any workspace path containing `_`, a dotted path component, or a
+/// symlinked prefix, K2SO computed a DIFFERENT slug than Claude — the
+/// bundler enumerated `~/.claude/projects/<K2SO-slug>/` (which didn't exist)
+/// and got 0 sessions, unpack wrote to the wrong slug dir, and `/resume` +
+/// the pinned-chat dropdown's exists-check never saw Claude's real history.
+/// Every caller of this fn (clone inventory/unpack/repair, resume,
+/// exists-check, newest-on-disk) uses it to FIND Claude's dirs, so matching
+/// Claude's encoder is a pure bug-fix; plain paths (no `_`/dot/symlink) are
+/// unchanged.
+///
+/// `canonicalize` only succeeds for paths that exist on disk; it FAILS on
+/// non-existent paths (test fixtures, not-yet-created dests) → we fall back
+/// to the literal input. The char-map then still reproduces Claude's output
+/// for the no-symlink case (`/`→`-`, `.`→`-`, ` `→`-`, `_`→`-`).
 pub fn claude_project_hash(project_path: &str) -> String {
-    project_path
-        .replace("/.", "/-")
-        .replace('/', "-")
-        .replace(' ', "-")
+    let canonical = std::fs::canonicalize(project_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| project_path.to_string());
+    canonical
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 /// Convert a project path to Cursor's chat-directory hash.
@@ -2606,6 +2631,11 @@ mod tests {
 
     #[test]
     fn claude_project_hash_handles_hidden_dirs() {
+        // Non-existent path → `canonicalize` fails → literal fallback →
+        // char-map. A hidden `/.k2so` segment maps `/`→`-` AND `.`→`-`,
+        // producing the `--k2so` double-hyphen run (which Claude also
+        // emits). This golden survives the 0.39.44 encoder rewrite (both
+        // the old `/.`→`/-` rule and the new per-char rule produce `--`).
         assert_eq!(
             claude_project_hash("/Users/z/proj/.k2so/agents/a"),
             "-Users-z-proj--k2so-agents-a"
@@ -2615,11 +2645,11 @@ mod tests {
 
     #[test]
     fn claude_project_hash_handles_spaces() {
-        // 0.37.5: claude turns spaces in path components to
-        // hyphens. Mirror that so `claude_session_file_exists`
-        // resolves the right on-disk dir for workspaces like
-        // `/Users/.../Alakazam Labs/...`. Reverting `replace(' ', "-")`
-        // MUST flip this assertion to "FAIL".
+        // Claude turns spaces in path components to hyphens. Mirror that so
+        // `claude_session_file_exists` resolves the right on-disk dir for
+        // workspaces like `/Users/.../Alakazam Labs/...`. (Non-existent
+        // fixtures → literal fallback → ` `→`-` char-map. This golden is
+        // unchanged by the 0.39.44 encoder rewrite.)
         assert_eq!(
             claude_project_hash("/Users/z/DevProjects/Alakazam Labs/K2SO"),
             "-Users-z-DevProjects-Alakazam-Labs-K2SO"
@@ -2628,6 +2658,87 @@ mod tests {
             claude_project_hash("/Users/z/Some Folder With Spaces/proj"),
             "-Users-z-Some-Folder-With-Spaces-proj"
         );
+    }
+
+    #[test]
+    fn claude_project_hash_collapses_underscores_and_dots() {
+        // GH#25 root cause: the pre-0.39.44 encoder PRESERVED `_` and any
+        // mid-component `.`, so K2SO and Claude diverged on these paths and
+        // never saw each other's sessions. Claude maps EVERY non-`[a-zA-Z0-9]`
+        // char → `-`. These fixtures are non-existent → literal fallback →
+        // the char-map alone must reproduce Claude's collapse.
+        // Underscore (the #25 case):
+        assert_eq!(
+            claude_project_hash("/Users/z/proj/scout_v3"),
+            "-Users-z-proj-scout-v3"
+        );
+        // Mid-component dot:
+        assert_eq!(claude_project_hash("/Users/z/foo.bar"), "-Users-z-foo-bar");
+        // Both together — mirrors the live probe SHAPE (a `_` dir with a
+        // dotted child), just without the symlinked `/tmp` prefix:
+        assert_eq!(
+            claude_project_hash("/k2so_slug_probe_a_b/has_under_score.dotted"),
+            "-k2so-slug-probe-a-b-has-under-score-dotted"
+        );
+    }
+
+    #[test]
+    fn claude_project_hash_canonicalizes_symlinks() {
+        // Claude canonicalizes the path (resolving symlinks) BEFORE slugging,
+        // so a symlinked dir and its real target must produce the SAME slug.
+        // Live probe (a real, EXISTING path so canonicalize runs):
+        //   /private/tmp/k2so_slug_probe_a_b/has_under_score.dotted
+        //   → -private-tmp-k2so-slug-probe-a-b-has-under-score-dotted
+        // We reproduce that here with a real tmp dir + a symlink to it and
+        // assert both collapse identically.
+        let unique = format!(
+            "k2so_slug_probe_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        // Real target dir (contains `_` and a dotted child so we also cover
+        // the char-map through canonicalize).
+        let real = std::env::temp_dir().join(&unique).join("has_under_score.dotted");
+        std::fs::create_dir_all(&real).expect("create real probe dir");
+        // Symlink whose name differs from its target.
+        let link = std::env::temp_dir().join(format!("{unique}_link"));
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            std::env::temp_dir().join(&unique),
+            &link,
+        )
+        .expect("create symlink");
+
+        let via_real = claude_project_hash(&real.to_string_lossy());
+        // Through the symlink to the SAME dotted child.
+        let via_link = claude_project_hash(
+            &link.join("has_under_score.dotted").to_string_lossy(),
+        );
+
+        // canonicalize collapses both to the identical real-path slug.
+        assert_eq!(
+            via_real, via_link,
+            "symlinked + real paths must slug identically"
+        );
+        // And the slug is the char-mapped CANONICAL path: it must contain the
+        // real (resolved) basename chain with `_` and `.` collapsed, and must
+        // NOT contain the symlink's own `_link` segment.
+        assert!(
+            via_real.ends_with("-has-under-score-dotted"),
+            "canonical basename collapsed: {via_real}"
+        );
+        assert!(
+            !via_link.contains("link"),
+            "symlink name resolved away, not in slug: {via_link}"
+        );
+
+        // Cleanup (best-effort).
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&unique));
     }
 
     #[test]

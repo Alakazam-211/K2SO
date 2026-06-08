@@ -44,7 +44,10 @@ mod tests;
 
 pub use bundle::{build_bundle, read_manifest_from_bundle};
 pub use inventory::inventory;
-pub use repair::{repair_cloned_session_paths, ProjectRepair, RepairReport};
+pub use repair::{
+    migrate_legacy_slug_dirs, repair_cloned_session_paths, ProjectRepair, RepairReport,
+    SlugMigration, SlugMigrationReport,
+};
 pub use settings::{capture_settings, WorkspaceSettings};
 pub use unpack::{unpack_bundle, UnpackResult};
 
