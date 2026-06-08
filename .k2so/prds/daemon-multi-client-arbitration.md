@@ -1,6 +1,6 @@
 # Daemon Multi-Client Arbitration — active-viewer dimensions + explicit session selection
 
-**Status:** DRAFT (proposed for 0.39.43) — pending Explore validation pass (Issue B)
+**Status:** DRAFT — **Explore-validated 2026-06-08** (see §6). For 0.39.43.
 **Author:** pod-leader (with Rosson)
 **Related:** #672 (canonical Active), #683 (daemon-owned pinned chat), #679
 (SQLite-canonical session selection), #691 (remote clips bottom ~3 rows), the
@@ -139,6 +139,43 @@ Make an **explicit selection** authoritative:
    session id from the response, or stay on the old one?
 4. Cleanest place for the "explicit" signal — a DB flag on `workspace_sessions`,
    or a param on `ensure-pinned-chat` / `resolve_resume_chat_args`?
+
+## 6. Validation findings (Explore, 2026-06-08) + locked implementation
+
+**Issue B — root cause confirmed:** the **converge fallback overwrites the
+explicit pick.** When `claude_session_file_exists(B)` returns false at resolve
+time, `resolve_resume_chat_args` (resume_chat.rs ~134-155) resumes
+`newest_claude_session_on_disk` AND re-`update_session_id`s it — clobbering B in
+the DB and respawning on the old session; the renderer then attaches to the
+daemon-returned (wrong) id. One way exists(B) goes false: a **path/slug
+divergence** (B recorded under a `<hash>-<branch>` worktree dir while the
+exists-check scans the root `<hash>`). `force_respawn` tear-down is correct
+(`pinned_chat.rs:151-166`) and the renderer DOES re-attach to the ensure
+response id (`AgentChatPane.tsx:424-456`) — so neither of those is the bug.
+**Fix (locked):** an explicit-selection signal — `set-chat-session` flags the
+choice (transient `workspace_sessions.explicit_session_override`, or a param
+threaded `set-chat-session`→`ensure`→`resolve_resume_chat_args`); when explicit,
+the resolver **honors B directly and SKIPS the converge fallback** (errors if B
+is genuinely gone — never silently swaps). Auto path (no explicit gesture) keeps
+the fallback → GH#24 stays fixed. Clear the flag after the respawn lands on B.
+
+**Issue A — confirmed:** `set_active` carries only `{action,active}` — **no
+dims** (resize is a separate frame, `TerminalPane.tsx:~1529/1582`). The
+`lastSentActiveRef` dedup is **per-component-instance**, so a **bare re-mount
+resets it and re-claims** even with unchanged focus — and `AgentChatPane`
+re-mounts `TerminalPane` on `attachNonce` bump → that's the "local re-claims on
+refresh → wins" path. `DaemonPtySession` has `active_subscriber` but **no
+`active_cols/active_rows`**; `session.resize(cols,rows)` exists and is what the
+gate at `sessions_grid_ws.rs:472` calls. **Fix (locked):**
+1. Extend grid-WS `SetActive` → `{action:'set_active', active, cols?, rows?}`
+   (optional, back-compat).
+2. `DaemonPtySession`: add `active_cols`/`active_rows` `AtomicU16`; on a real
+   claim store them AND `session.resize(cols,rows)` immediately, so the active
+   viewer's size applies on claim (not on a later Resize).
+3. Renderer: send current cols/rows with the claim; **persist the last-sent
+   active value across re-mounts** (stable per-session key, not a per-instance
+   ref) so a bare re-mount with unchanged focus does NOT re-claim; release
+   (`active:false`) when the window/pane loses focus.
 
 ## 5. Rollout
 Daemon-side core for both; small renderer addition for A (dims in the claim +
