@@ -297,6 +297,15 @@ export interface TerminalPaneProps {
    *  common case "I know the right label, don't let the PTY
    *  smudge it." */
   lockLabel?: boolean
+  /** K2SO #682 — fired when the daemon reports the child process
+   *  exited (`child_exit`). Carries the exit code so the consumer can
+   *  distinguish a clean quit from a crash, and is the signal a
+   *  spawn-loop circuit breaker counts. The pinned Chat tab
+   *  (`AgentChatPane`) uses this to detect RAPID REPEATED early exits
+   *  (e.g. `claude --session-id <dup>` → "already in use" → exit 1) and
+   *  STOP auto-respawning instead of piling up `claude` processes.
+   *  Optional — most consumers don't need it. */
+  onChildExit?: (exitCode: number | null) => void
 }
 
 type Phase =
@@ -404,6 +413,15 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // isTabVisible) can call the latest implementation without taking the
   // big WS-open closure as a dependency. Assigned once below.
   const openGridWsRef = useRef<() => Promise<void>>(async () => {})
+  // K2SO #682 — latest `onChildExit` callback in a ref so the big WS
+  // closure (deps: terminalId, perfLog, reconnectAttempt) fires the
+  // CURRENT consumer without re-subscribing the socket on every render.
+  const onChildExitRef = useRef<((exitCode: number | null) => void) | undefined>(
+    props.onChildExit,
+  )
+  useEffect(() => {
+    onChildExitRef.current = props.onChildExit
+  }, [props.onChildExit])
   // 0.39.9: phase, but as a ref. `ws.onclose` (bound inside the boot
   // effect) needs to consult the LATEST phase to know whether to
   // skip reconnect after a real `child_exit` — but the closure
@@ -1136,6 +1154,10 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             }
             phaseRef.current = next
             setPhase(next)
+            // K2SO #682 — surface the exit (with code/timing) so a
+            // consumer can run a spawn-loop circuit breaker. Fired via
+            // the ref to avoid stale-closure / re-subscribe churn.
+            onChildExitRef.current?.(parsed.payload.exit_code)
             break
           }
           case 'error':

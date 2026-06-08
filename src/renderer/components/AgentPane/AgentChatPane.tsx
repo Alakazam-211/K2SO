@@ -10,6 +10,16 @@ import { getDaemonWs, daemonHttpBase } from '@/kessel/daemon-ws'
 import { daemonCliGet } from '@/lib/daemon-cli'
 import { agentDisplayName, resumeChatArgs, reconcileColdBootSession, type ColdBootDecision } from '@/lib/workspace-agent'
 import { useActiveAgentsStore } from '@/stores/active-agents'
+import {
+  initialBreakerState,
+  recordSpawn,
+  recordExit,
+  resetBreaker,
+  isSelfRetrigger,
+  MAX_RAPID_EXITS,
+  type BreakerState,
+  type ResolveMemo,
+} from '@/lib/chat-spawn-breaker'
 
 interface AgentChatPaneProps {
   agentName: string
@@ -100,6 +110,27 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     cwd: string
   } | null>(null)
   const [ready, setReady] = useState(false)
+  // K2SO #682 — spawn-loop circuit breaker. When `claude` exits almost
+  // immediately N times in a row (e.g. `--session-id <dup>` → "already in
+  // use" → exit 1, or a phantom `--resume`), we STOP auto-respawning and
+  // show an error state with the refresh button as the manual retry. The
+  // decision logic is the pure `chat-spawn-breaker` module; this ref holds
+  // the running state (a ref, not state, so updating it from the exit
+  // callback never re-runs the resolve effect — that re-run is the very
+  // loop we're breaking). `breakerTripped` mirrors `.tripped` into render
+  // state so the UI can switch to the error pane.
+  const breakerRef = useRef<BreakerState>(initialBreakerState())
+  const [breakerTripped, setBreakerTripped] = useState(false)
+  // K2SO #682 — self-retrigger guard. The resolve effect stamps the
+  // session id it just launched onto the layout item; that flows back in
+  // as the `restoredSessionId` prop, changing a resolve-effect dependency
+  // and RE-RUNNING the effect — which would spawn again. We record what we
+  // last resolved (the refreshNonce/projectPath we resolved FOR + the
+  // session id we resolved TO); when the effect re-fires and the ONLY thing
+  // that changed is `restoredSessionId` becoming the value we just stamped,
+  // we bail (no-op). A real workspace switch (projectPath / new mount) or a
+  // user refresh (refreshNonce++) still resolves, because those keys differ.
+  const lastResolvedRef = useRef<ResolveMemo | null>(null)
   // 0.37.4: friendly label from AGENT.md `display_name:` (falls back
   // to the technical agent name on first paint, then upgrades).
   const [displayName, setDisplayName] = useState<string>(agentName)
@@ -180,6 +211,13 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   const handleRefresh = useCallback(async (): Promise<void> => {
     if (refreshing) return
     setRefreshing(true)
+    // K2SO #682 — a manual refresh is the user's explicit "try again".
+    // Reset the spawn-loop breaker so the fresh spawn is allowed to run
+    // (and, if it fails, gets its own full N-strike budget). Also clear
+    // the self-retrigger memo so the upcoming resolve isn't skipped.
+    breakerRef.current = resetBreaker()
+    setBreakerTripped(false)
+    lastResolvedRef.current = null
     // Kill the daemon-owned PTY (best-effort). The unregister hook in
     // v2_session_map clears agent_sessions.active_terminal_id and the
     // child-exit observer fires for any still-alive process. If the
@@ -314,8 +352,39 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   }, [currentSessionId, projectPath, agentName, handleRefresh])
 
   useEffect(() => {
+    // K2SO #682 — self-retrigger guard. Each resolve stamps the session id
+    // it just launched onto the layout item, which flows back as
+    // `restoredSessionId` and re-fires this effect. If the ONLY change is
+    // that `restoredSessionId` now equals the session we already resolved
+    // for THIS (refreshNonce, projectPath), this re-run is the self-loop —
+    // bail without spawning. A real workspace switch (different projectPath
+    // / fresh mount) or a user refresh (refreshNonce++) has a different key
+    // and proceeds normally.
+    if (
+      isSelfRetrigger(lastResolvedRef.current, {
+        refreshNonce,
+        projectPath,
+        restoredSessionId,
+      })
+    ) {
+      return
+    }
+
+    // K2SO #682 — breaker gate. Once tripped, refuse to spawn until a
+    // manual refresh resets it. This is what makes the breaker bound the
+    // loop regardless of which trigger re-fired this effect.
+    if (breakerRef.current.tripped) {
+      return
+    }
+
     let cancelled = false
     const stampSessionId = (sid: string | null | undefined): void => {
+      // Remember what we resolved so a self-stamp-driven re-run is a no-op.
+      lastResolvedRef.current = {
+        refreshNonce,
+        projectPath,
+        sessionId: sid ?? null,
+      }
       if (!sid) return
       try {
         useTabsStore.getState().stampAgentSessionId(agentName, projectPath, sid, projectId)
@@ -504,6 +573,48 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
     return () => { cancelled = true }
   }, [agentName, projectPath, refreshNonce, restoredSessionId])
 
+  // K2SO #682 — record the spawn timestamp for the circuit breaker the
+  // moment a launch config goes live (ready transitions true with a
+  // command to run). Keyed on refreshNonce so each remount-driven respawn
+  // re-stamps `spawnedAt`; the exit handler measures lifetime against it.
+  // A reattach to an already-alive PTY has no `command` (launchConfig is
+  // null), so it doesn't start the early-exit clock.
+  useEffect(() => {
+    if (ready && launchConfig?.command) {
+      breakerRef.current = recordSpawn(breakerRef.current, Date.now())
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, refreshNonce])
+
+  // K2SO #682 — fold a child exit into the spawn-loop breaker.
+  //
+  // The breaker is a SAFETY NET that sits on top of whatever respawn
+  // TRIGGER exists (the resolve effect re-running — e.g. a self-stamp the
+  // guard above missed, or a future regression). It does NOT itself
+  // respawn; it COUNTS rapid early exits and, on the Nth, sets
+  // `breakerTripped`, which gates the resolve effect (it refuses to spawn
+  // while tripped). That converts an unbounded spawn→exit→respawn loop
+  // into a bounded N attempts + an error pane with the refresh button as
+  // the manual retry (which resets the breaker).
+  //
+  // A normal single exit (user typed `exit`, or a session that lived a
+  // while) is NON-early → resets the rapid count and never trips, so the
+  // pane just shows its exited/idle state as today.
+  const handleChildExit = useCallback((exitCode: number | null): void => {
+    const decision = recordExit(breakerRef.current, {
+      now: Date.now(),
+      exitCode,
+    })
+    breakerRef.current = decision.next
+    if (decision.justTripped) {
+      console.error(
+        '[AgentChatPane] spawn-loop circuit breaker TRIPPED — chat exited',
+        `${MAX_RAPID_EXITS}× rapidly; halting auto-respawn (manual refresh to retry)`,
+      )
+      setBreakerTripped(true)
+    }
+  }, [])
+
   // Session id detection used to live here — a 12×5s polling loop that
   // called `chat_history_detect_active_session` to find the
   // most-recently-modified .jsonl in the workspace's chat history dir
@@ -520,6 +631,50 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
   // starts, then passes `--session-id <UUID>` so claude uses it.
   // v2_spawn's auto-stamp hook then writes `active_terminal_id` when
   // the PTY registers. Daemon owns the truth; renderer doesn't poll.
+
+  // K2SO #682 — breaker tripped: the chat process exited repeatedly within
+  // seconds of each spawn. STOP auto-respawning (which would pile up
+  // hundreds of `claude` procs) and show an error state. The refresh
+  // button is the manual retry — `handleRefresh` resets the breaker.
+  if (breakerTripped) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
+        <div className="text-xs font-semibold text-[var(--color-text-primary)]">
+          Chat session failed to start
+        </div>
+        <div className="text-[11px] text-[var(--color-text-muted)] max-w-[40ch]">
+          The chat process exited repeatedly right after starting, so K2SO
+          stopped retrying to avoid a spawn loop. Click Retry to try again.
+        </div>
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-medium bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)]/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors no-drag cursor-pointer"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={refreshing ? 'animate-spin' : ''}
+            aria-hidden="true"
+          >
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+            <path d="M16 16h5v5" />
+          </svg>
+          Retry
+        </button>
+      </div>
+    )
+  }
 
   if (!ready) {
     return (
@@ -671,6 +826,10 @@ function AgentChatTerminal({ agentName, projectId, projectPath, restoredSessionI
           // the canonical session).
           seedLabel={displayName}
           lockLabel={true}
+          // K2SO #682 — feed child-exit (code + timing via the breaker)
+          // into the spawn-loop circuit breaker so rapid repeated early
+          // exits stop auto-respawning instead of piling up procs.
+          onChildExit={handleChildExit}
         />
       </div>
     </div>
