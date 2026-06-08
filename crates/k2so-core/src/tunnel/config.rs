@@ -76,6 +76,22 @@ pub struct TunnelConfig {
     /// Defaults false so a fresh / un-opted config never auto-dials.
     #[serde(default)]
     pub auto_start: bool,
+
+    /// Stable per-install device id used for the subdomain claim/lease
+    /// (K2SO #674). The renderer generates this once and persists it here
+    /// via `/cli/tunnel/config` so the DAEMON renews the lease under the
+    /// SAME identity the client claimed with — otherwise a daemon-side
+    /// renewal would look like a different device taking over. `None` on a
+    /// manual token-only config that never went through the account/claim
+    /// flow (renewal is then skipped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+
+    /// Human-readable device label (cosmetic; shown in the holder UI). Sent
+    /// alongside `device_id` so the daemon's renewal carries the same label
+    /// the client did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_label: Option<String>,
 }
 
 fn default_server_host() -> String {
@@ -95,6 +111,8 @@ impl Default for TunnelConfig {
             subdomain: String::new(),
             local_port: None,
             auto_start: false,
+            device_id: None,
+            device_label: None,
         }
     }
 }
@@ -259,6 +277,8 @@ mod tests {
                 subdomain: "rosson".to_string(),
                 local_port: Some(57839),
                 auto_start: true,
+                device_id: Some("dev-abc".to_string()),
+                device_label: Some("MacIntel".to_string()),
             };
             save(&cfg).expect("save");
             let back = load().expect("load");

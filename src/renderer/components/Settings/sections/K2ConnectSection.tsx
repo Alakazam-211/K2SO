@@ -75,9 +75,11 @@ function getDeviceId(): string {
   }
 }
 
-// Heartbeat cadence: re-claim every 60s while the tunnel runs to keep the
-// 3-minute server lease alive.
-const CLAIM_HEARTBEAT_MS = 60_000
+// K2SO #674: the lease-renewal cadence (re-claim well inside the 3-minute
+// server TTL) now lives in the DAEMON
+// (`crates/k2so-core/src/tunnel/lease.rs::RENEW_INTERVAL`) so it survives
+// this panel closing and works headless. The renderer no longer schedules
+// renewal — it only fires one-shot claims on explicit user actions.
 
 export const K2_CONNECT_MANIFEST: SettingEntry[] = [
   { id: 'k2-connect.account-login', section: 'k2-connect', label: 'Sign in to K2 Connect', description: 'Sign in to k2.dev to pick a purchased subdomain', keywords: ['login', 'sign in', 'account', 'k2.dev', 'email', 'password'] },
@@ -282,11 +284,15 @@ export function K2ConnectSection(): React.JSX.Element {
   // it's purely cosmetic ("MacIntel" etc.) — the holder UI falls back to
   // "another device" when absent.
   const deviceLabel = typeof navigator !== 'undefined' ? navigator.platform || undefined : undefined
-  // The 60s lease-refresh interval, while a tunnel is running.
-  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  // Refs the heartbeat reads so it never closes over stale values.
+  // K2SO #674: the PERIODIC lease renewal now lives in the DAEMON
+  // (`crates/k2so-core/src/tunnel/lease.rs`), tied to the tunnel's
+  // lifecycle, so the lease survives this panel being closed and works
+  // headless. The renderer keeps only the ONE-SHOT claims on explicit user
+  // actions (start / swap, below) and the status DISPLAY. It pushes this
+  // device's claim identity (`deviceId`/`deviceLabel`) to the daemon via
+  // `/cli/tunnel/config` so the daemon renews under the SAME device.
+  // Ref the one-shot claim paths read so they never close over stale state.
   const accessTokenRef = useRef<string | null>(null)
-  const boundLabelRef = useRef<string | null>(null)
   const confirm = useConfirmDialogStore((s) => s.confirm)
 
   // K2SO #628: the tunnel EXPOSE controls only make sense for THIS Mac's
@@ -392,32 +398,24 @@ export function K2ConnectSection(): React.JSX.Element {
     } catch { /* ignore */ }
   }
 
-  // Keep the access token + bound-subdomain refs current for the heartbeat.
+  // Keep the access-token ref current so the one-shot claim paths (start /
+  // swap) can read it without closing over stale state.
   useEffect(() => {
     accessTokenRef.current = session?.accessToken ?? null
   }, [session])
-  useEffect(() => {
-    boundLabelRef.current = subdomain.trim() || null
-  }, [subdomain])
 
-  // ── Claim / lease heartbeat ───────────────────────────────────────────
-  const stopHeartbeat = (): void => {
-    if (heartbeatRef.current !== null) {
-      clearInterval(heartbeatRef.current)
-      heartbeatRef.current = null
+  // Push this device's claim identity to the daemon so its lease-renewal
+  // loop (K2SO #674) renews under the SAME device the renderer claimed
+  // with. Best-effort — a failure just means the daemon falls back to
+  // whatever identity it already had stored; the one-shot claim still
+  // happened. POSTs only the device fields so the token/subdomain are
+  // untouched.
+  const pushDeviceIdentity = async (): Promise<void> => {
+    try {
+      await tunnelPost('config', { deviceId, deviceLabel: deviceLabel ?? '' })
+    } catch {
+      /* best-effort — daemon renews with its stored identity */
     }
-  }
-
-  const startHeartbeat = (): void => {
-    stopHeartbeat()
-    heartbeatRef.current = setInterval(() => {
-      const accessToken = accessTokenRef.current
-      const label = boundLabelRef.current
-      if (!accessToken || !label) return
-      // Best-effort refresh; a transient failure shouldn't tear down the
-      // tunnel — the next tick (or the 3-min server expiry) will reconcile.
-      void claimSubdomain(accessToken, label, deviceId, deviceLabel).catch(() => undefined)
-    }, CLAIM_HEARTBEAT_MS)
   }
 
   // Refresh the owned-subdomain list (incl. live claim columns) so the
@@ -431,18 +429,16 @@ export function K2ConnectSection(): React.JSX.Element {
     } catch { /* ignore — keep the current list */ }
   }
 
-  // Tear the heartbeat down on unmount.
-  useEffect(() => stopHeartbeat, [])
-
-  // If the tunnel is already running (e.g. resumed from a prior session or
-  // auto-start) and we have an account session + a bound subdomain, make
-  // sure the lease is being heartbeated.
+  // K2SO #674: the renderer no longer drives the periodic lease renewal —
+  // the daemon owns it now (see `crates/k2so-core/src/tunnel/lease.rs`), so
+  // the lease survives this panel unmounting and a headless daemon. When a
+  // tunnel is already running with an account session + bound subdomain
+  // (resumed session / auto-start), just (re)assert this device's claim
+  // identity on the daemon so its renewal uses the right device.
   useEffect(() => {
     const live = status?.running ?? false
     if (live && session && subdomain.trim()) {
-      if (heartbeatRef.current === null) startHeartbeat()
-    } else if (!live) {
-      stopHeartbeat()
+      void pushDeviceIdentity()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running, session, subdomain])
@@ -677,8 +673,9 @@ export function K2ConnectSection(): React.JSX.Element {
     setError(null)
     try {
       const sub = subdomain.trim()
-      // Claim the lease BEFORE starting. If a *different* device holds a
-      // fresh claim, refuse to start and surface who holds it.
+      // Claim the lease BEFORE starting (one-shot, explicit user action).
+      // If a *different* device holds a fresh claim, refuse to start and
+      // surface who holds it.
       const accessToken = session?.accessToken ?? accessTokenRef.current
       if (sub && accessToken) {
         try {
@@ -692,6 +689,10 @@ export function K2ConnectSection(): React.JSX.Element {
           return
         }
       }
+      // Make sure the daemon renews under THIS device (K2SO #674) before we
+      // start — its renewal loop spins up on tunnel start and reads the
+      // stored identity.
+      await pushDeviceIdentity()
       const res = await tunnelPost(`start${sub ? `?subdomain=${encodeURIComponent(sub)}` : ''}`)
       if (!res.ok) {
         // The connector surfaces the frpc-not-installed hint verbatim here.
@@ -701,8 +702,7 @@ export function K2ConnectSection(): React.JSX.Element {
         return
       }
       await refreshStatus()
-      // Lease is ours and the tunnel is up — keep it fresh.
-      startHeartbeat()
+      // Lease renewal is now the DAEMON's job (tied to the tunnel being up).
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Start failed')
     } finally {
@@ -713,9 +713,10 @@ export function K2ConnectSection(): React.JSX.Element {
   const stopTunnel = async (): Promise<void> => {
     setBusy(true)
     setError(null)
-    // Stop heartbeating + release the lease (best-effort) regardless of the
-    // stop call's outcome.
-    stopHeartbeat()
+    // Release the lease (best-effort) regardless of the stop call's
+    // outcome. The DAEMON stops its own renewal loop when the tunnel is
+    // torn down (K2SO #674) — `/cli/tunnel/stop` flips the lifecycle flag
+    // the renewal thread watches.
     const accessToken = session?.accessToken ?? accessTokenRef.current
     const bound = subdomain.trim()
     if (accessToken && bound) void releaseSubdomain(accessToken, bound, deviceId).catch(() => undefined)
@@ -803,6 +804,10 @@ export function K2ConnectSection(): React.JSX.Element {
         serverPort: Number(serverPort) || DEFAULT_SERVER_PORT,
         subdomain: sub.label,
         token: sub.tunnel_token,
+        // Persist this device's claim identity now so a later auto-start /
+        // headless boot can renew the lease without the renderer (K2SO #674).
+        deviceId,
+        deviceLabel: deviceLabel ?? '',
       })
       if (!res.ok) {
         setError(await errText(res))
@@ -872,8 +877,8 @@ export function K2ConnectSection(): React.JSX.Element {
     setError(null)
     setBoundMsg(null)
     try {
-      stopHeartbeat()
-      // 1. Stop the current tunnel.
+      // 1. Stop the current tunnel (the daemon stops its lease renewal for
+      // the old subdomain here — K2SO #674).
       const stopRes = await tunnelPost('stop')
       if (!stopRes.ok) {
         setError(await errText(stopRes))
@@ -892,6 +897,10 @@ export function K2ConnectSection(): React.JSX.Element {
         serverPort: Number(serverPort) || DEFAULT_SERVER_PORT,
         subdomain: row.label,
         token: row.tunnel_token,
+        // Persist this device's claim identity so the daemon renews the new
+        // subdomain's lease under the same device (K2SO #674).
+        deviceId,
+        deviceLabel: deviceLabel ?? '',
       })
       if (!cfgRes.ok) {
         setError(await errText(cfgRes))
@@ -900,8 +909,7 @@ export function K2ConnectSection(): React.JSX.Element {
       const cfg = (await cfgRes.json()) as TunnelConfigView
       setTokenSet(cfg.tokenSet)
       setToken('')
-      boundLabelRef.current = row.label
-      // 4. Claim the new lease.
+      // 4. Claim the new lease (one-shot, explicit user action).
       if (accessToken) {
         try {
           const result = await claimSubdomain(accessToken, row.label, deviceId, deviceLabel)
@@ -922,7 +930,7 @@ export function K2ConnectSection(): React.JSX.Element {
         return
       }
       await refreshStatus()
-      startHeartbeat()
+      // Daemon now owns the renewal for the new subdomain (K2SO #674).
       setBoundMsg(`Swapped to ${row.label}.k2.dev.`)
       void refreshSubdomains()
     } catch (e) {

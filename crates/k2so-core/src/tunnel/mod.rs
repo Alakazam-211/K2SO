@@ -18,7 +18,13 @@
 //! Modules:
 //!   * [`config`]    — `~/.k2so/tunnel.json` (the secret token lives here).
 //!   * [`render`]    — frpc v0.61 TOML renderer.
-//!   * [`connector`] — spawn / supervise / stop the `frpc` child.
+//!   * [`connector`] — spawn / supervise / stop the `frpc` child, and
+//!                     drive the daemon-owned subdomain lease renewal
+//!                     while the tunnel is up.
+//!   * [`lease`]     — subdomain claim/lease keepalive (K2SO #674): the
+//!                     daemon re-POSTs the `claim_subdomain` RPC on its own
+//!                     timer so the lease never lapses with the UI closed
+//!                     or the daemon headless.
 //!
 //! Public facade ([`start_tunnel`] / [`stop_tunnel`] / [`tunnel_status`])
 //! is what the daemon's `/cli/tunnel/*` routes call.
@@ -27,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod config;
 pub mod connector;
+pub mod lease;
 pub mod render;
 
 pub use config::TunnelConfig;
@@ -71,6 +78,12 @@ pub struct TunnelConfigUpdate {
     pub subdomain: Option<String>,
     pub token: Option<String>,
     pub auto_start: Option<bool>,
+    /// Stable per-install device id for the subdomain lease (K2SO #674).
+    /// The renderer persists its claim identity here so the daemon renews
+    /// under the same device.
+    pub device_id: Option<String>,
+    /// Cosmetic device label that accompanies `device_id`.
+    pub device_label: Option<String>,
 }
 
 /// Read the stored tunnel config as a redacted view (token stays in the
@@ -103,6 +116,18 @@ pub fn set_config(upd: TunnelConfigUpdate) -> Result<TunnelConfigView, String> {
         }
         if let Some(a) = upd.auto_start {
             c.auto_start = a;
+        }
+        // Device identity for the lease (K2SO #674). A blank value is
+        // ignored so re-saving other fields can't wipe a stored id; an
+        // explicit non-blank value updates it.
+        if let Some(d) = upd.device_id {
+            if !d.trim().is_empty() {
+                c.device_id = Some(d.trim().to_string());
+            }
+        }
+        if let Some(l) = upd.device_label {
+            let l = l.trim();
+            c.device_label = if l.is_empty() { None } else { Some(l.to_string()) };
         }
     })?;
     Ok((&cfg).into())

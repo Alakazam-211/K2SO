@@ -260,6 +260,13 @@ pub fn start(
     let running = Arc::new(AtomicBool::new(true));
     spawn_supervised(frpc, child.clone(), running.clone())?;
 
+    // K2SO #674: while the tunnel is up, the DAEMON renews the subdomain
+    // lease on its own timer so it never lapses with the Settings panel
+    // closed or the daemon running headless. Tied to this start: the
+    // renewal thread watches the SAME `running` flag the supervisor does
+    // and self-exits the moment `stop()` flips it false.
+    spawn_lease_renewal(&cfg, running.clone());
+
     let st = ConnectorState {
         cfg,
         resolved_local_port,
@@ -438,6 +445,81 @@ fn spawn_supervised(
         })
         .map_err(|e| format!("spawn supervisor thread: {e}"))?;
     Ok(())
+}
+
+/// K2SO #674 — spawn the daemon-owned lease-renewal loop for a running
+/// tunnel. The loop re-POSTs the `claim_subdomain` heartbeat every
+/// [`lease::RENEW_INTERVAL`] so `<sub>.k2.dev` keeps routing to this
+/// machine, with NO dependence on any client being connected or the
+/// Settings panel being mounted (works fully headless).
+///
+/// Lifecycle is tied to the tunnel: the loop watches the same `running`
+/// flag the frpc supervisor does and returns the moment [`stop`] flips it
+/// false. The interval is split into short sleeps so a stop is observed
+/// promptly rather than after a full minute.
+///
+/// No renewal target (no subdomain label or no client-persisted device id
+/// in the config — e.g. a manual token-only config) → the loop logs once
+/// and exits; the tunnel still runs, it just isn't lease-renewed here.
+fn spawn_lease_renewal(cfg: &TunnelConfig, running: Arc<AtomicBool>) {
+    let target = match super::lease::LeaseTarget::from_config(cfg) {
+        Some(t) => t,
+        None => {
+            crate::log_debug!(
+                "[tunnel/lease] no renewal target (no subdomain/device id in config) — \
+                 skipping daemon-side lease renewal"
+            );
+            return;
+        }
+    };
+
+    let spawned = std::thread::Builder::new()
+        .name("k2so-tunnel-lease".to_string())
+        .spawn(move || {
+            crate::log_debug!(
+                "[tunnel/lease] daemon-owned lease renewal started for {} (every {:?})",
+                target.label,
+                super::lease::RENEW_INTERVAL
+            );
+            // Heartbeat immediately on start so a fresh tunnel doesn't wait
+            // a full interval for its first renewal (the renderer's
+            // one-shot claim covers the very start, but an auto-start/
+            // headless boot has no renderer claim at all).
+            loop {
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
+                match super::lease::renew_once(&target) {
+                    Ok(true) => { /* lease held — quiet on the happy path */ }
+                    Ok(false) => crate::log_debug!(
+                        "[tunnel/lease] {} now held by another device — heartbeat not applied",
+                        target.label
+                    ),
+                    Err(e) => crate::log_debug!(
+                        "[tunnel/lease] renewal tick failed (will retry next interval): {e}"
+                    ),
+                }
+                // Sleep the interval in short slices so `stop()` is observed
+                // within ~1s rather than up to a full minute later.
+                let mut remaining = super::lease::RENEW_INTERVAL;
+                let slice = Duration::from_secs(1);
+                while remaining > Duration::ZERO {
+                    if !running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let nap = remaining.min(slice);
+                    std::thread::sleep(nap);
+                    remaining = remaining.saturating_sub(nap);
+                }
+            }
+            crate::log_debug!("[tunnel/lease] lease renewal stopped for {}", target.label);
+        });
+    if let Err(e) = spawned {
+        // A failure to spawn the renewal thread must not fail tunnel start
+        // — the tunnel still works, it just won't be lease-renewed by the
+        // daemon. Log loudly so the regression is visible.
+        crate::log_debug!("[tunnel/lease] WARN: failed to spawn lease renewal thread: {e}");
+    }
 }
 
 /// Spawn a single `frpc -c <config>` child, redirecting stdout+stderr
