@@ -301,6 +301,14 @@ pub async fn serve_session_grid_connection(
         std::sync::atomic::Ordering::Relaxed,
     );
 
+    // This connection's last-requested terminal dims, tracked on EVERY
+    // `Resize` (even when dropped because we're not the active subscriber)
+    // so that when this client sends `Input` and becomes the active viewer
+    // (PRD §6.4 — typing claims active), we can snap the PTY to ITS size
+    // immediately rather than waiting for a follow-up Resize. 0 = unknown.
+    let mut my_cols: u16 = 0;
+    let mut my_rows: u16 = 0;
+
     let __t_accept = std::time::Instant::now();
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
@@ -554,9 +562,54 @@ pub async fn serve_session_grid_connection(
                         let parsed: Result<Inbound, _> = serde_json::from_str(&text);
                         match parsed {
                             Ok(Inbound::Input { text }) => {
+                                // PRD §6.4 — typing IS an active-viewer claim.
+                                // Across two machines both clients can be
+                                // window-focused at once, so a focus-only model
+                                // can strand a typing-but-not-refocused viewer
+                                // at the wrong PTY size. The most-recent client
+                                // to send Input owns the session: flip
+                                // `active_subscriber` to us (idempotent) and
+                                // snap the PTY to our last-known dims. This also
+                                // guarantees the renderer's bare-re-mount claim
+                                // suppression can never strand an interacting
+                                // viewer. 0 dims = unknown → leave size for our
+                                // next Resize.
+                                let active = session
+                                    .active_subscriber
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                if active != subscriber_id {
+                                    session.active_subscriber.store(
+                                        subscriber_id,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    if my_cols > 0 && my_rows > 0 {
+                                        session.active_cols.store(
+                                            my_cols,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                        session.active_rows.store(
+                                            my_rows,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                        session.resize(my_cols, my_rows);
+                                    }
+                                    log_debug!(
+                                        "[v2-perf] side=daemon stage=active_claim_via_input \
+                                         session={} sub={} cols={} rows={}",
+                                        session.session_id,
+                                        subscriber_id,
+                                        my_cols,
+                                        my_rows,
+                                    );
+                                }
                                 session.write(text.into_bytes());
                             }
                             Ok(Inbound::Resize { cols, rows }) => {
+                                // Remember our own requested dims even when the
+                                // resize is dropped below (non-active) — an
+                                // Input claim (above) snaps the PTY to these.
+                                my_cols = cols;
+                                my_rows = rows;
                                 // 0.37.11 — only the active subscriber
                                 // can resize. `active = 0` means "no
                                 // claim yet" — accept (first-resize-
@@ -567,6 +620,14 @@ pub async fn serve_session_grid_connection(
                                     .active_subscriber
                                     .load(std::sync::atomic::Ordering::Relaxed);
                                 if active == 0 || active == subscriber_id {
+                                    session.active_cols.store(
+                                        cols,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    session.active_rows.store(
+                                        rows,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
                                     session.resize(cols, rows);
                                 } else {
                                     log_debug!(
