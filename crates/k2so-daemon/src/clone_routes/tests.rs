@@ -158,7 +158,16 @@ fn unpack_places_files_registers_and_applies_settings() {
     assert_eq!(project.color, "#aa00aa");
     assert_eq!(project.agent_mode, "manager");
     assert_eq!(project.agent_enabled, 1, "manager → enabled");
-    assert_eq!(project.heartbeat_enabled, 1);
+    // d410883: `heartbeat_enabled` on a Project READ is a LIVE aggregate
+    // ("≥1 enabled, non-archived heartbeat row?"), not the legacy
+    // projects-column flag the clone settings write. The clone does not
+    // bundle workspace_heartbeats rows, so the truthful aggregate for a
+    // fresh unpack is 0 — asserting the legacy 1 here was stale (the
+    // suite's only red since that change).
+    assert_eq!(
+        project.heartbeat_enabled, 0,
+        "no heartbeat rows cloned → live aggregate is off"
+    );
     assert_eq!(project.worktree_mode, 2);
 
     // confirm it's queryable in the DB
