@@ -30,6 +30,23 @@ SIGNING_IDENTITY="Developer ID Application: LZTEK, LLC (36B8R93HXV)"
 KEYCHAIN_PROFILE="K2SO-notarize"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Notarization auth (0.39.45): prefer DIRECT App Store Connect API-key
+# auth when the env provides it — the keychain profile lives in the
+# data-protection keychain, which headless/agent sessions can't read
+# (notarytool reports "No Keychain password item found" even though the
+# profile exists/validates). Set in .env:
+#   ASC_API_KEY_P8=/path/to/AuthKey_XXXX.p8
+#   ASC_API_KEY_ID=XXXXXXXXXX
+#   ASC_API_ISSUER=<issuer-uuid>
+# Falls back to --keychain-profile K2SO-notarize when unset.
+notary_auth_args() {
+    if [ -n "${ASC_API_KEY_P8:-}" ] && [ -n "${ASC_API_KEY_ID:-}" ] && [ -n "${ASC_API_ISSUER:-}" ]; then
+        printf '%s\n' --key "$ASC_API_KEY_P8" --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER"
+    else
+        printf '%s\n' --keychain-profile "$KEYCHAIN_PROFILE"
+    fi
+}
+
 # rustup installs cargo at ~/.cargo/bin, which interactive shells source
 # via .zshrc / .bashrc. `bun run tauri build` spawns a non-interactive
 # subshell that does NOT source those, so cargo appears missing. Prepend
@@ -205,8 +222,10 @@ echo ""
 echo "Step 4: Notarizing app..."
 cd target/release/bundle/macos
 ditto -c -k --keepParent "K2SO.app" "/tmp/K2SO_${VERSION}.zip"
+NOTARY_AUTH=()
+while IFS= read -r arg; do NOTARY_AUTH+=("$arg"); done < <(notary_auth_args)
 xcrun notarytool submit "/tmp/K2SO_${VERSION}.zip" \
-    --keychain-profile "$KEYCHAIN_PROFILE" --wait
+    "${NOTARY_AUTH[@]}" --wait
 xcrun stapler staple "K2SO.app"
 echo "  App notarized and stapled."
 
@@ -240,7 +259,7 @@ codesign --force --timestamp \
 echo ""
 echo "Step 7: Notarizing DMG..."
 xcrun notarytool submit "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg" \
-    --keychain-profile "$KEYCHAIN_PROFILE" --wait
+    "${NOTARY_AUTH[@]}" --wait
 xcrun stapler staple "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
 echo "  DMG notarized and stapled."
 
