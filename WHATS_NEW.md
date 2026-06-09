@@ -3,6 +3,41 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.45 — Messages that actually arrive: the comms-reliability release
+
+- **`k2so msg` now confirms the Enter actually landed.** Under heavy host load
+  (big agent fleets), a delivered message could sit un-submitted in the
+  recipient's input box until a human pressed Enter — while the sender saw
+  `success: true`. Delivery now wraps the message in explicit paste framing and
+  *verifies* submission against the recipient's screen, re-sending Enter until
+  it lands. If it truly can't confirm, you get an honest `no_submit` error
+  (with guidance) instead of a silent stall.
+- **Long messages stop getting clipped.** Inbox memos silently truncated at
+  ~2.7 KB (~54 lines) and long live messages lost their tails — the payload
+  rode the URL, which had a hard cap. Message text and inbox bodies now travel
+  in a proper request body with no size limit, and anything that *would*
+  overflow the old path errors loudly instead of corrupting the record.
+- **Workspace names are forgiving now.** `k2so msg appa` finds the workspace
+  named `Appa`; misses come back with a "did you mean …?" suggestion instead of
+  a bare not-found.
+- **`k2so connections` stops lying.** `add` failures actually print an error
+  (they used to exit silently as if they'd worked), and `list` shows *whose*
+  connections you're looking at and flags peers that are no longer reachable.
+- **New workspaces show up immediately.** A workspace added from another
+  window, the CLI, or a connected client now appears in the sidebar and
+  Settings on every client — no more manual window reload. CLI-created
+  workspaces no longer vanish into an unreachable no-focus-group limbo.
+- **Create workspace folders from a connected client.** The remote folder
+  picker has a "+ New Folder" button, so you can create a fresh workspace
+  folder on the host instead of only adopting existing ones.
+- **`k2so settings --mode` and `k2so workspace list` work.** The mode setter
+  was a silent no-op and the list always failed with no output; both do their
+  jobs now.
+- **Pinned tabs can't borrow a sibling's identity anymore.** The server now
+  heals any pinned Chat/Inbox tab stamped with a neighboring workspace's
+  identity during a switch race — on save *and* when serving older corrupted
+  layouts.
+
 ## 0.39.44 — Clone-to actually brings your Claude chat history
 
 - **Cloned workspaces now arrive with their conversations.** A folder-naming
