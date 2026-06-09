@@ -855,13 +855,33 @@ fn settings_captured_from_project_row() {
     )
     .expect("set agent_mode + heartbeat");
 
+    // d410883: `heartbeat_enabled` is a LIVE aggregate over
+    // workspace_heartbeats — the legacy projects column (set to 1 by
+    // the update above, deliberately kept) must be IGNORED by capture.
+    // Seed a real enabled heartbeat so the captured flag is truthfully
+    // ON via the aggregate, not the stale column.
+    crate::db::schema::AgentHeartbeat::insert(
+        &conn,
+        "hb-clone-1",
+        "proj-clone-1",
+        "daily-check",
+        "daily",
+        "{}",
+        "/tmp/some-cloned-agent/.k2so/heartbeats/daily-check/WAKEUP.md",
+        true,
+    )
+    .expect("seed heartbeat row");
+
     let captured = capture_settings(&conn, project_path)
         .expect("capture must not error")
         .expect("row exists → Some");
 
     assert_eq!(captured.agent_mode, "manager");
     assert!(captured.agent_enabled, "manager → enabled");
-    assert!(captured.heartbeat_enabled);
+    assert!(
+        captured.heartbeat_enabled,
+        "live aggregate: enabled heartbeat row → captured ON"
+    );
     assert_eq!(captured.name, "Cloned Agent");
     assert_eq!(captured.color, "#ff8800");
     assert_eq!(captured.worktree_mode, 2);
@@ -941,6 +961,8 @@ fn settings_round_trip_through_bundle() {
     assert_eq!(got, settings, "settings round-trip intact");
     assert_eq!(got.agent_mode, "pod");
     assert!(got.agent_enabled, "pod → enabled");
+    // No workspace_heartbeats rows seeded → the d410883 live aggregate
+    // is OFF regardless of the legacy projects column.
     assert!(!got.heartbeat_enabled);
     assert_eq!(got.name, "Round Trip");
     assert_eq!(got.color, "#112233");

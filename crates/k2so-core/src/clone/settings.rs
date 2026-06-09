@@ -52,9 +52,19 @@ pub fn capture_settings(
     let trimmed = project_path.trim_end_matches('/');
     let with_sep = format!("{trimmed}/");
 
+    // d410883: `heartbeat_enabled` is a LIVE aggregate ("does this
+    // workspace have ≥1 enabled, non-archived heartbeat?"), NOT the
+    // legacy `projects.heartbeat_enabled` column — that column is stale
+    // by design now. Reading the column here used to bundle a stale
+    // flag that disagreed with what every Project read reports.
     let mut stmt = conn
         .prepare(
-            "SELECT agent_mode, agent_enabled, heartbeat_enabled, name, color, worktree_mode \
+            "SELECT agent_mode, agent_enabled, \
+             (EXISTS(SELECT 1 FROM workspace_heartbeats wh \
+                     WHERE wh.project_id = projects.id \
+                     AND wh.enabled = 1 AND wh.archived_at IS NULL)) \
+                 AS heartbeat_enabled, \
+             name, color, worktree_mode \
              FROM projects \
              WHERE path = ?1 OR path = ?2 OR path = ?3 \
              LIMIT 1",
