@@ -127,7 +127,12 @@ export default function IconRail(): React.JSX.Element {
   const filteredProjects = useMemo(() => {
     const unpinned = projects.filter((p) => !p.pinned)
     if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
-    return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
+    // 0.39.45 (GH #26): ungrouped projects (focusGroupId = null) render
+    // in EVERY group view — filtering them out made CLI-created
+    // workspaces unreachable from the nav entirely.
+    return unpinned.filter(
+      (p) => p.focusGroupId === activeFocusGroupId || p.focusGroupId == null,
+    )
   }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
   // Zone 3: Active. Workspaces with recent activity — post-0.39.0

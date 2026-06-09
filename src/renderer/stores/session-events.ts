@@ -173,6 +173,17 @@ export interface HeartbeatStateChangedEvent {
   live: boolean
 }
 
+/** APP-LEVEL — the registered project set changed (a project was added,
+ *  removed, or re-registered) — 0.39.45, GH #18/#26. Payload-free by
+ *  design: consumers re-fetch the canonical list (`fetchProjects`)
+ *  rather than patching from a diff. Fires for mutations made by OTHER
+ *  windows, the CLI (`k2so workspace create`), onboarding flows, and on
+ *  remote daemons over K2 Connect — all the paths the old local-only
+ *  Tauri `sync:projects` event never covered. */
+export interface ProjectsChangedEvent {
+  kind: 'projects_changed'
+}
+
 export type SessionEventMessage =
   | SessionAddedEvent
   | SessionRemovedEvent
@@ -187,6 +198,7 @@ export type SessionEventMessage =
   | TabTitleChangedEvent
   | TabOrderChangedEvent
   | HeartbeatStateChangedEvent
+  | ProjectsChangedEvent
 
 export interface SessionEventHandlers {
   onAdded?: (event: SessionAddedEvent) => void
@@ -465,12 +477,22 @@ type AppHelloHandler = () => void
 type SessionAddedHandler = (e: SessionAddedEvent) => void
 type SessionRemovedHandler = (e: SessionRemovedEvent) => void
 
+type ProjectsChangedHandler = (e: ProjectsChangedEvent) => void
+
 const _llmStatusHandlers = new Set<LlmStatusHandler>()
+const _projectsChangedHandlers = new Set<ProjectsChangedHandler>()
 const _agentStatusHandlers = new Set<AgentStatusHandler>()
 const _tunnelStatusHandlers = new Set<TunnelStatusHandler>()
 const _appHelloHandlers = new Set<AppHelloHandler>()
 const _appSessionAddedHandlers = new Set<SessionAddedHandler>()
 const _appSessionRemovedHandlers = new Set<SessionRemovedHandler>()
+
+/** Subscribe to APP-LEVEL `projects_changed` (0.39.45, GH #18/#26).
+ *  Returns an unsubscribe fn. */
+export function onProjectsChanged(fn: ProjectsChangedHandler): UnsubscribeFn {
+  _projectsChangedHandlers.add(fn)
+  return () => void _projectsChangedHandlers.delete(fn)
+}
 
 /** Subscribe to APP-LEVEL `llm_status_changed`. Returns an unsubscribe fn. */
 export function onLlmStatusChanged(fn: LlmStatusHandler): UnsubscribeFn {
@@ -518,6 +540,9 @@ function dispatchAppEvent(msg: SessionEventMessage): void {
   switch (msg.kind) {
     case 'llm_status_changed':
       for (const h of _llmStatusHandlers) h(msg)
+      break
+    case 'projects_changed':
+      for (const h of _projectsChangedHandlers) h(msg)
       break
     case 'agent_status_changed':
       for (const h of _agentStatusHandlers) h(msg)

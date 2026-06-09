@@ -35,7 +35,16 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
         "/cli/workspace/create" => {
             let target = str_param(params, "path");
             match k2so_core::workspace::lifecycle::create_workspace(&target) {
-                Ok(body) => CliResponse::ok_json(body),
+                Ok(body) => {
+                    // 0.39.45 (GH #18/#26): broadcast so every client
+                    // re-fetches its project list — CLI-created
+                    // workspaces used to stay invisible until a manual
+                    // window reload.
+                    let _ = crate::session_events::emit(
+                        crate::session_events::SessionEvent::ProjectsChanged {},
+                    );
+                    CliResponse::ok_json(body)
+                }
                 Err(e) => CliResponse::bad_request(e),
             }
         }

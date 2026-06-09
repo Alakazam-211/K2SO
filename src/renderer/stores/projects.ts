@@ -19,6 +19,7 @@ import { onDaemonConnected } from '@/lib/daemon-reconnect'
 // #625 — re-restore the active project/workspace against the NEW host on
 // a host switch.
 import { onActiveHostChange } from '@/stores/connect-host'
+import { onProjectsChanged } from '@/stores/session-events'
 import { useGitInitDialogStore } from './git-init-dialog'
 import { useToastStore } from './toast'
 import { useTabsStore, ensurePinnedAgentTabForMode, registerActiveProjectIdGetter, registerActivateProject } from './tabs'
@@ -719,6 +720,16 @@ onDaemonConnected(() => {
 // at call time via the host-aware `daemonCli*` / `settingsGet()` layer, and
 // `onActiveHostChange` fires AFTER the flip, so the restore targets the new
 // host's projects + its last-active selection.
+// 0.39.45 (GH #18/#26) — daemon push: the registered project set changed
+// (another window, the CLI's `k2so workspace create`, an onboarding flow,
+// or a remote client added/removed a project). Re-fetch so the nav +
+// Settings update WITHOUT a manual window reload. This replaces reliance
+// on the local-only Tauri `sync:projects` event, which never fires for
+// CLI/remote mutations and doesn't exist for K2 Connect clients.
+onProjectsChanged(() => {
+  void useProjectsStore.getState().fetchProjects()
+})
+
 onActiveHostChange(() => {
   hasLoadedFromDaemon = false
   // #672 — reset the activate dedup so the restore against the NEW host

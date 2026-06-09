@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { daemonCliGet } from '@/lib/daemon-cli'
+import { daemonCliGet, daemonCliPost } from '@/lib/daemon-cli'
 import { useRemoteFolderPickerStore } from '@/stores/remote-folder-picker'
 import { useConnectHostStore } from '@/stores/connect-host'
 import { useServerSupports, featureMinVersion } from '@/lib/server-capabilities'
@@ -61,6 +61,12 @@ export default function RemoteFolderPicker(): React.JSX.Element | null {
   const [entries, setEntries] = useState<DirEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 0.39.45 (GH #26): inline "new folder" affordance. The native macOS
+  // picker has a New Folder button; the remote picker had none, so a
+  // K2 Connect user could only ADOPT an existing folder — there was no
+  // way to create a fresh workspace folder on the host at all.
+  const [newFolderName, setNewFolderName] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
 
   // Load the directory listing for `dir` (directories only).
   const browse = useCallback(async (dir: string): Promise<void> => {
@@ -108,15 +114,42 @@ export default function RemoteFolderPicker(): React.JSX.Element | null {
     }
   }, [isOpen, browse])
 
-  // Close on Escape.
+  // Close on Escape (or dismiss the new-folder input if it's open).
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') cancel()
+      if (e.key !== 'Escape') return
+      if (newFolderName !== null) setNewFolderName(null)
+      else cancel()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [isOpen, cancel])
+  }, [isOpen, cancel, newFolderName])
+
+  // Create `<cwd>/<name>` on the HOST via the daemon's fs/create route,
+  // then navigate into it so "Select this folder" picks it directly.
+  const createFolder = async (): Promise<void> => {
+    if (!cwd || creating) return
+    const name = (newFolderName ?? '').trim()
+    if (!name) return
+    if (name.includes(sep) || name === '.' || name === '..') {
+      setError(`Folder name can't contain '${sep}' or be '.'/'..'`)
+      return
+    }
+    setCreating(true)
+    setError(null)
+    try {
+      const base = cwd.endsWith(sep) ? cwd : `${cwd}${sep}`
+      const fullPath = `${base}${name}`
+      await daemonCliPost('fs/create', { path: fullPath, is_directory: true })
+      setNewFolderName(null)
+      await browse(fullPath)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCreating(false)
+    }
+  }
 
   if (!isOpen) return null
 
@@ -149,7 +182,37 @@ export default function RemoteFolderPicker(): React.JSX.Element | null {
             <p className="flex-1 text-[10px] text-[var(--color-text-muted)] break-all font-mono">
               {cwd ?? '…'}
             </p>
+            <button
+              className="px-2 py-1 text-[11px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] disabled:opacity-30 disabled:cursor-default"
+              onClick={() => setNewFolderName((v) => (v === null ? '' : null))}
+              disabled={!cwd || loading}
+              title="Create a new folder inside the current directory"
+            >
+              + New Folder
+            </button>
           </div>
+          {newFolderName !== null && (
+            <div className="flex items-center gap-2 mt-2">
+              <input
+                autoFocus
+                className="flex-1 px-2 py-1 text-xs bg-[var(--color-bg)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-text-muted)]"
+                placeholder="New folder name"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void createFolder()
+                }}
+                disabled={creating}
+              />
+              <button
+                className="px-3 py-1 text-xs font-medium text-[var(--color-bg)] bg-[var(--color-text-primary)] hover:bg-[var(--color-text-secondary)] disabled:opacity-40"
+                onClick={() => void createFolder()}
+                disabled={creating || !(newFolderName ?? '').trim()}
+              >
+                {creating ? 'Creating…' : 'Create'}
+              </button>
+            </div>
+          )}
           {showOldHostNote && (
             <p className="mt-2 text-[10px] text-[var(--color-text-muted)] leading-relaxed">
               This host is on v{serverVersion} — update it to v{featureMinVersion('fs-info')}{' '}

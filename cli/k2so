@@ -3446,6 +3446,48 @@ print(json.dumps(sched))
 }
 
 cmd_settings() {
+    # 0.39.45 (#26c): `k2so settings --mode <value>` actually SETS the
+    # workspace agent mode. The `k2so mode` deprecation pointed here,
+    # but the setter was never implemented — the command printed the
+    # current settings and silently ignored the flag.
+    local set_mode=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mode)
+                set_mode="${2:-}"
+                shift
+                [[ $# -gt 0 ]] && shift
+                ;;
+            -*)
+                echo "Error: unknown flag '$1' (supported: --mode <off|custom|manager|k2so>)" >&2
+                exit 1
+                ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -n "$set_mode" ]]; then
+        case "$set_mode" in
+            off|custom|manager|k2so) ;;
+            *)
+                echo "Error: invalid mode '$set_mode' (valid: off, custom, manager, k2so)" >&2
+                exit 1
+                ;;
+        esac
+        cli_request "/cli/mode" "set=$(urlencode "$set_mode")" | python3 -c "
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.stdout.write('Error: daemon returned an unparseable response: %r\n' % raw[:200])
+    sys.exit(1)
+if 'error' in d:
+    sys.stdout.write('Error: %s\n' % d['error'])
+    sys.exit(1)
+print('Mode set to %s' % d.get('mode', '?'))
+"
+        return
+    fi
     cli_request "/cli/settings" | python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
@@ -4480,6 +4522,12 @@ except: pass' 2>/dev/null)
 }
 
 cmd_workspace_list() {
+    # 0.39.45 (#26d): this used to hit /cli/workspaces/list, which is a
+    # PER-PROJECT branch-workspace lookup requiring project_id — the
+    # call always got `{"error": "Missing 'project_id'..."}` back, the
+    # python renderer crashed iterating a dict, stderr was swallowed by
+    # 2>/dev/null, and the command exited 1 with no output. "Workspace"
+    # at the CLI surface means a registered project: list those.
     local running="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -4487,41 +4535,31 @@ cmd_workspace_list() {
             *) shift ;;
         esac
     done
-    if [[ "$running" == "true" ]]; then
-        # Filter to live agents. /cli/workspaces/list returns all;
-        # we filter client-side. Future: server-side --running param.
-        cli_request "/cli/workspaces/list" | python3 -c "
-import json, sys
+    cli_request "/cli/projects/list" | RUNNING_ONLY="$running" python3 -c "
+import json, os, sys
+raw = sys.stdin.read()
 try:
-    rows = json.loads(sys.stdin.read() or '[]')
+    rows = json.loads(raw)
 except Exception:
-    rows = []
-running = [r for r in rows if r.get('status') == 'alive' or r.get('running')]
-if not running:
-    print('No live workspaces.')
-else:
-    for r in running:
-        name = r.get('name') or r.get('display_name') or '?'
-        path = r.get('path', '')
-        print(f'  {name:<20} {path}')
-" 2>/dev/null
-    else
-        cli_request "/cli/workspaces/list" | python3 -c "
-import json, sys
-try:
-    rows = json.loads(sys.stdin.read() or '[]')
-except Exception:
-    rows = []
+    sys.stdout.write('Error: daemon returned an unparseable response: %r\n' % raw[:200])
+    sys.exit(1)
+if isinstance(rows, dict):
+    sys.stdout.write('Error: %s\n' % rows.get('error', raw[:200]))
+    sys.exit(1)
+if os.environ.get('RUNNING_ONLY') == 'true':
+    rows = [r for r in rows if r.get('agentEnabled')]
+    if not rows:
+        print('No agent-enabled workspaces.')
+        sys.exit(0)
 if not rows:
     print('No workspaces registered.')
-else:
-    for r in rows:
-        name = r.get('name') or r.get('display_name') or '?'
-        status = r.get('status', '?')
-        path = r.get('path', '')
-        print(f'  {name:<20} [{status:<10}] {path}')
-" 2>/dev/null
-    fi
+    sys.exit(0)
+for r in rows:
+    name = r.get('name') or '?'
+    mode = r.get('agentMode') or 'off'
+    path = r.get('path', '')
+    print(f'  {name:<24} [{mode:<8}] {path}')
+"
 }
 
 cmd_workspace_triage() {

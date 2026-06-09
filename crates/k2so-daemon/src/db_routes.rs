@@ -789,12 +789,26 @@ struct ProjectsCreateBody {
     color: Option<String>,
 }
 
+/// 0.39.45 (GH #18/#26): broadcast that the registered project set
+/// changed so every client — other windows, the CLI's next caller, K2
+/// Connect remotes — re-fetches the project list without a manual
+/// window reload. APP-LEVEL on the session-events bus.
+fn emit_projects_changed() {
+    let _ = crate::session_events::emit(
+        crate::session_events::SessionEvent::ProjectsChanged {},
+    );
+}
+
 pub fn handle_projects_create(body: &[u8]) -> CliResponse {
     let b: ProjectsCreateBody = match parse_body(body) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    serialized(pops::projects_create(&b.name, &b.path, b.color.as_deref()))
+    let result = pops::projects_create(&b.name, &b.path, b.color.as_deref());
+    if result.is_ok() {
+        emit_projects_changed();
+    }
+    serialized(result)
 }
 
 #[derive(Deserialize)]
@@ -866,7 +880,11 @@ pub fn handle_projects_delete(body: &[u8]) -> CliResponse {
         Ok(v) => v,
         Err(r) => return r,
     };
-    unit_ok(pops::projects_delete(&b.id))
+    let result = pops::projects_delete(&b.id);
+    if result.is_ok() {
+        emit_projects_changed();
+    }
+    unit_ok(result)
 }
 
 pub fn handle_projects_reorder(body: &[u8]) -> CliResponse {
@@ -996,7 +1014,11 @@ pub fn handle_projects_add_from_path(body: &[u8]) -> CliResponse {
         Ok(v) => v,
         Err(r) => return r,
     };
-    serialized(pops::projects_add_from_path(&b.path))
+    let result = pops::projects_add_from_path(&b.path);
+    if result.is_ok() {
+        emit_projects_changed();
+    }
+    serialized(result)
 }
 
 pub fn handle_projects_add_without_git(body: &[u8]) -> CliResponse {
@@ -1004,7 +1026,11 @@ pub fn handle_projects_add_without_git(body: &[u8]) -> CliResponse {
         Ok(v) => v,
         Err(r) => return r,
     };
-    serialized(pops::projects_add_without_git(&b.path))
+    let result = pops::projects_add_without_git(&b.path);
+    if result.is_ok() {
+        emit_projects_changed();
+    }
+    serialized(result)
 }
 
 #[derive(Deserialize)]
@@ -1018,7 +1044,11 @@ pub fn handle_projects_init_git_and_open(body: &[u8]) -> CliResponse {
         Ok(v) => v,
         Err(r) => return r,
     };
-    serialized(pops::projects_init_git_and_open(&b.path, b.branch.as_deref()))
+    let result = pops::projects_init_git_and_open(&b.path, b.branch.as_deref());
+    if result.is_ok() {
+        emit_projects_changed();
+    }
+    serialized(result)
 }
 
 #[derive(Deserialize)]

@@ -201,6 +201,12 @@ fn event_matches_workspace(event: &SessionEvent, workspace_path: &str) -> bool {
         | SessionEvent::TunnelStatusChanged { .. }
         | SessionEvent::AgentStatusChanged { .. } => return true,
 
+        // 0.39.45 (GH #18/#26) APP-LEVEL — the registered project set
+        // changed. Every client re-fetches its project list; there is
+        // no single workspace to scope to (the new project isn't in
+        // any subscriber's `?path=` yet, by definition).
+        SessionEvent::ProjectsChanged {} => return true,
+
         // 0.39.39 WORKSPACE-SCOPED events — each carries a project path
         // in `workspace_path`; the cwd-prefix filter below routes them to
         // the matching subscriber exactly like SessionAdded/Removed.

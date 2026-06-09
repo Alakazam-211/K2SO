@@ -816,7 +816,13 @@ export default function Sidebar(): React.JSX.Element {
   const filteredProjects = useMemo(() => {
     const unpinned = projects.filter((p) => !p.pinned)
     if (!focusGroupsEnabled || activeFocusGroupId === null) return unpinned
-    return unpinned.filter((p) => p.focusGroupId === activeFocusGroupId)
+    // 0.39.45 (GH #26): ungrouped projects (focusGroupId = null — e.g.
+    // CLI-created via `k2so workspace create`, or onboarded against a
+    // focus-group name that doesn't exist) render in EVERY group view.
+    // Filtering them out made them unreachable from the nav entirely.
+    return unpinned.filter(
+      (p) => p.focusGroupId === activeFocusGroupId || p.focusGroupId == null,
+    )
   }, [projects, focusGroupsEnabled, activeFocusGroupId])
 
   // ── Nudge to enable focus groups at 10+ workspaces (every 3 hours) ──
