@@ -40,11 +40,120 @@ use crate::workspace::agent_identity::resolve_project_id;
 pub struct Peer {
     pub project_id: String,
     pub project_name: String,
+    /// 0.39.45 (#31): the peer's filesystem path — `""` when the
+    /// project row vanished (orphaned relation).
+    #[serde(default)]
+    pub path: String,
+    /// 0.39.45 (#31): whether this peer is actually addressable — its
+    /// project row exists AND its path exists on disk. `list` used to
+    /// render orphaned/moved peers indistinguishably from live ones,
+    /// sending operators down "the wiring is fine" rabbit holes when
+    /// `k2so msg` then bounced.
+    #[serde(default)]
+    pub reachable: bool,
     /// Every distinct relation_type value seen across the
     /// outgoing+incoming rows that point at this peer. A peer might
     /// be "collaborator" in one direction and "oversees" in the
     /// other; both labels are listed (sorted alphabetically, deduped).
     pub relation_types: Vec<String>,
+}
+
+/// Best-effort "did you mean" over registered project names (0.39.45,
+/// #33). Ranks case-insensitive containment first, then small edit
+/// distance (≤ 3). Returns `None` when nothing is plausibly close —
+/// a bad suggestion is worse than no suggestion.
+pub fn suggest_project_name(conn: &rusqlite::Connection, token: &str) -> Option<String> {
+    let token_lc = token.to_lowercase();
+    if token_lc.is_empty() {
+        return None;
+    }
+    let mut stmt = conn.prepare("SELECT name FROM projects").ok()?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut best: Option<(usize, String)> = None;
+    for name in names {
+        let name_lc = name.to_lowercase();
+        // Containment either way is the strongest signal (rank 0);
+        // otherwise small edit distance qualifies (rank = distance).
+        let rank = if name_lc.contains(&token_lc) || token_lc.contains(&name_lc) {
+            0
+        } else {
+            let d = edit_distance(&token_lc, &name_lc);
+            if d > 3 {
+                continue;
+            }
+            d
+        };
+        match &best {
+            Some((b, _)) if *b <= rank => {}
+            _ => best = Some((rank, name)),
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+/// Classic Levenshtein distance, O(a×b) two-row DP. Inputs are short
+/// workspace names; no perf concern.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Resolve a connections target token to a project id: exact name or
+/// path first, then case-insensitive name (0.39.45, #33 — operators
+/// and LLM agents infer plausible casing and used to bounce on it).
+fn resolve_target_project_id(
+    conn: &rusqlite::Connection,
+    token: &str,
+) -> Result<String, String> {
+    conn.query_row(
+        "SELECT id FROM projects WHERE name = ?1 OR path = ?1 ORDER BY rowid LIMIT 1",
+        rusqlite::params![token],
+        |row| row.get::<_, String>(0),
+    )
+    .or_else(|_| {
+        conn.query_row(
+            "SELECT id FROM projects WHERE name = ?1 COLLATE NOCASE ORDER BY rowid LIMIT 1",
+            rusqlite::params![token],
+            |row| row.get::<_, String>(0),
+        )
+    })
+    .map_err(|_| match suggest_project_name(conn, token) {
+        Some(s) => format!(
+            "Workspace '{}' not found — did you mean '{}'? Run `k2so connections list` for registered names, or pass a full path.",
+            token, s
+        ),
+        None => format!(
+            "Workspace '{}' not found. Run `k2so connections list` for registered names, or pass a full path.",
+            token
+        ),
+    })
+}
+
+/// Resolve `(name, path)` for a project id; `("Unknown", "")` when the
+/// row is gone (orphaned relation).
+fn peer_identity(conn: &rusqlite::Connection, pid: &str) -> (String, String) {
+    conn.query_row(
+        "SELECT name, path FROM projects WHERE id = ?1",
+        rusqlite::params![pid],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .unwrap_or_else(|_| ("Unknown".to_string(), String::new()))
 }
 
 /// Bidirectional, deduped peer list. Returns each connected
@@ -70,18 +179,15 @@ pub fn list_peers(project_path: &str) -> Result<Vec<Peer>, String> {
 
     for rel in &outgoing {
         let pid = &rel.target_project_id;
-        let name: String = conn
-            .query_row(
-                "SELECT name FROM projects WHERE id = ?1",
-                rusqlite::params![pid],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "Unknown".to_string());
+        let (name, path) = peer_identity(&conn, pid);
+        let reachable = !path.is_empty() && std::path::Path::new(&path).exists();
         peers
             .entry(pid.clone())
             .or_insert_with(|| Peer {
                 project_id: pid.clone(),
                 project_name: name,
+                path,
+                reachable,
                 relation_types: Vec::new(),
             })
             .relation_types
@@ -90,18 +196,15 @@ pub fn list_peers(project_path: &str) -> Result<Vec<Peer>, String> {
 
     for rel in &incoming {
         let pid = &rel.source_project_id;
-        let name: String = conn
-            .query_row(
-                "SELECT name FROM projects WHERE id = ?1",
-                rusqlite::params![pid],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "Unknown".to_string());
+        let (name, path) = peer_identity(&conn, pid);
+        let reachable = !path.is_empty() && std::path::Path::new(&path).exists();
         peers
             .entry(pid.clone())
             .or_insert_with(|| Peer {
                 project_id: pid.clone(),
                 project_name: name,
+                path,
+                reachable,
                 relation_types: Vec::new(),
             })
             .relation_types
@@ -143,11 +246,34 @@ pub fn connections(
     match action {
         "list" => {
             let peers = list_peers(project_path)?;
+            // 0.39.45 (#31): identify WHOSE connections these are. The
+            // CLI resolves the source workspace by walking up from the
+            // caller's CWD — when that walk lands on a parent/sibling
+            // project, the operator used to see an "inherited" list
+            // with no clue it wasn't their workspace's. Echoing the
+            // resolved identity makes that failure self-evident.
+            let workspace = {
+                let db = crate::db::shared();
+                let conn = db.lock();
+                let name: Option<String> = conn
+                    .query_row(
+                        "SELECT name FROM projects WHERE path = ?1",
+                        rusqlite::params![project_path],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                serde_json::json!({ "name": name, "path": project_path })
+            };
             // Emit as `{"connections": [...]}` for backwards-compatible
             // envelope shape (CLI parsers still key on "connections").
             // Each entry uses the Peer struct's serde camelCase form
-            // — `projectId`, `projectName`, `relationTypes`.
-            Ok(serde_json::json!({ "connections": peers }).to_string())
+            // — `projectId`, `projectName`, `path`, `reachable`,
+            // `relationTypes`.
+            Ok(serde_json::json!({
+                "workspace": workspace,
+                "connections": peers
+            })
+            .to_string())
         }
         "add" => {
             let db = crate::db::shared();
@@ -158,13 +284,9 @@ pub fn connections(
             let target_name = target
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "Missing 'target' parameter (workspace name or path)".to_string())?;
-            let target_id: String = conn
-                .query_row(
-                    "SELECT id FROM projects WHERE name = ?1 OR path = ?1",
-                    rusqlite::params![target_name],
-                    |row| row.get(0),
-                )
-                .map_err(|_| format!("Workspace '{}' not found", target_name))?;
+            // 0.39.45 (#32/#33): case-insensitive name fallback + a
+            // did-you-mean error instead of the bare not-found.
+            let target_id = resolve_target_project_id(&conn, target_name)?;
 
             let target_display: String = conn
                 .query_row(
@@ -243,13 +365,9 @@ pub fn connections(
             let target_name = target
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "Missing 'target' parameter".to_string())?;
-            let target_id: String = conn
-                .query_row(
-                    "SELECT id FROM projects WHERE name = ?1 OR path = ?1",
-                    rusqlite::params![target_name],
-                    |row| row.get(0),
-                )
-                .map_err(|_| format!("Workspace '{}' not found", target_name))?;
+            // 0.39.45 (#33): same case-insensitive + did-you-mean
+            // resolution as `add`.
+            let target_id = resolve_target_project_id(&conn, target_name)?;
 
             let rel_id: Result<String, _> = conn.query_row(
                 "SELECT id FROM workspace_relations WHERE source_project_id = ?1 AND target_project_id = ?2",
@@ -826,6 +944,132 @@ mod tests {
             names,
             vec!["alpha", "bravo", "charlie"],
             "peers must be sorted alphabetically by name"
+        );
+    }
+
+    // ── 0.39.45: case-insensitive resolution + did-you-mean (#32/#33)
+    //    and list identity/reachability (#31) ───────────────────────
+
+    #[test]
+    fn add_resolves_target_name_case_insensitively() {
+        let (src_path, _src_id) = make_project("CiAddSrc");
+        let (_tgt_path, tgt_id) = make_project("CiAddTargetXq");
+
+        // Lowercase token against a mixed-case registered name.
+        let resp = connections(&src_path, "add", Some("ciaddtargetxq"), Some("oversees"))
+            .expect("case-insensitive add must resolve");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert_eq!(parsed["success"], serde_json::json!(true));
+        // The canonical (registered) name is echoed back, not the
+        // caller's casing.
+        assert_eq!(parsed["target"], serde_json::json!("CiAddTargetXq"));
+
+        let db = crate::db::shared();
+        let conn = db.lock();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_relations WHERE target_project_id = ?1",
+                rusqlite::params![tgt_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the relation must actually be created");
+    }
+
+    #[test]
+    fn add_unknown_target_errors_with_did_you_mean() {
+        let (src_path, _src_id) = make_project("DymSrc");
+        let (_p, _id) = make_project("Zephyr-Unique-Ws");
+
+        let err = connections(&src_path, "add", Some("zephyr-unique-w"), None)
+            .expect_err("unknown target must error loudly");
+        assert!(
+            err.contains("did you mean 'Zephyr-Unique-Ws'"),
+            "error must carry a did-you-mean suggestion, got: {err}"
+        );
+    }
+
+    #[test]
+    fn suggest_returns_none_when_nothing_is_close() {
+        let db = crate::db::shared();
+        let conn = db.lock();
+        assert_eq!(
+            suggest_project_name(&conn, "qwjxzv-completely-unrelated-token-9z8y"),
+            None,
+            "a wildly-off token must not produce a (mis)suggestion"
+        );
+    }
+
+    #[test]
+    fn edit_distance_basics() {
+        assert_eq!(edit_distance("appa", "appa"), 0);
+        assert_eq!(edit_distance("appa", "Appa".to_lowercase().as_str()), 0);
+        assert_eq!(edit_distance("appa", "appas"), 1);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn list_includes_source_workspace_identity_and_peer_reachability() {
+        let (a_path, a_id) = make_project("ListIdentA");
+        let (b_path, b_id) = make_project("ListIdentB");
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &a_id,
+                &b_id,
+                "oversees",
+            )
+            .unwrap();
+        }
+        // B's path exists on disk → reachable. (make_project paths are
+        // fabricated, so create it for the reachable=true case.)
+        std::fs::create_dir_all(&b_path).expect("create peer dir");
+
+        let resp = connections(&a_path, "list", None, None).expect("list ok");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert_eq!(
+            parsed["workspace"]["path"],
+            serde_json::json!(a_path),
+            "list must echo the resolved source workspace path (#31)"
+        );
+        assert_eq!(parsed["workspace"]["name"], serde_json::json!("ListIdentA"));
+        let conns = parsed["connections"].as_array().expect("connections array");
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0]["projectName"], serde_json::json!("ListIdentB"));
+        assert_eq!(conns[0]["path"], serde_json::json!(b_path));
+        assert_eq!(
+            conns[0]["reachable"],
+            serde_json::json!(true),
+            "peer with an existing path must be reachable"
+        );
+        std::fs::remove_dir_all(&b_path).expect("cleanup peer dir");
+    }
+
+    #[test]
+    fn list_flags_peer_with_missing_path_as_unreachable() {
+        let (a_path, a_id) = make_project("UnreachA");
+        let (_b_path, b_id) = make_project("UnreachB"); // path never created on disk
+        {
+            let db = crate::db::shared();
+            let conn = db.lock();
+            WorkspaceRelation::create(
+                &conn,
+                &Uuid::new_v4().to_string(),
+                &a_id,
+                &b_id,
+                "oversees",
+            )
+            .unwrap();
+        }
+        let peers = list_peers(&a_path).expect("list ok");
+        assert_eq!(peers.len(), 1);
+        assert!(
+            !peers[0].reachable,
+            "peer whose path does not exist on disk must be flagged unreachable (#31)"
         );
     }
 }

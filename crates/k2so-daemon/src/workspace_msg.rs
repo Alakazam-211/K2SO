@@ -219,8 +219,21 @@ pub fn resolve_workspace(token: &str) -> Option<String> {
     // Name match. Workspace names are short and usually unique within
     // the user's set; if multiple workspaces share a name we return
     // the first by insertion order (most users won't hit this).
-    conn.query_row(
+    if let Ok(path) = conn.query_row(
         "SELECT path FROM projects WHERE name = ?1 ORDER BY rowid LIMIT 1",
+        rusqlite::params![token],
+        |r| r.get::<_, String>(0),
+    ) {
+        return Some(path);
+    }
+
+    // 0.39.45 (#33): case-insensitive fallback. Operators (and LLM
+    // agents especially) infer plausible casing from context — `appa`
+    // for a workspace registered as `Appa` — and used to bounce with
+    // workspace_not_found on wiring that was actually fine. Exact-case
+    // still wins above when two projects differ only by case.
+    conn.query_row(
+        "SELECT path FROM projects WHERE name = ?1 COLLATE NOCASE ORDER BY rowid LIMIT 1",
         rusqlite::params![token],
         |r| r.get::<_, String>(0),
     )
@@ -305,10 +318,24 @@ pub fn deliver_live(
     command: &str,
 ) -> MsgResponse {
     // Resolve workspace once. WorkspaceNotFound is permanent; surface
-    // immediately without entering the retry loop.
+    // immediately without entering the retry loop. 0.39.45 (#33): the
+    // hint carries a did-you-mean suggestion when a close name exists.
     let project_path = match resolve_workspace(workspace_token) {
         Some(p) => p,
-        None => return MsgResponse::fail(MsgReason::WorkspaceNotFound),
+        None => {
+            let mut resp = MsgResponse::fail(MsgReason::WorkspaceNotFound);
+            let suggestion = {
+                let db = k2so_core::db::shared();
+                let conn = db.lock();
+                k2so_core::connections::suggest_project_name(&conn, workspace_token)
+            };
+            if let Some(s) = suggestion {
+                resp.hint = Some(format!(
+                    "Unknown workspace '{workspace_token}' — did you mean '{s}'? Run `k2so connections list` to see available workspaces."
+                ));
+            }
+            return resp;
+        }
     };
 
     let mut last: Option<MsgResponse> = None;
