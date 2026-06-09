@@ -118,6 +118,23 @@ pub(crate) async fn require_manage(
     }
 }
 
+/// Parse an `application/x-www-form-urlencoded` POST body into a params
+/// map, reusing the same URL-decoding parser the query string goes
+/// through. Returns an empty map for empty, non-UTF-8, or JSON bodies
+/// (JSON-bodied routes have their own typed parsers — this helper is
+/// only for the form-bodied routes that moved long values out of the
+/// query string in 0.39.45, see GH #35/#37/#29).
+pub(crate) fn parse_form_body(body: &[u8]) -> std::collections::HashMap<String, String> {
+    let Ok(s) = std::str::from_utf8(body) else {
+        return std::collections::HashMap::new();
+    };
+    let s = s.trim();
+    if s.is_empty() || s.starts_with('{') || s.starts_with('[') {
+        return std::collections::HashMap::new();
+    }
+    k2so_core::agent_hooks::parse_query_params(&format!("/x?{}", s))
+}
+
 /// Reassemble a full `path?query` URL and hand off to k2so_core's
 /// URL-decoding query parser. The core helper knows how to unescape
 /// `%20`/`+` and multi-byte UTF-8 — we just combine the pieces.

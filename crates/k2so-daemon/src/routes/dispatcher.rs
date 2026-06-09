@@ -65,6 +65,13 @@ const KEEP_ALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// polling on one socket before recycle.
 const KEEP_ALIVE_MAX_REQUESTS: u32 = 10_000;
 
+/// Cap on the request HEAD (request line + headers) the dispatcher will
+/// buffer/parse. 16KB gives legacy query-string clients 4× the old 4KB
+/// peek window; anything larger gets an explicit `414` instead of the
+/// pre-0.39.45 silent query truncation (GH #35/#37). Long values belong
+/// in POST bodies, which `read_post_body` streams without this cap.
+const REQUEST_HEAD_MAX: usize = 16 * 1024;
+
 /// Serve one TCP connection, looping over requests on the same socket
 /// (HTTP/1.1 keep-alive).
 ///
@@ -132,8 +139,8 @@ async fn handle_one_request(
     // bytes arrive the request is fully served without further time
     // pressure (LLM inference et al. can legitimately take tens of
     // seconds).
-    let mut buf = [0u8; 4096];
-    let n = match tokio::time::timeout(
+    let mut buf = [0u8; REQUEST_HEAD_MAX];
+    let mut n = match tokio::time::timeout(
         KEEP_ALIVE_IDLE_TIMEOUT,
         stream.peek(&mut buf),
     )
@@ -143,6 +150,45 @@ async fn handle_one_request(
         // Idle timeout, EOF (peer closed), or read error → close.
         _ => return DispatchOutcome::Done,
     };
+
+    // 0.39.45 (#35/#37): the request HEAD (request line + headers) may
+    // not arrive in one TCP segment — and pre-0.39.45 a single peek was
+    // all we looked at, so a long URL-encoded query string was parsed
+    // from whatever fit in the first 4KB peek and the tail was SILENTLY
+    // dropped (the ~2.7KB inbox-body truncation). Keep peeking until the
+    // `\r\n\r\n` header terminator is visible, the buffer fills, or the
+    // peer stalls past a short deadline. Peeks never consume, so WS
+    // handshake handoff and `read_post_body` re-reads are unaffected.
+    {
+        let head_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") && n < buf.len() {
+            if tokio::time::Instant::now() >= head_deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            n = match stream.peek(&mut buf).await {
+                Ok(m) if m > 0 => m,
+                _ => return DispatchOutcome::Done,
+            };
+        }
+    }
+
+    // Buffer full and still no header terminator → the request head
+    // exceeds what we'll parse. Refuse LOUDLY (414) instead of silently
+    // truncating the query string mid-parameter (GH #35/#37 was exactly
+    // that failure mode: `success: true` while the durable record lost
+    // its tail). Long values belong in a POST body, which has no cap.
+    if n == buf.len() && !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+        let _ = stream.read(&mut buf).await;
+        super::http::send_response(
+            &mut *stream,
+            "414 URI Too Long",
+            "application/json",
+            r#"{"error":"request line + headers exceed 16KB; send long values (text/body) in a POST form body instead of the query string"}"#,
+        )
+        .await;
+        return DispatchOutcome::Done;
+    }
     let req = String::from_utf8_lossy(&buf[..n]);
 
     // 0.39.7: parse the request's `Connection:` header. If the client
@@ -396,6 +442,12 @@ async fn handle_one_request(
             // 0.39.39 #676 — daemon-canonical tab title write (token_ok
             // auth in the isolated arm below).
             | "/cli/workspace/set-tab-title"
+            // 0.39.45 (#35/#37/#29) — live-msg POST form. Long message
+            // text rides the form-encoded body instead of the query
+            // string so it dodges the request-head cap. GET with query
+            // params remains supported for older CLIs (dedicated arm
+            // below; GET falls through to crate::cli::dispatch).
+            | "/cli/workspace/msg"
     );
     if method != "GET" && !(is_post && post_allowed) {
         let _ = stream.read(&mut buf).await;
@@ -2156,9 +2208,16 @@ async fn handle_one_request(
                 .await;
                 return DispatchOutcome::Done;
             }
-            // Drain body (we don't use it — params come from query).
-            let _ = super::http::read_post_body(&mut *stream, &mut buf).await;
-            let params = super::http::parse_params(&path, &query);
+            // 0.39.45 (#35/#37): params come from the query string AND
+            // the form-encoded POST body, body winning on key collision.
+            // Long values (`body`, `title`) ride the body so they dodge
+            // the request-head cap that silently clipped inbox memos at
+            // ~2.7KB. Query-only senders (older CLIs) keep working.
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let mut params = super::http::parse_params(&path, &query);
+            for (k, v) in super::http::parse_form_body(&body_bytes) {
+                params.insert(k, v);
+            }
             let p_owned = p.to_string();
             let result = tokio::task::spawn_blocking(move || {
                 crate::inbox_routes::dispatch_post(&p_owned, &params)
@@ -2171,6 +2230,43 @@ async fn handle_one_request(
                     .to_string(),
             });
             super::http::send_response(&mut *stream, result.status, result.content_type, &result.body).await;
+        }
+        // 0.39.45 (#35/#37/#29) — live-msg POST form. Same handler as
+        // the GET form (crate::cli::dispatch → workspace_routes), but
+        // the message `text` (and any other param) may arrive in the
+        // form-encoded POST body, dodging the request-head cap that
+        // silently clipped long live messages. Body wins on collision.
+        // Runs in spawn_blocking: deliver_live sleeps across its
+        // inject/verify/retry windows and must not pin a runtime worker.
+        p if is_post && p == "/cli/workspace/msg" => {
+            if !super::http::token_ok(&query, state.token.as_str()) {
+                let _ = stream.read(&mut buf).await;
+                super::http::send_response(
+                    &mut *stream,
+                    "403 Forbidden",
+                    "application/json",
+                    r#"{"error":"invalid or missing token"}"#,
+                )
+                .await;
+                return DispatchOutcome::Done;
+            }
+            let body_bytes = super::http::read_post_body(&mut *stream, &mut buf).await;
+            let mut params = super::http::parse_params(&path, &query);
+            for (k, v) in super::http::parse_form_body(&body_bytes) {
+                params.insert(k, v);
+            }
+            let p_owned = p.to_string();
+            let resp = tokio::task::spawn_blocking(move || {
+                crate::cli::dispatch(&p_owned, &params)
+            })
+            .await
+            .unwrap_or_else(|e| crate::cli_response::CliResponse {
+                status: "500 Internal Server Error",
+                content_type: "application/json",
+                body: serde_json::json!({ "error": format!("worker join: {e}") })
+                    .to_string(),
+            });
+            super::http::send_response(&mut *stream, resp.status, resp.content_type, &resp.body).await;
         }
         // Unified /cli/* dispatch. Auth + param validation +
         // per-route handler all live in `crate::cli::dispatch`; main.rs

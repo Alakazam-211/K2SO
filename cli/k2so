@@ -105,6 +105,25 @@ urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || echo "$1"
 }
 
+# POST a form-encoded body (0.39.45, GH #35/#37/#29). Token + project
+# ride the query string (the daemon's auth gate parses the query);
+# everything else — message text, inbox title/body — rides the POST
+# body so long payloads dodge the daemon's 16KB request-head cap that
+# used to silently truncate query-string values at ~2.7KB. Callers pass
+# pre-urlencoded `key=value` pairs, same contract as cli_request.
+cli_post_form() {
+    local endpoint="$1"
+    shift
+    local body=""
+    for param in "$@"; do
+        body="${body}${body:+&}${param}"
+    done
+    curl -s -X POST "${BASE_URL}${endpoint}?token=${TOKEN}&project=$(urlencode "$PROJECT")" \
+        --connect-timeout 5 --max-time 30 \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data-raw "$body" 2>/dev/null
+}
+
 # 0.39.0f Phase 2.1b: format_agents / format_work removed. Their
 # only callers (cmd_agents_list / cmd_agents_work / cmd_work_inbox)
 # are also gone; the inbox surface uses format_inbox instead.
@@ -2135,17 +2154,27 @@ except Exception:
 
     # Single canonical endpoint. Returns the canonical MsgResponse
     # shape: {success, target_session_id, attempts, reason, hint}.
+    #
+    # 0.39.45 (#29/#35/#37): POST with the text in the form body — long
+    # messages used to ride the URL query string and got silently
+    # truncated at the daemon's request-head cap (~2.7KB of payload).
     local params="workspace=$(urlencode "$target")"
     params="${params}&text=$(urlencode "$text")"
     params="${params}&from=$(urlencode "$from")"
     # 0.39.25: optional slash-command, prepended at the very front of the
     # delivered message (before the [from <name>] prefix). Only sent when
-    # non-empty; an older daemon simply ignores this unknown query param.
+    # non-empty; an older daemon simply ignores this unknown param.
     [[ -n "$explicit_command" ]] && params="${params}&command=$(urlencode "$explicit_command")"
 
     local response
-    response=$(cli_request "/cli/workspace/msg" "$params")
+    response=$(cli_post_form "/cli/workspace/msg" "$params")
     local rc=$?
+    # Back-compat: a pre-0.39.45 daemon 405s the POST form (route not
+    # POST-allowlisted there). Retry once via the legacy GET query path.
+    if echo "$response" | grep -q "method not allowed"; then
+        response=$(cli_request "/cli/workspace/msg" "$params")
+        rc=$?
+    fi
     echo "$response"
 
     # Exit code mirrors the response's success field so shell scripts
@@ -3854,10 +3883,10 @@ cmd_inbox_compose() {
     [[ -n "$priority" ]] && params="${params}&priority=$(urlencode "$priority")"
     [[ -n "$source" ]] && params="${params}&source=$(urlencode "$source")"
     [[ -n "$from" ]] && params="${params}&from=$(urlencode "$from")"
-    # POST: cli_request defaults to GET; use a curl wrapper.
-    curl -sG -X POST "${BASE_URL}/cli/inbox/compose" \
-        --connect-timeout 5 --max-time 30 \
-        -d "token=${TOKEN}&project=$(urlencode "$PROJECT")&${params}" 2>/dev/null
+    # 0.39.45 (#35/#37): real POST body. The old `curl -sG -X POST` put
+    # everything on the URL, where the daemon's request-head cap silently
+    # clipped bodies at ~2.7KB — corrupting the durable inbox record.
+    cli_post_form "/cli/inbox/compose" "$params"
     echo
 }
 
@@ -4659,20 +4688,24 @@ except: pass' 2>/dev/null)
     }
 
     # POST to /cli/inbox/compose with project=<target-workspace>. Note
-    # we deliberately do NOT call cli_post_json or cli_request here —
-    # cli_request hard-codes project=$PROJECT (caller's PWD), and we
-    # need to override it to address the recipient's workspace.
-    local params="token=${TOKEN}&project=$(urlencode "$resolved")"
-    params="${params}&title=$(urlencode "$title")"
+    # we deliberately do NOT call cli_post_form or cli_request here —
+    # both hard-code project=$PROJECT (caller's PWD), and we need to
+    # override it to address the recipient's workspace.
+    #
+    # 0.39.45 (#35/#37): title/body/priority/from ride a REAL form body.
+    # The old `curl -sG -X POST` put them on the URL, where the daemon's
+    # request-head cap silently clipped memo bodies at ~2.7KB.
+    local params="title=$(urlencode "$title")"
     [[ -n "$body" ]] && params="${params}&body=$(urlencode "$body")"
     [[ -n "$priority" ]] && params="${params}&priority=$(urlencode "$priority")"
     # `--from` was historically `assigned_by` on the old work-route;
     # the inbox-compose route names it `from` (writes to the YAML
     # frontmatter `from:` field — identical persisted shape).
     [[ -n "$from" ]] && params="${params}&from=$(urlencode "$from")"
-    curl -sG -X POST "${BASE_URL}/cli/inbox/compose" \
+    curl -s -X POST "${BASE_URL}/cli/inbox/compose?token=${TOKEN}&project=$(urlencode "$resolved")" \
         --connect-timeout 5 --max-time 30 \
-        -d "$params" 2>/dev/null
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data-raw "$params" 2>/dev/null
     echo
 }
 
