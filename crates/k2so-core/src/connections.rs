@@ -77,16 +77,18 @@ pub fn suggest_project_name(conn: &rusqlite::Connection, token: &str) -> Option<
     let mut best: Option<(usize, String)> = None;
     for name in names {
         let name_lc = name.to_lowercase();
-        // Containment either way is the strongest signal (rank 0);
-        // otherwise small edit distance qualifies (rank = distance).
-        let rank = if name_lc.contains(&token_lc) || token_lc.contains(&name_lc) {
-            0
+        // Rank by edit distance first (a 1-typo near-miss is the best
+        // suggestion); containment either way ranks like distance 2 —
+        // useful for partial names ("trading" → "AI Trading Platform")
+        // but it must not beat an almost-exact match.
+        let d = edit_distance(&token_lc, &name_lc);
+        let contained = name_lc.contains(&token_lc) || token_lc.contains(&name_lc);
+        let rank = if d <= 3 {
+            d.min(if contained { 2 } else { d })
+        } else if contained {
+            2
         } else {
-            let d = edit_distance(&token_lc, &name_lc);
-            if d > 3 {
-                continue;
-            }
-            d
+            continue;
         };
         match &best {
             Some((b, _)) if *b <= rank => {}
@@ -986,6 +988,21 @@ mod tests {
         assert!(
             err.contains("did you mean 'Zephyr-Unique-Ws'"),
             "error must carry a did-you-mean suggestion, got: {err}"
+        );
+    }
+
+    #[test]
+    fn suggest_prefers_near_miss_over_loose_containment() {
+        let _ = make_project("Zq-Host");
+        let _ = make_project("zq-host-smoke-ws");
+        let db = crate::db::shared();
+        let conn = db.lock();
+        // 1-typo near-miss of the long name; also CONTAINS the short
+        // name. The near-miss must win (live finding from 0.39.45
+        // smoke testing: 'K2SO' was suggested for 'k2so-smoke-wz').
+        assert_eq!(
+            suggest_project_name(&conn, "zq-host-smoke-wz").as_deref(),
+            Some("zq-host-smoke-ws"),
         );
     }
 
