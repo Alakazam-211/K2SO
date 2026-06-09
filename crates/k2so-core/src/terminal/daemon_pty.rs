@@ -687,6 +687,47 @@ impl DaemonPtySession {
         Arc::clone(&self.term)
     }
 
+    /// Plain-text projection of the visible grid — one `String` per
+    /// viewport row, styles dropped, trailing whitespace trimmed.
+    ///
+    /// 0.39.45 (GH #38): used by the daemon's verified message
+    /// injection to check whether the recipient TUI's input box still
+    /// holds an un-submitted payload after the submit CR was written.
+    /// Briefly locks the Term (same FairMutex the WS snapshot path
+    /// uses), so it's safe to call from any thread.
+    pub fn visible_text_rows(&self) -> Vec<String> {
+        use alacritty_terminal::index::{Column, Line, Point};
+        let term = self.term.lock();
+        let cols = term.columns();
+        let rows = term.screen_lines();
+        let grid = term.grid();
+        let mut out = Vec::with_capacity(rows);
+        for r in 0..(rows as i32) {
+            let mut line = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &grid[Point::new(Line(r), Column(c))];
+                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            let trimmed = line.trim_end();
+            line.truncate(trimmed.len());
+            out.push(line);
+        }
+        out
+    }
+
+    /// True when the child application has bracketed-paste mode
+    /// enabled (`ESC[?2004h` — claude/cursor TUIs switch it on at
+    /// startup). 0.39.45 (GH #38): when active, injected message
+    /// bodies are wrapped in explicit paste markers so a trailing CR
+    /// is unambiguously a submit keystroke even if the child reads
+    /// the whole burst in one coalesced `read()` under host load.
+    pub fn bracketed_paste_active(&self) -> bool {
+        self.term
+            .lock()
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+    }
+
     /// Subscribe to this session's alacritty event broadcast.
     /// Each call returns a fresh `Receiver`; multiple subscribers
     /// can coexist (though v2 is single-subscriber in practice).

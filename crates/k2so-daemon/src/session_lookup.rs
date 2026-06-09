@@ -88,6 +88,18 @@ impl LiveSession {
         self.0.is_child_alive()
     }
 
+    /// Plain-text projection of the visible grid rows (0.39.45,
+    /// GH #38) — consumed by verified message injection to confirm
+    /// the recipient's input box cleared after the submit CR.
+    pub fn visible_text_rows(&self) -> Vec<String> {
+        self.0.visible_text_rows()
+    }
+
+    /// True when the child has bracketed-paste mode on (GH #38).
+    pub fn bracketed_paste_active(&self) -> bool {
+        self.0.bracketed_paste_active()
+    }
+
     /// Number of clients currently attached to this session's grid
     /// broadcast (real-time viewers). Sourced from the v2 session's
     /// OWN broadcast channel (`DaemonPtySession::subscriber_count`),
