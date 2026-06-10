@@ -17,14 +17,14 @@ use crate::fs_atomic::{self, atomic_symlink, atomic_write_str, log_if_err, uniqu
 // also continue to work because re-exports behave like normal items.
 //
 // Phase 2.5c relocations: identity helpers moved to
-// `k2so_core::workspace::agent_identity`; scheduler moved to
-// `k2so_core::workspace::scheduler`. Sourced at canonical new paths
+// `k2_core::workspace::agent_identity`; scheduler moved to
+// `k2_core::workspace::scheduler`. Sourced at canonical new paths
 // here. (Phase 2.5e retired the former agents module entirely.)
-pub use k2so_core::workspace::agent_identity::{
+pub use k2_core::workspace::agent_identity::{
     agent_dir, agent_type_for, agents_dir, find_primary_agent, parse_frontmatter,
     resolve_project_id,
 };
-pub use k2so_core::workspace::scheduler::{
+pub use k2_core::workspace::scheduler::{
     agent_work_dir, count_md_files, get_highest_inbox_priority, get_workspace_state,
     is_agent_locked, is_within_active_hours, k2so_agents_scheduler_tick as core_scheduler_tick,
     priority_label, priority_rank, read_heartbeat_config,
@@ -33,11 +33,11 @@ pub use k2so_core::workspace::scheduler::{
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-// Phase 2.5c: `WorkItem` lives in `k2so_core::workspace::work_item`.
+// Phase 2.5c: `WorkItem` lives in `k2_core::workspace::work_item`.
 // Re-exported here so external callers (agent_hooks.rs,
 // commands/review.rs, etc.) keep resolving
 // `crate::commands::k2so_agents::WorkItem`.
-pub use k2so_core::workspace::work_item::{
+pub use k2_core::workspace::work_item::{
     atomic_write as _atomic_write_shim, parse_work_item_content, read_work_item as _read_work_item_shim,
     safe_read_to_string, WorkItem, MAX_FILE_SIZE,
 };
@@ -45,19 +45,19 @@ pub use k2so_core::workspace::work_item::{
 // Local aliases for the helpers used at privately-scoped call sites.
 #[allow(dead_code)]
 fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
-    k2so_core::workspace::work_item::atomic_write(path, content)
+    k2_core::workspace::work_item::atomic_write(path, content)
 }
 #[allow(dead_code)]
 fn read_work_item(path: &std::path::Path, folder: &str) -> Option<WorkItem> {
-    k2so_core::workspace::work_item::read_work_item(path, folder)
+    k2_core::workspace::work_item::read_work_item(path, folder)
 }
 
 // Phase 2.5c: skill + CLAUDE.md content generators relocated to
-// `k2so_core::skills::content`. Re-exported at historical names.
+// `k2_core::skills::content`. Re-exported at historical names.
 // `generate_agent_claude_md_content` stays as a public alias; new code
 // inside core uses `compose_agent_wake_context` which more honestly
 // names what the function returns.
-pub use k2so_core::skills::content::{
+pub use k2_core::skills::content::{
     compose_agent_wake_context, extract_section, format_cap,
     generate_agent_claude_md_content, generate_custom_agent_skill_content,
     generate_k2so_agent_skill_content, generate_manager_skill_content,
@@ -65,22 +65,22 @@ pub use k2so_core::skills::content::{
 };
 
 // Phase 2.5c: delegation path relocated to
-// `k2so_core::deprecated::delegate` with `#[deprecated]` annotations
+// `k2_core::deprecated::delegate` with `#[deprecated]` annotations
 // (CLI verb hard-deprecated, Phase 2.1 PRD A23). The
 // `#[tauri::command]` wrapper below is a three-line forward; the four
 // frontmatter helpers are re-exported at their historical names so
 // the 3 call sites elsewhere in this file resolve unchanged.
 #[allow(deprecated)]
-pub use k2so_core::deprecated::delegate::{
+pub use k2_core::deprecated::delegate::{
     add_worktree_to_frontmatter, shorten_slug, strip_worktree_from_frontmatter,
     update_assigned_by,
 };
 
 // Phase 2.5c: harness-agnostic skill writer relocated to
-// `k2so_core::skills::writer`. Writes canonical SKILL.md + symlinks
+// `k2_core::skills::writer`. Writes canonical SKILL.md + symlinks
 // from every discovery path (.claude/, .opencode/, .pi/) + marker-
 // injects into AGENTS.md and copilot-instructions.md.
-pub use k2so_core::skills::writer::{
+pub use k2_core::skills::writer::{
     force_symlink, generate_default_agent_body, upsert_k2so_section,
     write_agent_skill_file, write_skill_to_all_harnesses, K2SO_SECTION_BEGIN,
     K2SO_SECTION_END,
@@ -88,17 +88,17 @@ pub use k2so_core::skills::writer::{
 
 // Agent CRUD + work queue + workspace inbox + channel events live in
 // k2so-core so the daemon can serve the same /cli/* routes headlessly.
-// Phase 2.5c relocated `events` to `k2so_core::workspace::events`.
+// Phase 2.5c relocated `events` to `k2_core::workspace::events`.
 // Phase 2.5d split the former commands cluster across
 // `workspace::agent` (CRUD + log_agent_warning + cleanup_agent_backups +
 // update_agent_md_field + K2soAgentInfo) and `heartbeats::control`
 // (ensure_agent_wakeup + per-agent heartbeat control). Phase 2.5e
 // retired the `agents/` module entirely.
-pub use k2so_core::heartbeats::control::ensure_agent_wakeup;
-pub use k2so_core::workspace::agent::{
+pub use k2_core::heartbeats::control::ensure_agent_wakeup;
+pub use k2_core::workspace::agent::{
     cleanup_agent_backups, log_agent_warning, update_agent_md_field, K2soAgentInfo,
 };
-pub use k2so_core::workspace::events::{
+pub use k2_core::workspace::events::{
     drain_agent_events, push_agent_event, ChannelEvent, MAX_EVENTS_PER_QUEUE,
 };
 
@@ -107,7 +107,7 @@ pub fn k2so_agents_get_heartbeat(
     project_path: String,
     agent_name: String,
 ) -> Result<AgentHeartbeatConfig, String> {
-    k2so_core::heartbeats::control::get_heartbeat(project_path, agent_name)
+    k2_core::heartbeats::control::get_heartbeat(project_path, agent_name)
 }
 
 #[tauri::command]
@@ -120,7 +120,7 @@ pub fn k2so_agents_set_heartbeat(
     cost_budget: Option<String>,
     force_wake: Option<bool>,
 ) -> Result<AgentHeartbeatConfig, String> {
-    k2so_core::heartbeats::control::set_heartbeat(
+    k2_core::heartbeats::control::set_heartbeat(
         project_path,
         agent_name,
         interval,
@@ -136,7 +136,7 @@ pub fn k2so_agents_heartbeat_noop(
     project_path: String,
     agent_name: String,
 ) -> Result<AgentHeartbeatConfig, String> {
-    k2so_core::heartbeats::control::heartbeat_noop(project_path, agent_name)
+    k2_core::heartbeats::control::heartbeat_noop(project_path, agent_name)
 }
 
 #[tauri::command]
@@ -144,12 +144,12 @@ pub fn k2so_agents_heartbeat_action(
     project_path: String,
     agent_name: String,
 ) -> Result<AgentHeartbeatConfig, String> {
-    k2so_core::heartbeats::control::heartbeat_action(project_path, agent_name)
+    k2_core::heartbeats::control::heartbeat_action(project_path, agent_name)
 }
 
 #[tauri::command]
 pub fn k2so_agents_list(project_path: String) -> Result<Vec<K2soAgentInfo>, String> {
-    k2so_core::workspace::agent::list(project_path)
+    k2_core::workspace::agent::list(project_path)
 }
 
 #[tauri::command]
@@ -160,12 +160,12 @@ pub fn k2so_agents_create(
     prompt: Option<String>,
     agent_type: Option<String>,
 ) -> Result<K2soAgentInfo, String> {
-    k2so_core::workspace::agent::create(project_path, name, role, prompt, agent_type)
+    k2_core::workspace::agent::create(project_path, name, role, prompt, agent_type)
 }
 
 #[tauri::command]
 pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), String> {
-    k2so_core::workspace::agent::delete(project_path, name)
+    k2_core::workspace::agent::delete(project_path, name)
 }
 
 // Plan B cleanup — `k2so_workspace_agent_display_name` +
@@ -175,7 +175,7 @@ pub fn k2so_agents_delete(project_path: String, name: String) -> Result<(), Stri
 
 // `k2so_agents_delete_inner` shim removed in 0.39.0 — zero callers
 // across src-tauri/ and the JS frontend. The implementation in
-// `k2so_core::workspace::agent::delete_inner` stays; callers that
+// `k2_core::workspace::agent::delete_inner` stays; callers that
 // need it (currently only k2so-core itself) reach it directly.
 
 // k2so_agents_update_field and k2so_agents_update_profile deleted in
@@ -188,7 +188,7 @@ pub fn k2so_agents_get_profile(
     project_path: String,
     agent_name: String,
 ) -> Result<String, String> {
-    k2so_core::workspace::agent::get_profile(project_path, agent_name)
+    k2_core::workspace::agent::get_profile(project_path, agent_name)
 }
 
 // Phase 2.1c Item 2 — `k2so_agents_work_list`, `k2so_agents_work_create`,
@@ -206,19 +206,19 @@ pub fn k2so_agents_get_profile(
 // was also deleted, along with its sole caller (daemon's
 // `workspace_msg::deliver_to_inbox`). All inbox-delivery callers now
 // use `commands::inbox::k2so_inbox_compose` (renderer) or
-// `k2so_core::inbox::compose` (Rust), which land in the canonical
+// `k2_core::inbox::compose` (Rust), which land in the canonical
 // post-Phase-2.1 `.k2so/inbox/` layout.
 
 // ── Path helpers ────────────────────────────────────────────────────────
 //
-// `agents_dir` + `agent_dir` live in `k2so_core::workspace::agent_identity`
+// `agents_dir` + `agent_dir` live in `k2_core::workspace::agent_identity`
 // (re-exported above so local call sites resolve unchanged).
-// `agent_work_dir` lives in `k2so_core::workspace::scheduler` alongside
+// `agent_work_dir` lives in `k2_core::workspace::scheduler` alongside
 // the rest of the heartbeat-fire dependency closure.
 //
 // `workspace_inbox_dir` (legacy `.k2so/work/inbox/`) was deleted in
 // 0.39.0f Phase 2.1 final-final. The workspace inbox lives at
-// `.k2so/inbox/` and reads flow through `k2so_core::inbox::*`.
+// `.k2so/inbox/` and reads flow through `k2_core::inbox::*`.
 
 // ── Wake-up templates ──────────────────────────────────────────────────
 //
@@ -234,12 +234,12 @@ pub fn k2so_agents_get_profile(
 // autonomously.
 
 // Wakeup templates + resolvers + composers live in
-// `k2so_core::workspace::wake_prompts`. The re-exports below keep the
+// `k2_core::workspace::wake_prompts`. The re-exports below keep the
 // historical paths valid: `WAKEUP_TEMPLATE_*`, `wakeup_template_for`,
 // `agent_wakeup_path`, `workspace_wakeup_path`, `read_agent_wakeup`,
 // `strip_frontmatter`, the four `compose_*` helpers, and
 // `default_heartbeat_wakeup_abs` all resolve to the core versions.
-pub use k2so_core::workspace::wake_prompts::{
+pub use k2_core::workspace::wake_prompts::{
     agent_wakeup_path, compose_agent_wake_from_body, compose_manager_wake_from_body,
     compose_wake_prompt_for_agent, compose_wake_prompt_for_workspace,
     compose_wake_prompt_from_path, default_heartbeat_wakeup_abs, read_agent_wakeup,
@@ -258,7 +258,7 @@ pub use k2so_core::workspace::wake_prompts::{
 /// Multi-heartbeat architecture: CRUD for agent_heartbeats table.
 /// See .k2so/prds/multi-schedule-heartbeat.md.
 
-// All heartbeat business logic lives in `k2so_core::heartbeats`.
+// All heartbeat business logic lives in `k2_core::heartbeats`.
 // The `#[tauri::command]` wrappers below are thin forwards so the
 // React UI's existing `invoke("k2so_heartbeat_*")` calls keep working;
 // the daemon calls the core fns directly from its `/cli/heartbeat/*`
@@ -271,12 +271,12 @@ pub fn k2so_heartbeat_add(
     frequency: String,
     spec_json: String,
 ) -> Result<serde_json::Value, String> {
-    k2so_core::heartbeats::k2so_heartbeat_add(project_path, name, frequency, spec_json)
+    k2_core::heartbeats::k2so_heartbeat_add(project_path, name, frequency, spec_json)
 }
 
 #[tauri::command]
 pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, String> {
-    k2so_core::heartbeats::k2so_heartbeat_list(project_path)
+    k2_core::heartbeats::k2so_heartbeat_list(project_path)
 }
 
 /// 0.38.3 — most recent heartbeat fire records across ALL projects,
@@ -287,7 +287,7 @@ pub fn k2so_heartbeat_list(project_path: String) -> Result<Vec<AgentHeartbeat>, 
 pub fn k2so_heartbeat_fires_list_all(
     limit: Option<i64>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    k2so_core::heartbeats::k2so_heartbeat_fires_list_all(limit)
+    k2_core::heartbeats::k2so_heartbeat_fires_list_all(limit)
 }
 
 /// 0.38.3 — list every active (non-archived) heartbeat across ALL
@@ -296,14 +296,14 @@ pub fn k2so_heartbeat_fires_list_all(
 /// so the operator can see and toggle every heartbeat from one place.
 #[tauri::command]
 pub fn k2so_heartbeat_list_all() -> Result<Vec<serde_json::Value>, String> {
-    k2so_core::heartbeats::k2so_heartbeat_list_all()
+    k2_core::heartbeats::k2so_heartbeat_list_all()
 }
 
 #[tauri::command]
 pub fn k2so_heartbeat_list_archived(
     project_path: String,
 ) -> Result<Vec<AgentHeartbeat>, String> {
-    k2so_core::heartbeats::k2so_heartbeat_list_archived(project_path)
+    k2_core::heartbeats::k2so_heartbeat_list_archived(project_path)
 }
 
 #[tauri::command]
@@ -311,7 +311,7 @@ pub fn k2so_heartbeat_archive(
     project_path: String,
     name: String,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_archive(project_path, name)
+    k2_core::heartbeats::k2so_heartbeat_archive(project_path, name)
 }
 
 #[tauri::command]
@@ -319,12 +319,12 @@ pub fn k2so_heartbeat_unarchive(
     project_path: String,
     name: String,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_unarchive(project_path, name)
+    k2_core::heartbeats::k2so_heartbeat_unarchive(project_path, name)
 }
 
 #[tauri::command]
 pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_remove(project_path, name)
+    k2_core::heartbeats::k2so_heartbeat_remove(project_path, name)
 }
 
 /// Read the workspace's `show_heartbeat_sessions` flag.
@@ -337,7 +337,7 @@ pub fn k2so_heartbeat_remove(project_path: String, name: String) -> Result<(), S
 pub fn k2so_workspace_get_show_heartbeat_sessions(
     project_path: String,
 ) -> Result<bool, String> {
-    k2so_core::heartbeats::k2so_workspace_get_show_heartbeat_sessions(project_path)
+    k2_core::heartbeats::k2so_workspace_get_show_heartbeat_sessions(project_path)
 }
 
 /// Flip the workspace's `show_heartbeat_sessions` flag.
@@ -346,7 +346,7 @@ pub fn k2so_workspace_set_show_heartbeat_sessions(
     project_path: String,
     enabled: bool,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_workspace_set_show_heartbeat_sessions(
+    k2_core::heartbeats::k2so_workspace_set_show_heartbeat_sessions(
         project_path,
         enabled,
     )
@@ -358,7 +358,7 @@ pub fn k2so_heartbeat_set_enabled(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_set_enabled(project_path, name, enabled)
+    k2_core::heartbeats::k2so_heartbeat_set_enabled(project_path, name, enabled)
 }
 
 /// 0.37.8 — flip the per-heartbeat opt-in to deliver WAKEUP.md into
@@ -370,7 +370,7 @@ pub fn k2so_heartbeat_set_use_workspace_session(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_set_use_workspace_session(
+    k2_core::heartbeats::k2so_heartbeat_set_use_workspace_session(
         project_path,
         name,
         enabled,
@@ -384,17 +384,17 @@ pub fn k2so_heartbeat_edit(
     frequency: String,
     spec_json: String,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_edit(project_path, name, frequency, spec_json)
+    k2_core::heartbeats::k2so_heartbeat_edit(project_path, name, frequency, spec_json)
 }
 
 // Re-exported so the name stays reachable at its historical path
 // (`crate::commands::k2so_agents::HeartbeatFireCandidate`) while the
 // struct itself lives in k2so-core.
-pub use k2so_core::heartbeats::HeartbeatFireCandidate;
+pub use k2_core::heartbeats::HeartbeatFireCandidate;
 
 // `k2so_agents_heartbeat_tick` + `stamp_heartbeat_fired` shims removed
 // in 0.39.0 — both had zero callers in src-tauri/ + frontend. The
-// daemon's heartbeat loop calls `k2so_core::heartbeats::*` directly.
+// daemon's heartbeat loop calls `k2_core::heartbeats::*` directly.
 
 #[tauri::command]
 pub fn k2so_heartbeat_rename(
@@ -402,7 +402,7 @@ pub fn k2so_heartbeat_rename(
     old_name: String,
     new_name: String,
 ) -> Result<(), String> {
-    k2so_core::heartbeats::k2so_heartbeat_rename(project_path, old_name, new_name)
+    k2_core::heartbeats::k2so_heartbeat_rename(project_path, old_name, new_name)
 }
 
 #[tauri::command]
@@ -410,13 +410,13 @@ pub fn k2so_heartbeat_fires_list(
     project_path: String,
     limit: Option<i64>,
 ) -> Result<Vec<HeartbeatFire>, String> {
-    k2so_core::heartbeats::k2so_heartbeat_fires_list(project_path, limit)
+    k2_core::heartbeats::k2so_heartbeat_fires_list(project_path, limit)
 }
 
 // Migration-helper shims removed in 0.39.0 (zero callers across
 // src-tauri/ + frontend; the daemon's boot sweep at
 // `run_workspace_legacy_migrations_sweep` calls
-// `k2so_core::workspace::migrations::*` directly):
+// `k2_core::workspace::migrations::*` directly):
 //
 //   - archive_orphan_top_tier_agents
 //   - repair_mismigrated_heartbeats
@@ -433,10 +433,10 @@ pub fn k2so_heartbeat_fires_list(
 
 // ── Skill upgrade protocol (universal) ───────────────────────────────
 // The full skill lifecycle (markers, versions, wrap/parse, the
-// ensure_skill_up_to_date writer) moved to k2so_core::skills::version.
+// ensure_skill_up_to_date writer) moved to k2_core::skills::version.
 // src-tauri re-exports the surface at its historical names so the 30+
 // call sites in this file resolve unchanged.
-pub use k2so_core::skills::version::{
+pub use k2_core::skills::version::{
     ensure_skill_up_to_date, parse_skill, skill_checksum_hex,
     skill_source_agent_md_begin, skill_source_agent_md_end, wrap_managed_skill,
     ParsedSkill, SkillUpgradeOutcome, SKILL_BEGIN_MARKER, SKILL_END_MARKER,
@@ -454,7 +454,7 @@ pub use k2so_core::skills::version::{
 //
 // `AgentHeartbeatConfig`, `ActiveHours`, `read_heartbeat_config`,
 // `write_heartbeat_config`, and the per-field default fns all live in
-// `k2so_core::workspace::scheduler`. The types + functions are
+// `k2_core::workspace::scheduler`. The types + functions are
 // re-exported at the top of this file so existing call sites resolve
 // unchanged.
 
@@ -462,20 +462,20 @@ pub use k2so_core::skills::version::{
 
 /// Delegate a work item to an agent — creates a worktree,
 /// registers it, moves the item to active, writes CLAUDE.md.
-/// Body lives in `k2so_core::deprecated::delegate`.
+/// Body lives in `k2_core::deprecated::delegate`.
 #[tauri::command]
 pub fn k2so_agents_delegate(
     project_path: String,
     target_agent: String,
     source_file: String,
 ) -> Result<serde_json::Value, String> {
-    k2so_core::deprecated::delegate::k2so_agents_delegate(project_path, target_agent, source_file)
+    k2_core::deprecated::delegate::k2so_agents_delegate(project_path, target_agent, source_file)
 }
 
 // ── Lock Files ──────────────────────────────────────────────────────────
 
 // Session lifecycle (lock / unlock / save-session-id / clear-session-id)
-// lives in `k2so_core::workspace::session`. These #[tauri::command]
+// lives in `k2_core::workspace::session`. These #[tauri::command]
 // wrappers are thin forwards so the React frontend's existing invokes
 // keep working unchanged; the daemon calls the core fns directly from
 // its wake path.
@@ -487,7 +487,7 @@ pub fn k2so_agents_lock(
     terminal_id: Option<String>,
     owner: Option<String>,
 ) -> Result<(), String> {
-    k2so_core::workspace::session::k2so_agents_lock(project_path, agent_name, terminal_id, owner)
+    k2_core::workspace::session::k2so_agents_lock(project_path, agent_name, terminal_id, owner)
 }
 
 // k2so_agents_unlock deleted in 0.39.0 cleanup — zero React callers
@@ -502,12 +502,12 @@ pub fn k2so_agents_lock(
 // `k2so_agents_regenerate_claude_md` (back-compat alias) deleted —
 // zero React/CLI/test callers. SKILL/CLAUDE.md regen runs implicitly
 // from wake builders (`k2so_agents_build_launch`) so the on-demand
-// command surface is unused. Core `k2so_core::workspace::agent_editor::
+// command surface is unused. Core `k2_core::workspace::agent_editor::
 // k2so_agents_regenerate_agent_context` stays for in-process callers.
 
 /// Full-fat wake-launch builder (UI "Launch" button +
 /// heartbeat auto-launch). Body lives in
-/// `k2so_core::workspace::agent_launch`; this Tauri wrapper is a
+/// `k2_core::workspace::agent_launch`; this Tauri wrapper is a
 /// thin forward so the React frontend's invoke keeps
 /// working.
 // `heartbeat_name`: heartbeat-scoped resume target (post-0.36.0). When
@@ -523,7 +523,7 @@ pub fn k2so_agents_build_launch(
     skip_fork_session: Option<bool>,
     heartbeat_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    k2so_core::workspace::agent_launch::k2so_agents_build_launch(
+    k2_core::workspace::agent_launch::k2so_agents_build_launch(
         project_path,
         agent_name,
         agent_cli_command,
@@ -536,7 +536,7 @@ pub fn k2so_agents_build_launch(
 // Plan B cleanup — `k2so_agents_resume_chat_args` deleted. It routed
 // daemon data (`/cli/workspace/resume-chat-args`); the renderer now
 // reaches it host-aware via `daemonCli*`. The shared resolver lives in
-// `k2so_core::workspace::resume_chat::resolve_resume_chat_args`.
+// `k2_core::workspace::resume_chat::resolve_resume_chat_args`.
 
 /// Regenerate the workspace-root SKILL.md — the lead agent's complete
 /// operating manual. Written to `<project-root>/SKILL.md` with a
@@ -549,14 +549,14 @@ pub fn k2so_agents_build_launch(
 ///
 /// Pre-0.33.0 this was `k2so_agents_generate_workspace_claude_md` —
 /// back-compat alias below.
-/// Body lives in `k2so_core::workspace::skill_regen::regenerate_workspace_skill`
+/// Body lives in `k2_core::workspace::skill_regen::regenerate_workspace_skill`
 /// (renamed from `skill_writer` in 0.39.0)
 /// (Phase 2 Unit 7d). The Tauri wrapper stays for the invoke handler.
 #[tauri::command]
 pub fn k2so_agents_regenerate_workspace_skill(
     project_path: String,
 ) -> Result<String, String> {
-    k2so_core::workspace::skill_regen::regenerate_workspace_skill(project_path)
+    k2_core::workspace::skill_regen::regenerate_workspace_skill(project_path)
 }
 
 /// Back-compat alias for [`k2so_agents_regenerate_workspace_skill`].
@@ -572,7 +572,7 @@ pub fn k2so_agents_generate_workspace_claude_md(
 
 // ── Onboarding (workspace-add three-option flow) ───────────────────
 //
-// Thin wrappers around `k2so_core::workspace::onboarding`. Logic lives
+// Thin wrappers around `k2_core::workspace::onboarding`. Logic lives
 // in core so the CLI (`k2so onboarding ...`) and Tauri share the same
 // implementation; the renderer's WorkspaceOnboardingModal only displays
 // scan results and forwards button-clicks to these commands.
@@ -585,8 +585,8 @@ pub fn k2so_agents_generate_workspace_claude_md(
 #[tauri::command]
 pub fn k2so_onboarding_scan(
     project_path: String,
-) -> Vec<k2so_core::workspace::onboarding::DetectedHarnessFile> {
-    k2so_core::workspace::onboarding::scan_harness_files(&project_path)
+) -> Vec<k2_core::workspace::onboarding::DetectedHarnessFile> {
+    k2_core::workspace::onboarding::scan_harness_files(&project_path)
 }
 
 // `k2so_onboarding_adopt` / `k2so_onboarding_skip` removed with the
@@ -609,13 +609,13 @@ pub fn k2so_onboarding_scan(
 pub fn k2so_onboarding_start_fresh(project_path: String) -> Result<(), String> {
     // Make sure any prior "skip" flag from a re-onboarding flow is
     // cleared so the regen actually performs the harness fanout.
-    k2so_core::workspace::onboarding::unskip_harness_management(&project_path)?;
+    k2_core::workspace::onboarding::unskip_harness_management(&project_path)?;
     k2so_agents_regenerate_workspace_skill(project_path).map(|_| ())
 }
 
 // ── Canonical Agent Flow (canonical-agents PRD §4 / §5.2 / §11) ──────────
 //
-// Thin wrappers around the canonical-agents core (`k2so_core::workspace`).
+// Thin wrappers around the canonical-agents core (`k2_core::workspace`).
 // Logic lives in core so the daemon CLI and Tauri share one implementation
 // (matching the existing onboarding-toggle pattern above — direct
 // Tauri→core, no extra daemon round-trip). The renderer's Settings
@@ -627,7 +627,7 @@ pub fn k2so_onboarding_start_fresh(project_path: String) -> Result<(), String> {
 /// checkbox state.
 #[tauri::command]
 pub fn k2so_harness_fanout_enabled(project_path: String) -> bool {
-    k2so_core::workspace::onboarding::harness_fanout_enabled(&project_path)
+    k2_core::workspace::onboarding::harness_fanout_enabled(&project_path)
 }
 
 /// Set the per-workspace harness fan-out permission marker (PRD §4).
@@ -638,7 +638,7 @@ pub fn k2so_set_harness_fanout_enabled(
     project_path: String,
     enabled: bool,
 ) -> Result<(), String> {
-    k2so_core::workspace::onboarding::set_harness_fanout_enabled(&project_path, enabled)
+    k2_core::workspace::onboarding::set_harness_fanout_enabled(&project_path, enabled)
 }
 
 /// Probe per-harness canonical state WITHOUT mutating anything
@@ -648,14 +648,14 @@ pub fn k2so_set_harness_fanout_enabled(
 #[tauri::command]
 pub fn k2so_detect_canonical_state(
     project_path: String,
-) -> Vec<k2so_core::workspace::canonical::HarnessProbe> {
-    k2so_core::workspace::canonical::detect_canonical_state(&project_path)
+) -> Vec<k2_core::workspace::canonical::HarnessProbe> {
+    k2_core::workspace::canonical::detect_canonical_state(&project_path)
 }
 
 /// Write one of the three opt-in skills to `.k2so/skills/<name>/SKILL.md`
 /// on demand (PRD §8.1 "Enable"). `skill` is one of
 /// `workspace-manager` | `k2-agent` | `k2-canonical-agent` (the
-/// [`k2so_core::skills::content::OptInSkill::dir_name`] values). Returns
+/// [`k2_core::skills::content::OptInSkill::dir_name`] values). Returns
 /// the absolute path written so the UI can confirm it landed.
 #[tauri::command]
 pub fn k2so_write_opt_in_skill(
@@ -663,106 +663,106 @@ pub fn k2so_write_opt_in_skill(
     skill: String,
 ) -> Result<String, String> {
     let opt_in = match skill.as_str() {
-        "workspace-manager" => k2so_core::skills::content::OptInSkill::WorkspaceManager,
-        "k2-agent" => k2so_core::skills::content::OptInSkill::K2Agent,
-        "k2-canonical-agent" => k2so_core::skills::content::OptInSkill::K2CanonicalAgent,
+        "workspace-manager" => k2_core::skills::content::OptInSkill::WorkspaceManager,
+        "k2-agent" => k2_core::skills::content::OptInSkill::K2Agent,
+        "k2-canonical-agent" => k2_core::skills::content::OptInSkill::K2CanonicalAgent,
         other => return Err(format!("unknown opt-in skill: {other}")),
     };
-    let path = k2so_core::skills::content::write_opt_in_skill(&project_path, opt_in);
+    let path = k2_core::skills::content::write_opt_in_skill(&project_path, opt_in);
     Ok(path.to_string_lossy().to_string())
 }
 
 /// Remove or disable the workspace SKILL.md + CLAUDE.md symlink
 /// (when the Agent toggle is turned off). Body lives in
-/// `k2so_core::workspace::harness::disable_workspace_claude_md`
+/// `k2_core::workspace::harness::disable_workspace_claude_md`
 /// (Phase 2 Unit 7d).
 #[tauri::command]
 pub fn k2so_agents_disable_workspace_claude_md(project_path: String) -> Result<(), String> {
-    k2so_core::workspace::harness::disable_workspace_claude_md(project_path)
+    k2_core::workspace::harness::disable_workspace_claude_md(project_path)
 }
 
 // `CLI_TOOLS_DOCS` removed in 0.39.0. Was a stale duplicate of the
-// core version (k2so_core::workspace::skill_regen) with zero callers
+// core version (k2_core::workspace::skill_regen) with zero callers
 // in this crate (Phase 2.1 final audit). The core version is the
 // authoritative source consumed by the SKILL.md generator and uses
 // the Phase 2.1 A25 canonical verbs. Mirrors the parallel removal of
 // `WORKFLOW_DOCS` from this same file.
 
 // `WORKFLOW_DOCS` removed in 0.39.0f. The constant was a stale duplicate
-// of the core version (now in `k2so_core::workspace::skill_regen`); it
+// of the core version (now in `k2_core::workspace::skill_regen`); it
 // had zero callers in this crate (Phase 2.1 final audit). The core
 // version is the authoritative source consumed by the SKILL.md generator.
 
-// (duplicate of k2so_core helpers — removed during skill_content migration)
+// (duplicate of k2_core helpers — removed during skill_content migration)
 
 // ── Review Queue ────────────────────────────────────────────────────────
-// Core types + logic live in `k2so_core::workspace::reviews`. We re-export
+// Core types + logic live in `k2_core::workspace::reviews`. We re-export
 // the types so the Tauri command signatures below (and any callers that
 // imported from this module) keep their shapes.
 
-pub use k2so_core::workspace::reviews::{ReviewDiffFile, ReviewItem};
+pub use k2_core::workspace::reviews::{ReviewDiffFile, ReviewItem};
 
 /// Get the review queue — agents with completed work in worktree branches.
 #[tauri::command]
 pub async fn k2so_agents_review_queue(project_path: String) -> Result<Vec<ReviewItem>, String> {
-    tokio::task::spawn_blocking(move || k2so_core::workspace::reviews::review_queue(&project_path))
+    tokio::task::spawn_blocking(move || k2_core::workspace::reviews::review_queue(&project_path))
         .await
         .map_err(|e| format!("review_queue task failed: {}", e))?
 }
 
 pub fn k2so_agents_review_queue_inner(project_path: &str) -> Result<Vec<ReviewItem>, String> {
-    k2so_core::workspace::reviews::review_queue(project_path)
+    k2_core::workspace::reviews::review_queue(project_path)
 }
 
 /// Sub-agent completion. Core logic in
-/// `k2so_core::workspace::reviews::agent_complete`.
+/// `k2_core::workspace::reviews::agent_complete`.
 pub fn k2so_agent_complete(
     project_path: String,
     agent_name: String,
     filename: String,
 ) -> Result<String, String> {
-    k2so_core::workspace::reviews::agent_complete(project_path, agent_name, filename)
+    k2_core::workspace::reviews::agent_complete(project_path, agent_name, filename)
 }
 
 /// Approve the agent's branch — merge + cleanup. Core logic lives in
-/// `k2so_core::workspace::reviews::review_approve`.
+/// `k2_core::workspace::reviews::review_approve`.
 #[tauri::command]
 pub fn k2so_agents_review_approve(
     project_path: String,
     branch: String,
     agent_name: String,
 ) -> Result<String, String> {
-    k2so_core::workspace::reviews::review_approve(project_path, branch, agent_name)
+    k2_core::workspace::reviews::review_approve(project_path, branch, agent_name)
 }
 
 /// Reject the agent's work — clean up worktree, restore inbox, write
 /// optional feedback. Core logic lives in
-/// `k2so_core::workspace::reviews::review_reject`.
+/// `k2_core::workspace::reviews::review_reject`.
 #[tauri::command]
 pub fn k2so_agents_review_reject(
     project_path: String,
     agent_name: String,
     reason: Option<String>,
 ) -> Result<(), String> {
-    k2so_core::workspace::reviews::review_reject(project_path, agent_name, reason)
+    k2_core::workspace::reviews::review_reject(project_path, agent_name, reason)
 }
 
 /// Request changes — drop a feedback file in inbox, don't tear down
-/// the worktree. Core logic in `k2so_core::workspace::reviews::review_request_changes`.
+/// the worktree. Core logic in `k2_core::workspace::reviews::review_request_changes`.
 #[tauri::command]
 pub fn k2so_agents_review_request_changes(
     project_path: String,
     agent_name: String,
     feedback: String,
 ) -> Result<(), String> {
-    k2so_core::workspace::reviews::review_request_changes(project_path, agent_name, feedback)
+    k2_core::workspace::reviews::review_request_changes(project_path, agent_name, feedback)
 }
 
 // ── Heartbeat Triage (Workspace State) ──────────────────────────────────
 
 // k2so_agents_triage_summary deleted in 0.39.0 cleanup — zero React
 // callers; the triage summary is built and consumed entirely inside
-// the daemon's heartbeat fire path via `k2so_core::workspace::triage`.
+// the daemon's heartbeat fire path via `k2_core::workspace::triage`.
 
 /// Determine what should be launched based on triage.
 ///
@@ -788,7 +788,7 @@ pub fn k2so_agents_review_request_changes(
 #[tauri::command]
 #[allow(deprecated)]
 pub fn k2so_agents_triage_decide(project_path: String) -> Result<Vec<String>, String> {
-    k2so_core::workspace::triage::triage_decide(&project_path)
+    k2_core::workspace::triage::triage_decide(&project_path)
 }
 
 
@@ -814,7 +814,7 @@ pub fn k2so_agents_save_session_id(
     agent_name: String,
     session_id: String,
 ) -> Result<(), String> {
-    k2so_core::workspace::session::k2so_agents_save_session_id(
+    k2_core::workspace::session::k2so_agents_save_session_id(
         project_path,
         agent_name,
         session_id,
@@ -826,7 +826,7 @@ pub fn k2so_agents_clear_session_id(
     project_path: String,
     agent_name: String,
 ) -> Result<(), String> {
-    k2so_core::workspace::session::k2so_agents_clear_session_id(project_path, agent_name)
+    k2_core::workspace::session::k2so_agents_clear_session_id(project_path, agent_name)
 }
 
 /// Toggle the per-session `surfaced` flag. When transitioning 0 → 1,
@@ -841,7 +841,7 @@ pub fn k2so_agents_clear_session_id(
 /// without re-querying — kept minimal because the event listener is
 /// a hot path. Pass empty strings / empty Vec / None when not
 /// applicable.
-/// Body lives in `k2so_core::workspace::session::k2so_session_set_surfaced`
+/// Body lives in `k2_core::workspace::session::k2so_session_set_surfaced`
 /// (Phase 2 Unit 7d).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -855,7 +855,7 @@ pub fn k2so_session_set_surfaced(
     heartbeat_name: Option<String>,
     attach_agent_name: Option<String>,
 ) -> Result<(), String> {
-    k2so_core::workspace::session::k2so_session_set_surfaced(
+    k2_core::workspace::session::k2so_session_set_surfaced(
         project_path,
         agent_name,
         surfaced,
@@ -869,20 +869,20 @@ pub fn k2so_session_set_surfaced(
 
 /// 0.38.0 commit 7 — broadcast cross-window when the pinned-chat
 /// refresh button is clicked. Body lives in
-/// `k2so_core::workspace::session::k2so_chat_refresh_broadcast`
+/// `k2_core::workspace::session::k2so_chat_refresh_broadcast`
 /// (Phase 2 Unit 7d).
 #[tauri::command]
 pub fn k2so_chat_refresh_broadcast(project_path: String) -> Result<(), String> {
-    k2so_core::workspace::session::k2so_chat_refresh_broadcast(project_path)
+    k2_core::workspace::session::k2so_chat_refresh_broadcast(project_path)
 }
 
 // ── Project-Level Schedule Evaluation ─────────────────────────────────────
 //
 // `should_project_fire` + `matches_ordinal_day` now live in
-// k2so_core::scheduler so the daemon can call them directly without
+// k2_core::scheduler so the daemon can call them directly without
 // pulling in this commands module. Re-imported for the three
 // unqualified call sites elsewhere in this file.
-use k2so_core::scheduler::should_project_fire;
+use k2_core::scheduler::should_project_fire;
 
 
 /// Compute the next N fire times for a schedule (for UI preview).
@@ -938,7 +938,7 @@ pub fn k2so_agents_preview_schedule(
 // Pre-Unit-7c these commands wrote `~/.k2so/heartbeat.sh` + installed
 // the launchd plist (macOS) / crontab entry (Linux) directly from
 // Tauri. Unit 7c moved the install/uninstall body to
-// `k2so_core::heartbeats::install` and added daemon routes at
+// `k2_core::heartbeats::install` and added daemon routes at
 // `/cli/heartbeat/{install-launchd, uninstall-launchd,
 // apply-wake-scheduler}`. The wrappers below are thin daemon-HTTP
 // proxies so K2SO Connect (remote daemon, no Tauri) can install its
@@ -951,7 +951,7 @@ pub fn k2so_agents_preview_schedule(
 #[tauri::command]
 pub fn k2so_agents_install_heartbeat() -> Result<(), String> {
     let client = crate::daemon_client::DaemonClient::try_connect()?;
-    let settings = k2so_core::app_settings::load();
+    let settings = k2_core::app_settings::load();
     let cfg = &settings.wake_scheduler;
     let interval_secs = cfg.interval_minutes.max(1) as u32 * 60;
     let body = serde_json::json!({
@@ -968,7 +968,7 @@ pub fn k2so_agents_install_heartbeat() -> Result<(), String> {
 #[tauri::command]
 pub fn k2so_agents_apply_wake_scheduler() -> Result<String, String> {
     let client = crate::daemon_client::DaemonClient::try_connect()?;
-    let settings = k2so_core::app_settings::load();
+    let settings = k2_core::app_settings::load();
     let cfg = &settings.wake_scheduler;
     let body = serde_json::json!({
         "mode": cfg.mode,
@@ -1008,14 +1008,14 @@ pub fn k2so_agents_update_heartbeat_projects() -> Result<(), String> {
 // ── Agent Editor ───────────────────────────────────────────────────────
 
 /// Get full context needed for the AIFileEditor agent editing session.
-/// Body lives in `k2so_core::workspace::agent_editor::k2so_agents_get_editor_context`
+/// Body lives in `k2_core::workspace::agent_editor::k2so_agents_get_editor_context`
 /// (Phase 2 Unit 7d).
 #[tauri::command]
 pub fn k2so_agents_get_editor_context(
     project_path: String,
     agent_name: String,
 ) -> Result<serde_json::Value, String> {
-    k2so_core::workspace::agent_editor::k2so_agents_get_editor_context(project_path, agent_name)
+    k2_core::workspace::agent_editor::k2so_agents_get_editor_context(project_path, agent_name)
 }
 
 // 0.39.0 cleanup: `k2so_agents_preview_agent_context` + the
@@ -1024,12 +1024,12 @@ pub fn k2so_agents_get_editor_context(
 // zero React/CLI/test callers. The on-disk preview is reconstructed
 // on demand by `k2so_agents_get_editor_context` (which the editor
 // actually uses). Core
-// `k2so_core::workspace::agent_editor::k2so_agents_preview_agent_context`
+// `k2_core::workspace::agent_editor::k2so_agents_preview_agent_context`
 // stays available for in-process callers.
 
 /// Save an agent's agent.md file, creating a timestamped backup of the
 /// previous version. Body lives in
-/// `k2so_core::workspace::agent_editor::k2so_agents_save_agent_md`
+/// `k2_core::workspace::agent_editor::k2so_agents_save_agent_md`
 /// (Phase 2 Unit 7d).
 #[tauri::command]
 pub fn k2so_agents_save_agent_md(
@@ -1037,12 +1037,12 @@ pub fn k2so_agents_save_agent_md(
     agent_name: String,
     content: String,
 ) -> Result<(), String> {
-    k2so_core::workspace::agent_editor::k2so_agents_save_agent_md(project_path, agent_name, content)
+    k2_core::workspace::agent_editor::k2so_agents_save_agent_md(project_path, agent_name, content)
 }
 
 // ── Workspace Session (DB-tracked) ───────────────────────────────────────
 
-/// Body lives in `k2so_core::workspace::relations::workspace_session_get`
+/// Body lives in `k2_core::workspace::relations::workspace_session_get`
 /// (Phase 2 Unit 7d). Phase 2 close-out dropped the `_state` parameter
 /// alongside the deletion of `AppState`; the renderer's `invoke()`
 /// payload never set it, so this is binary-compatible.
@@ -1050,7 +1050,7 @@ pub fn k2so_agents_save_agent_md(
 pub fn workspace_session_get(
     project_id: String,
 ) -> Result<Option<WorkspaceSession>, String> {
-    k2so_core::workspace::relations::workspace_session_get(project_id)
+    k2_core::workspace::relations::workspace_session_get(project_id)
 }
 
 /// 0.37.12 — explicitly set the pinned chat tab's Claude session id
@@ -1077,21 +1077,21 @@ pub fn workspace_session_set_session_id(
 
 // ── Workspace Relations ─────────────────────────────────────────────────
 
-/// Bodies live in `k2so_core::workspace::relations::workspace_relations_*`
+/// Bodies live in `k2_core::workspace::relations::workspace_relations_*`
 /// (Phase 2 Unit 7d). Phase 2 close-out dropped the `_state` arg
 /// alongside the deletion of `AppState`.
 #[tauri::command]
 pub fn workspace_relations_list(
     project_id: String,
 ) -> Result<Vec<WorkspaceRelation>, String> {
-    k2so_core::workspace::relations::workspace_relations_list(project_id)
+    k2_core::workspace::relations::workspace_relations_list(project_id)
 }
 
 #[tauri::command]
 pub fn workspace_relations_list_incoming(
     project_id: String,
 ) -> Result<Vec<WorkspaceRelation>, String> {
-    k2so_core::workspace::relations::workspace_relations_list_incoming(project_id)
+    k2_core::workspace::relations::workspace_relations_list_incoming(project_id)
 }
 
 #[tauri::command]
@@ -1100,7 +1100,7 @@ pub fn workspace_relations_create(
     target_project_id: String,
     relation_type: Option<String>,
 ) -> Result<WorkspaceRelation, String> {
-    k2so_core::workspace::relations::workspace_relations_create(
+    k2_core::workspace::relations::workspace_relations_create(
         source_project_id,
         target_project_id,
         relation_type,
@@ -1109,20 +1109,20 @@ pub fn workspace_relations_create(
 
 #[tauri::command]
 pub fn workspace_relations_delete(id: String) -> Result<(), String> {
-    k2so_core::workspace::relations::workspace_relations_delete(id)
+    k2_core::workspace::relations::workspace_relations_delete(id)
 }
 
 // ── Skill File Generation ────────────────────────────────────────────
 
 /// Regenerate SKILL.md files for all agents in a workspace.
 /// Called on app startup (migration) and via CLI `k2so skills regenerate`.
-/// Core logic lives in `k2so_core::skills::crud::regenerate_skills`
+/// Core logic lives in `k2_core::skills::crud::regenerate_skills`
 /// (relocated during Phase 2.5d).
 #[tauri::command]
 pub fn k2so_agents_regenerate_skills(
     project_path: String,
 ) -> Result<serde_json::Value, String> {
-    k2so_core::skills::crud::regenerate_skills(project_path)
+    k2_core::skills::crud::regenerate_skills(project_path)
 }
 
 /// Write the canonical SKILL.md and symlink from all harness discovery paths.
@@ -1149,7 +1149,7 @@ pub fn k2so_agents_regenerate_skills(
 /// into every harness discovery path. `./CLAUDE.md` joins that list as
 /// of 0.32.7, replacing the separately-generated workspace CLAUDE.md.
 pub fn write_workspace_skill_file(project_path: &str) {
-    k2so_core::workspace::skill_regen::write_workspace_skill_file(project_path)
+    k2_core::workspace::skill_regen::write_workspace_skill_file(project_path)
 }
 
 /// Variant that lets callers pass a pre-composed body (typically the
@@ -1175,7 +1175,7 @@ pub fn write_workspace_skill_file(project_path: &str) {
 ///   8. Stamp .k2so/.last-skill-regen so subsequent drift-adoption mtime
 ///      comparisons have a reference point.
 pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Option<&str>) {
-    k2so_core::workspace::skill_regen::write_workspace_skill_file_with_body(project_path, base_body)
+    k2_core::workspace::skill_regen::write_workspace_skill_file_with_body(project_path, base_body)
 }
 
 // SKILL scaffolding cluster (write_workspace_skill_file_with_body,
@@ -1193,19 +1193,19 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
 // #[tauri::command] wrappers that survive this unit forward to the
 // k2so-core entry points; the rest is gone from this file.
 // Phase 2.5d split that core module into four canonical homes (under
-// `k2so_core::workspace::{harness, migrations, skill_writer, teardown}`).
+// `k2_core::workspace::{harness, migrations, skill_writer, teardown}`).
 // Re-export each symbol from its post-split location; the external
 // names at this `commands::k2so_agents::*` boundary stay the same.
-pub use k2so_core::workspace::harness::{
+pub use k2_core::workspace::harness::{
     HARNESS_WORKSPACE_FILES, WorkspacePreviewEntry,
 };
-pub use k2so_core::workspace::migrations::{
+pub use k2_core::workspace::migrations::{
     detect_interrupted_regen, harvest_per_agent_claude_md_files,
 };
-pub use k2so_core::workspace::skill_regen::{
+pub use k2_core::workspace::skill_regen::{
     ensure_all_skills_up_to_date, SKILL_USER_NOTES_SENTINEL, USER_NOTES_PLACEHOLDER,
 };
-pub use k2so_core::workspace::teardown::{
+pub use k2_core::workspace::teardown::{
     teardown_workspace_harness_files, TeardownMode, TeardownResult,
 };
 
@@ -1214,19 +1214,19 @@ pub fn k2so_agents_teardown_workspace(
     project_path: String,
     mode: String,
 ) -> Result<Vec<TeardownResult>, String> {
-    k2so_core::workspace::teardown::k2so_agents_teardown_workspace(project_path, mode)
+    k2_core::workspace::teardown::k2so_agents_teardown_workspace(project_path, mode)
 }
 
 #[tauri::command]
 pub fn k2so_agents_preview_workspace_ingest(
     project_path: String,
 ) -> Result<Vec<WorkspacePreviewEntry>, String> {
-    k2so_core::workspace::harness::k2so_agents_preview_workspace_ingest(project_path)
+    k2_core::workspace::harness::k2so_agents_preview_workspace_ingest(project_path)
 }
 
 #[tauri::command]
 pub fn k2so_agents_run_workspace_ingest(project_path: String) -> Result<(), String> {
-    k2so_core::workspace::harness::k2so_agents_run_workspace_ingest(project_path)
+    k2_core::workspace::harness::k2so_agents_run_workspace_ingest(project_path)
 }
 
 // ══════════════════════════════════════════════════════════════════════

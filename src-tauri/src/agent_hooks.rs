@@ -20,9 +20,9 @@
 
 use tauri::AppHandle;
 
-// Port + token moved to k2so_core::hook_config so the terminal backend
+// Port + token moved to k2_core::hook_config so the terminal backend
 // (also in k2so-core) can read them without a circular dep.
-use k2so_core::hook_config;
+use k2_core::hook_config;
 
 // Ring buffer + canonical event mapping + URL query parsing now live
 // in k2so-core so the daemon can share them. The Tauri-side HTTP
@@ -32,7 +32,7 @@ use k2so_core::hook_config;
 // imports are gated behind `#[cfg(test)]` to keep release builds
 // warning-clean.
 #[cfg(test)]
-use k2so_core::agent_hooks::{
+use k2_core::agent_hooks::{
     get_recent_events, map_event_type, record_recent_event, urldecode,
     AgentLifecycleEvent, RecentEvent,
 };
@@ -143,7 +143,7 @@ pub fn k2so_sessions_list_for_workspace(path: String) -> Result<String, String> 
 
 /// Get the port the notification server is listening on. Thin
 /// re-export kept for existing callers (`crate::agent_hooks::get_port`);
-/// the real static lives in `k2so_core::hook_config`.
+/// the real static lives in `k2_core::hook_config`.
 #[allow(dead_code)]
 pub fn get_port() -> u16 {
     hook_config::get_port()
@@ -165,7 +165,7 @@ fn generate_token() -> String {
 
 /// Canonical agent lifecycle event types.
 // AgentLifecycleEvent / map_event_type / parse_query_params / urldecode
-// all moved to k2so_core::agent_hooks (imported at the top of this
+// all moved to k2_core::agent_hooks (imported at the top of this
 // file). The daemon's future HTTP handlers share the same helpers so
 // the canonical event bucket list can't drift between host and daemon.
 
@@ -186,7 +186,7 @@ fn shell_escape(s: &str) -> String {
 // removed: the equivalent surface lives on the daemon as
 // `/cli/agents/mode`, `/cli/agents/settings/*`, and
 // `/cli/workspace/remove` (see crates/k2so-daemon/src/cli.rs), and
-// the daemon delegates into `k2so_core::workspace::*` for the
+// the daemon delegates into `k2_core::workspace::*` for the
 // actual DB work — the canonical single source of truth.
 //
 // The workspace-harness teardown side of `cli_remove_workspace`
@@ -530,8 +530,8 @@ pub fn register_all_hooks(_app_handle: &AppHandle, hook_script: &str) {
     }
 
     if !failures.is_empty() {
-        k2so_core::agent_hooks::emit(
-            k2so_core::agent_hooks::HookEvent::HookInjectionFailed,
+        k2_core::agent_hooks::emit(
+            k2_core::agent_hooks::HookEvent::HookInjectionFailed,
             serde_json::json!({ "failures": failures }),
         );
     }
@@ -551,7 +551,7 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_recent_events() {
-        k2so_core::agent_hooks::clear_recent_events();
+        k2_core::agent_hooks::clear_recent_events();
     }
 
     fn snapshot_recent_events() -> Vec<RecentEvent> {

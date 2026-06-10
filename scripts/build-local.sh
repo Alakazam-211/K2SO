@@ -118,7 +118,7 @@ rm -rf target/release/bundle target/release/deps/libk2so_lib* \
        target/release/deps/k2so-* target/release/deps/k2so_core-* \
        target/release/deps/k2so_daemon-* target/release/incremental \
        src-tauri/target/release 2>/dev/null || true
-cargo clean -p k2so -p k2so-daemon -p k2so-core 2>&1 | tail -2 || true
+cargo clean -p k2so -p k2-daemon -p k2-core 2>&1 | tail -2 || true
 bun run tauri build
 
 # ── Step 2.1: Verify the bundled Tauri binary actually has the new version ──
@@ -139,7 +139,7 @@ echo "  Build complete."
 # ── Step 2.5: Build + bundle k2so-daemon sidecar ──
 echo ""
 echo "Step 2.5: Bundling k2so-daemon sidecar..."
-cargo build --release -p k2so-daemon
+cargo build --release -p k2-daemon
 DAEMON_SRC="target/release/k2so-daemon"
 if [ ! -x "$DAEMON_SRC" ]; then
     echo "  FATAL: k2so-daemon not at $DAEMON_SRC after cargo build" >&2

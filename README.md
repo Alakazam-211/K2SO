@@ -1,30 +1,40 @@
 <p align="center">
-  <img src="resources/icon.png" width="128" height="128" alt="K2SO">
+  <img src="resources/icon.png" width="128" height="128" alt="K2">
 </p>
 
-<h1 align="center">K2SO</h1>
+<h1 align="center">K2</h1>
 
 <p align="center">
-  <strong>Your AI Workspace IDE</strong>
+  <strong>The workspace where your AI agents run</strong><br>
+  <sub>by Alakazam Labs</sub>
 </p>
 
 <p align="center">
   <a href="https://github.com/Alakazam-211/K2SO/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
-  <a href="https://k2so.sh"><img src="https://img.shields.io/badge/download-k2so.sh-8B5CF6.svg" alt="Download"></a>
+  <a href="https://k2.dev"><img src="https://img.shields.io/badge/k2.dev-8B5CF6.svg" alt="k2.dev"></a>
   <img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="macOS">
   <img src="https://img.shields.io/badge/built_with-Tauri_v2-24C8D8.svg" alt="Tauri v2">
 </p>
 
 ---
 
-K2SO is **not a traditional IDE**. It is a workspace for orchestrating AI coding agents through CLI tools, managing git worktrees, and reviewing documents -- all from a terminal-first interface built with Tauri and Rust.
+K2 is **not a traditional IDE**. It's agent server software — a workspace that hosts, runs, and monitors your AI coding agents through the CLI tools you already use, manages git worktrees, and reviews documents, all from a terminal-first interface built with Tauri and Rust.
 
-Think of it as a command center: you add your projects, launch AI agents (Claude, Codex, Gemini, Copilot, Aider, and more) in GPU-accelerated terminals, review markdown and PDFs in dark-themed viewers, and organize everything with focus groups and workspace layouts.
+Think of it as a command center: you add your projects, launch AI agents (Claude, Codex, Gemini, Copilot, Aider, and more) in GPU-accelerated terminals, orchestrate them autonomously, review markdown and PDFs in dark-themed viewers, and reach the whole thing remotely from any device.
 
-<!-- TODO: Add screenshot -->
-<!-- ![K2SO Screenshot](docs/screenshot.png) -->
+<!-- Hero screenshot — drop the image at docs/screenshot.png, then uncomment: -->
+<!-- ![K2 Screenshot](docs/screenshot.png) -->
 
 ## Features
+
+### Remote Access — K2 Connect
+Reach your machine from anywhere. **K2 Connect** exposes your local K2 daemon over a secure tunnel so you can drive your workspaces — terminals, agents, and files — from another device through a custom `your-name.k2.dev` subdomain.
+
+- **Remote workspaces** — open and operate a folder on your home or work machine from across the network
+- **Remote files & Clone-to** — browse, upload, and one-click migrate an entire workspace to another K2 machine
+- **Multi-user access** — owner-managed connect users with roles (Owner / Admin / Member), a configurable password policy, and session controls
+
+K2 Connect's hosting backbone (tunnel control plane + relay) runs on dedicated infrastructure and lives in a **separate, private repository** — this open-core repo is the K2 app and daemon; the hosted relay is the closed half.
 
 ### AI Workspace Assistant (Cmd+L)
 A local LLM (GGUF via llama.cpp with Metal acceleration) translates natural language into workspace operations -- split panes, open files, launch terminals, arrange layouts -- without leaving the keyboard.
@@ -41,10 +51,10 @@ Add your own custom agent presets or edit the built-ins. Set a default agent and
 
 ### Autonomous Agent System (BETA)
 
-K2SO includes a closed-loop agent orchestration system where agents at every level are self-aware, self-configuring, and event-driven.
+K2 includes a closed-loop agent orchestration system where agents at every level are self-aware, self-configuring, and event-driven.
 
 **Agent Hierarchy:**
-- **K2SO Agent** -- Top-level planner that coordinates across workspaces, creates PRDs and milestones
+- **K2 Agent** -- Top-level planner that coordinates across workspaces, creates PRDs and milestones
 - **Coordinator** -- Per-workspace orchestrator that delegates work to agent templates, reviews completed branches
 - **Agent Templates** -- Specialized agents (backend-eng, frontend-eng, qa-tester) that work in isolated worktrees
 - **Custom Agents** -- User-defined agents with adaptive heartbeat timing
@@ -53,7 +63,7 @@ K2SO includes a closed-loop agent orchestration system where agents at every lev
 The heartbeat system uses a two-tier cost model. A local LLM (Qwen 1.5B, running on-device via llama.cpp with Metal acceleration) evaluates whether expensive cloud sessions should be launched. The flow: filesystem check ($0) -> lock check ($0) -> quality gate ($0) -> local LLM decision ($0) -> cloud model session (only if the LLM approves). Agents self-adjust their check-in frequency (1 min during active work, 1 hour when idle). Auto-backoff increases the interval by 1.5x after 3 consecutive idle wakes. Active hours windows prevent overnight cost waste.
 
 **Event-Driven via Claude Code Channels:**
-Coordinators can run as persistent Claude sessions with MCP channel integration (`--channels`). K2SO implements an MCP channel server that pushes events (new work items, git changes, CI results, agent lifecycle events) directly into the running session. No polling delay, no context reload -- the agent maintains full session context across events.
+Coordinators can run as persistent Claude sessions with MCP channel integration (`--channels`). K2 implements an MCP channel server that pushes events (new work items, git changes, CI results, agent lifecycle events) directly into the running session. No polling delay, no context reload -- the agent maintains full session context across events.
 
 **Self-Configuring Agents:**
 Coordinators create and configure skill profiles via CLI (`k2so skills create`, `k2so skills profile`). Skill profiles (`SKILL.md`) are editable with AI assistance via the built-in AIFileEditor. Each Coordinator knows its workspace's available skills by reading those files before applying a role to work.
@@ -73,7 +83,7 @@ The `k2so` CLI can read from and write to any running terminal session. Agents c
 - `k2so terminal write <id> "message"` -- (advanced/internal) send text to a running terminal by id (raw PTY keystrokes)
 - `k2so terminal read <id> --lines 50` -- (advanced/internal) read the last N lines from a terminal buffer
 
-The `terminal write` and `terminal read` verbs are internal-tier — used by orchestrators that integrate with K2SO. For everyday use, prefer `k2so msg <workspace> "..."` (live cross-workspace delivery) and `k2so inbox` (async email-style inbox).
+The `terminal write` and `terminal read` verbs are internal-tier — used by orchestrators that integrate with K2. For everyday use, prefer `k2so msg <workspace> "..."` (live cross-workspace delivery) and `k2so inbox` (async email-style inbox).
 
 **Running Agents Panel (Cmd+J):**
 A searchable overlay showing all active CLI LLM sessions across workspaces. Click to navigate, copy terminal ID for CLI reference, or send messages directly to running agents. TopBar button shows active agent count.
@@ -90,7 +100,7 @@ The Chat tab for Coordinators and Worktrees follows a three-step lifecycle:
 3. **Fresh** -- if no terminal and no session, start a new Claude session
 
 **Launch Failure Detection:**
-If an agent's terminal exits within 5 seconds of starting, K2SO treats it as a launch failure, notifies the user, and retries once after 30 seconds.
+If an agent's terminal exits within 5 seconds of starting, K2 treats it as a launch failure, notifies the user, and retries once after 30 seconds.
 
 ### Workspace States
 
@@ -114,7 +124,7 @@ Work items are tagged by source type (feature, issue, crash, security, audit, ma
 Users can create custom states with any combination of capability levels. States are defined in Settings and assigned per-workspace.
 
 ### Agent Lifecycle Detection
-K2SO detects when AI agents start, stop, or request permissions via a hook system that integrates with Claude Code, Cursor, and Gemini CLI. Active agents show real-time status indicators (working, awaiting permission, done) in the sidebar.
+K2 detects when AI agents start, stop, or request permissions via a hook system that integrates with Claude Code, Cursor, and Gemini CLI. Active agents show real-time status indicators (working, awaiting permission, done) in the sidebar.
 
 ### Active Workspaces Dock
 A collapsible dock at the bottom of the sidebar shows projects with running agents or recent activity. Switch between active workspaces with Cmd+1-9. Projects appear automatically when agents run and can be pinned or dismissed.
@@ -167,7 +177,7 @@ Upload custom workspace icons with a built-in crop dialog -- drag to position, s
 ## Installation
 
 ### Download
-Get the latest release from [k2so.sh](https://k2so.sh) or the [GitHub Releases](https://github.com/Alakazam-211/K2SO/releases) page.
+Get the latest release from the [GitHub Releases](https://github.com/Alakazam-211/K2SO/releases) page. Project home: [k2.dev](https://k2.dev).
 
 ### Build from Source
 
@@ -224,15 +234,15 @@ For the full technical architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 ## Testing
 
-Tests live in the `tests/` directory. Run them against a running K2SO instance.
+Tests live in the `tests/` directory. Run them against a running K2 instance.
 
 ### Test Suites
 
 | Suite | Tests | Prerequisites | What it validates |
 |-------|-------|--------------|-------------------|
-| `cli-integration-test.sh` | 69 pass, 0 skip | Running K2SO | Every CLI command, delegate, review approve/reject, cross-workspace work, heartbeat, terminal I/O |
-| `behavior-test-tier1.sh` | 25 pass | Running K2SO | Auto-backoff math, lock prevention, priority ordering, session resume, CLAUDE.md content, event queue flow, transcript pruning |
-| `behavior-test-tier2.sh` | 8+ pass | Running K2SO + registered workspace | Source gating by state, locked state blocking, state persistence |
+| `cli-integration-test.sh` | 69 pass, 0 skip | Running K2 | Every CLI command, delegate, review approve/reject, cross-workspace work, heartbeat, terminal I/O |
+| `behavior-test-tier1.sh` | 25 pass | Running K2 | Auto-backoff math, lock prevention, priority ordering, session resume, CLAUDE.md content, event queue flow, transcript pruning |
+| `behavior-test-tier2.sh` | 8+ pass | Running K2 + registered workspace | Source gating by state, locked state blocking, state persistence |
 | `behavior-test-tier3.sh` | 22 pass | sqlite3 only | Migration safety, heartbeat script correctness, agent templates, LLM triage prompt validation |
 
 Tests auto-register workspaces via `k2so workspace open` -- no manual UI setup required. Total: **116+ tests, 0 failures, 0 skipped**.
@@ -240,13 +250,13 @@ Tests auto-register workspaces via `k2so workspace open` -- no manual UI setup r
 ### Running Tests
 
 ```bash
-# 1. Start K2SO
+# 1. Start K2
 cargo tauri dev
 
 # 2. Run all test suites (workspaces auto-register)
 ./tests/cli-integration-test.sh    # Full CLI + agent orchestration
 ./tests/behavior-test-tier1.sh     # Behavioral (filesystem-based)
-./tests/behavior-test-tier3.sh     # Unit-style (no K2SO needed)
+./tests/behavior-test-tier3.sh     # Unit-style (no K2 needed)
 
 # 3. For DB-dependent tests:
 ./tests/behavior-test-tier2.sh

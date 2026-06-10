@@ -1,15 +1,15 @@
 //! Phase 2.1c Item 2 — Tauri command wrappers for the workspace inbox
-//! primitive (`k2so_core::inbox`).
+//! primitive (`k2_core::inbox`).
 //!
-//! These are thin shims around `k2so_core::inbox::*`. The renderer
+//! These are thin shims around `k2_core::inbox::*`. The renderer
 //! invokes these via `invoke('k2so_inbox_*', ...)`. They mirror the
 //! daemon-side `/cli/inbox/*` HTTP routes — same arguments, same
 //! return shapes — so the React layer and the CLI see the same data.
 //!
 //! Daemon-first per `feedback_daemon_first.md`: all the logic lives
-//! in `k2so_core::inbox`. These commands hold zero business logic.
+//! in `k2_core::inbox`. These commands hold zero business logic.
 
-use k2so_core::inbox::InboxItem;
+use k2_core::inbox::InboxItem;
 
 // ── Read ───────────────────────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ pub fn k2so_inbox_list(
 ) -> Result<Vec<InboxItem>, String> {
     let folder = folder.unwrap_or_default();
     let workspace = std::path::PathBuf::from(&project_path);
-    Ok(k2so_core::inbox::list_folder(&workspace, &folder))
+    Ok(k2_core::inbox::list_folder(&workspace, &folder))
 }
 
 /// Lightweight count of top-level inbox items. Lets badge call sites
@@ -30,7 +30,7 @@ pub fn k2so_inbox_list(
 #[tauri::command]
 pub fn k2so_inbox_count(project_path: String) -> Result<usize, String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    Ok(k2so_core::inbox::list_root(&workspace).len())
+    Ok(k2_core::inbox::list_root(&workspace).len())
 }
 
 /// List folders the workspace has under `.k2so/inbox/`. Standard
@@ -38,21 +38,21 @@ pub fn k2so_inbox_count(project_path: String) -> Result<usize, String> {
 #[tauri::command]
 pub fn k2so_inbox_folders(project_path: String) -> Result<Vec<String>, String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    Ok(k2so_core::inbox::list_folders(&workspace))
+    Ok(k2_core::inbox::list_folders(&workspace))
 }
 
 /// Read the full markdown content of one item by id (filename stem).
 #[tauri::command]
 pub fn k2so_inbox_read(project_path: String, id: String) -> Result<String, String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    k2so_core::inbox::read_by_id(&workspace, &id)
+    k2_core::inbox::read_by_id(&workspace, &id)
 }
 
 /// Substring search across all inbox items (title + filename + body).
 #[tauri::command]
 pub fn k2so_inbox_search(project_path: String, query: String) -> Result<Vec<InboxItem>, String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    Ok(k2so_core::inbox::search(&workspace, &query))
+    Ok(k2_core::inbox::search(&workspace, &query))
 }
 
 // ── Write ──────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ pub fn k2so_inbox_compose(
     from: Option<String>,
 ) -> Result<InboxItem, String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    k2so_core::inbox::compose(
+    k2_core::inbox::compose(
         &workspace,
         &title,
         &body,
@@ -86,14 +86,14 @@ pub fn k2so_inbox_move(
     folder: String,
 ) -> Result<(), String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    k2so_core::inbox::move_item(&workspace, &id, &folder).map(|_| ())
+    k2_core::inbox::move_item(&workspace, &id, &folder).map(|_| ())
 }
 
 /// Move an item to the standard `done/` folder.
 #[tauri::command]
 pub fn k2so_inbox_archive(project_path: String, id: String) -> Result<(), String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    k2so_core::inbox::archive(&workspace, &id).map(|_| ())
+    k2_core::inbox::archive(&workspace, &id).map(|_| ())
 }
 
 /// Send an item to the macOS Recycle Bin. Recoverable from Trash.
@@ -101,7 +101,7 @@ pub fn k2so_inbox_archive(project_path: String, id: String) -> Result<(), String
 #[tauri::command]
 pub fn k2so_inbox_delete(project_path: String, id: String) -> Result<(), String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    k2so_core::inbox::delete(&workspace, &id)
+    k2_core::inbox::delete(&workspace, &id)
 }
 
 /// Append a reply block to an existing inbox item.
@@ -112,5 +112,5 @@ pub fn k2so_inbox_respond(
     text: String,
 ) -> Result<(), String> {
     let workspace = std::path::PathBuf::from(&project_path);
-    k2so_core::inbox::respond(&workspace, &id, &text).map(|_| ())
+    k2_core::inbox::respond(&workspace, &id, &text).map(|_| ())
 }

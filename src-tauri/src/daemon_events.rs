@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{client::client, Message};
 
-use k2so_core::log_debug;
+use k2_core::log_debug;
 
 /// Wire shape matches `crates/k2so-daemon/src/events.rs::WireEvent`.
 #[derive(Debug, Clone, Deserialize)]

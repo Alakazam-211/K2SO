@@ -2996,6 +2996,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "k2-core"
+version = "0.39.47"
+dependencies = [
+ "alacritty_terminal",
+ "argon2",
+ "base64 0.22.1",
+ "chrono",
+ "cocoa",
+ "croner",
+ "dirs 5.0.1",
+ "encoding_rs",
+ "flate2",
+ "fontdue",
+ "git2",
+ "ignore",
+ "image",
+ "k2-core",
+ "libc",
+ "llama-cpp-2",
+ "mio",
+ "ngrok",
+ "objc",
+ "parking_lot",
+ "polling",
+ "portable-pty",
+ "qoi",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "signal-hook 0.3.18",
+ "signal-hook-mio",
+ "subtle",
+ "tar",
+ "tokio",
+ "trash",
+ "tungstenite 0.24.0",
+ "url",
+ "uuid",
+ "vte",
+]
+
+[[package]]
+name = "k2-daemon"
+version = "0.39.47"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dirs 5.0.1",
+ "futures-util",
+ "getrandom 0.2.17",
+ "k2-core",
+ "libc",
+ "minisign-verify",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "k2so"
 version = "0.39.47"
 dependencies = [
@@ -3015,7 +3084,7 @@ dependencies = [
  "glob",
  "ignore",
  "image",
- "k2so-core",
+ "k2-core",
  "keyring",
  "libc",
  "mio",
@@ -3054,75 +3123,6 @@ dependencies = [
  "url",
  "uuid",
  "vte",
-]
-
-[[package]]
-name = "k2so-core"
-version = "0.39.47"
-dependencies = [
- "alacritty_terminal",
- "argon2",
- "base64 0.22.1",
- "chrono",
- "cocoa",
- "croner",
- "dirs 5.0.1",
- "encoding_rs",
- "flate2",
- "fontdue",
- "git2",
- "ignore",
- "image",
- "k2so-core",
- "libc",
- "llama-cpp-2",
- "mio",
- "ngrok",
- "objc",
- "parking_lot",
- "polling",
- "portable-pty",
- "qoi",
- "reqwest 0.12.28",
- "rusqlite",
- "rustix",
- "serde",
- "serde_json",
- "serde_yaml",
- "signal-hook 0.3.18",
- "signal-hook-mio",
- "subtle",
- "tar",
- "tokio",
- "trash",
- "tungstenite 0.24.0",
- "url",
- "uuid",
- "vte",
-]
-
-[[package]]
-name = "k2so-daemon"
-version = "0.39.47"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "dirs 5.0.1",
- "futures-util",
- "getrandom 0.2.17",
- "k2so-core",
- "libc",
- "minisign-verify",
- "parking_lot",
- "reqwest 0.12.28",
- "rusqlite",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-tungstenite",
- "uuid",
 ]
 
 [[package]]

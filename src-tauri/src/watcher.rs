@@ -17,7 +17,7 @@ use tauri::Emitter;
 /// SQL-free / DB-free / LLM-free / terminal-free.
 ///
 /// `parking_lot::Mutex` (matches the rest of the codebase — see
-/// `k2so_core::db::shared`) is used so we keep the no-poison API
+/// `k2_core::db::shared`) is used so we keep the no-poison API
 /// invariant. `LazyLock` lets us skip a `.manage()` boot step entirely;
 /// the first `fs_watch_dir` / `fs_unwatch_dir` call constructs the map.
 static WATCHERS: LazyLock<Mutex<HashMap<String, RecommendedWatcher>>> =

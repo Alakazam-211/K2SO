@@ -99,7 +99,7 @@ sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" \
     src-tauri/Cargo.toml \
     crates/k2so-core/Cargo.toml \
     crates/k2so-daemon/Cargo.toml
-sed -i '' "s/K2SO_CLI_VERSION=\"[^\"]*\"/K2SO_CLI_VERSION=\"${VERSION}\"/" cli/k2so
+sed -i '' "s/K2_CLI_VERSION=\"[^\"]*\"/K2_CLI_VERSION=\"${VERSION}\"/" cli/k2
 echo "  Done."
 
 # ── Step 1.5: Verify WHATS_NEW.md has an entry for this version ──
@@ -165,7 +165,7 @@ echo "Step 2.5: Bundling k2so-daemon sidecar..."
 # `k2so-daemon` build into `target/release/`. Tauri's bundler writes
 # only its own primary bin into the .app, so we copy k2so-daemon in
 # explicitly.
-cargo build --release -p k2so-daemon
+cargo build --release -p k2-daemon
 DAEMON_SRC="target/release/k2so-daemon"
 if [ ! -x "$DAEMON_SRC" ]; then
     echo "  FATAL: k2so-daemon not at $DAEMON_SRC after cargo build" >&2
