@@ -190,7 +190,7 @@ pub(crate) fn content_hash_of(path: &Path) -> String {
 /// Phase 2.5d: `pub(crate)` so the migration-safety tests can read the
 /// stamp file and assert drift-detection behavior.
 pub(crate) fn read_regen_hashes(project_path: &str) -> std::collections::HashMap<String, String> {
-    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    let stamp_path = crate::workspace_dot_dir(project_path).join(".last-skill-regen");
     let Ok(raw) = fs::read_to_string(&stamp_path) else {
         return std::collections::HashMap::new();
     };
@@ -207,7 +207,7 @@ fn write_regen_hashes(
     project_path: &str,
     hashes: &std::collections::HashMap<String, String>,
 ) {
-    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    let stamp_path = crate::workspace_dot_dir(project_path).join(".last-skill-regen");
     let payload = serde_json::to_string(hashes).unwrap_or_else(|_| "{}".to_string());
     log_if_err(
         "write_regen_hashes",
@@ -238,9 +238,7 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    let regen_marker = PathBuf::from(project_path)
-        .join(".k2so")
-        .join(".regen-in-flight");
+    let regen_marker = crate::workspace_dot_dir(project_path).join(".regen-in-flight");
     log_if_err(
         "regen-in-flight stamp",
         &regen_marker,
@@ -310,7 +308,7 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
     // Step 8: Stamp last-regen hashes
     let mut hashes: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+    let project_md_path = crate::workspace_dot_dir(project_path).join("PROJECT.md");
     let project_hash = content_hash_of(&project_md_path);
     if !project_hash.is_empty() {
         hashes.insert("project_md".to_string(), project_hash);
@@ -339,7 +337,7 @@ fn adopt_workspace_skill_drift(project_path: &str) {
     let Ok(skill_content) = fs::read_to_string(&canonical) else {
         return;
     };
-    let stamp_path = PathBuf::from(project_path).join(".k2so").join(".last-skill-regen");
+    let stamp_path = crate::workspace_dot_dir(project_path).join(".last-skill-regen");
     let last_regen = mtime_secs(&stamp_path);
     let stored_hashes = read_regen_hashes(project_path);
 
@@ -358,7 +356,7 @@ fn adopt_workspace_skill_drift(project_path: &str) {
         SKILL_SOURCE_PROJECT_MD_BEGIN,
         SKILL_SOURCE_PROJECT_MD_END,
     ) {
-        let project_md = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+        let project_md = crate::workspace_dot_dir(project_path).join("PROJECT.md");
         let region_stripped = strip_leading_heading(&region_body);
         let file_body = fs::read_to_string(&project_md)
             .map(|raw| strip_frontmatter(&raw).trim().to_string())
@@ -506,7 +504,7 @@ pub fn append_workspace_source_regions(project_path: &str, preserved_freeform: O
         content.push('\n');
     }
 
-    let project_md = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+    let project_md = crate::workspace_dot_dir(project_path).join("PROJECT.md");
     if let Ok(raw) = fs::read_to_string(&project_md) {
         let stripped = strip_frontmatter(&raw);
         let has_content = stripped.lines().any(|line| {
@@ -784,7 +782,7 @@ pub fn regenerate_workspace_skill(project_path: String) -> Result<String, String
     // unified `k2_core::inbox::*` primitive). The legacy
     // `.k2so/work/inbox/` was retired and the first-boot daemon hook
     // trashes any straggler.
-    let k2so_dir = PathBuf::from(&project_path).join(".k2so");
+    let k2so_dir = crate::workspace_dot_dir(&project_path);
     let _ = fs::create_dir_all(k2so_dir.join("inbox"));
     let _ = fs::create_dir_all(k2so_dir.join("prds"));
 
@@ -1071,7 +1069,7 @@ r#"# {project_name}
     // Clean up the stale `.k2so/CLAUDE.md.disabled` artifact from the
     // pre-symlink era — the disable flow is now "symlink goes away when the
     // workspace is off", not a file rename.
-    let disabled_path = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.disabled");
+    let disabled_path = crate::workspace_dot_dir(&project_path).join("CLAUDE.md.disabled");
     if disabled_path.exists() {
         let _ = fs::remove_file(&disabled_path);
     }

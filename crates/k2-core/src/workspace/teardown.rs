@@ -196,7 +196,7 @@ pub fn teardown_workspace_harness_files(
 
 /// matches the relative harness path.
 fn find_latest_archive(project_path: &str, rel: &str) -> Option<PathBuf> {
-    let migration_root = PathBuf::from(project_path).join(".k2so").join("migration");
+    let migration_root = crate::workspace_dot_dir(project_path).join("migration");
     if !migration_root.is_dir() {
         return None;
     }

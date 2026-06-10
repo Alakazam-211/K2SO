@@ -404,7 +404,7 @@ pub fn k2so_agents_run_workspace_ingest(project_path: String) -> Result<(), Stri
 /// `src-tauri/src/commands/k2so_agents.rs::k2so_agents_disable_workspace_claude_md`.
 pub fn disable_workspace_claude_md(project_path: String) -> Result<(), String> {
     let claude_md = PathBuf::from(&project_path).join("CLAUDE.md");
-    let disabled = PathBuf::from(&project_path).join(".k2so").join("CLAUDE.md.disabled");
+    let disabled = crate::workspace_dot_dir(&project_path).join("CLAUDE.md.disabled");
 
     if claude_md.exists() {
         // Move to .k2so/ rather than delete — preserves any user edits

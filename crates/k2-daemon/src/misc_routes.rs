@@ -96,7 +96,7 @@ pub fn dispatch(path: &str, params: &HashMap<String, String>) -> Option<CliRespo
                             serde_json::to_string(&settings).unwrap_or_default(),
                         ),
                         Err(_) => {
-                            let k2so_dir = std::path::PathBuf::from(&p).join(".k2so");
+                            let k2so_dir = k2_core::workspace_dot_dir(&p);
                             let agents_dir = k2so_dir.join("agents");
                             let has_agents = agents_dir.exists()
                                 && std::fs::read_dir(&agents_dir)

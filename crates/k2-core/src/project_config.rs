@@ -50,7 +50,7 @@ fn merge_value(base: &mut serde_json::Value, overlay: &serde_json::Value) {
 /// Read and merge project configuration with three-tier resolution:
 /// local overlay -> project config -> defaults
 pub fn get_project_config(project_path: &str) -> ProjectConfig {
-    let config_dir = Path::new(project_path).join(".k2so");
+    let config_dir = crate::workspace_dot_dir(project_path);
     let project_config_path = config_dir.join("config.json");
     let local_config_path = config_dir.join("config.local.json");
 
@@ -86,7 +86,7 @@ pub fn set_project_config_value(
     key: &str,
     value: Option<&str>,
 ) -> Result<(), String> {
-    let config_dir = Path::new(project_path).join(".k2so");
+    let config_dir = crate::workspace_dot_dir(project_path);
     let config_path = config_dir.join("config.json");
 
     // Ensure .k2so/ directory exists

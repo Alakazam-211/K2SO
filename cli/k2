@@ -1,28 +1,40 @@
 #!/bin/bash
-# K2SO CLI — Agent interface to K2SO workspace orchestration
-# This script communicates with K2SO's running instance via HTTP.
-# Works inside K2SO terminals (auto-configured) and external terminals
-# (auto-discovers connection from ~/.k2so/heartbeat.{port,token}).
+# K2 CLI — Agent interface to K2 workspace orchestration
+# This script communicates with the K2 daemon via HTTP.
+# Works inside K2 terminals (auto-configured) and external terminals
+# (auto-discovers connection from ~/.k2/heartbeat.{port,token}).
 
 K2_CLI_VERSION="0.39.47"
 
 set -euo pipefail
 
-# Connection details (set by K2SO when creating terminal sessions)
-# Falls back to ~/.k2so/heartbeat.{port,token} for external terminals
+# Connection details (set by K2 when creating terminal sessions)
+# Falls back to ~/.k2/heartbeat.{port,token} for external terminals
 PORT="${K2_PORT:-${K2SO_PORT:-}}"
 TOKEN="${K2_HOOK_TOKEN:-${K2SO_HOOK_TOKEN:-}}"
 
-# Resolve project root: if K2SO_PROJECT_PATH is set, use it directly.
-# Otherwise walk up from CWD to find a .k2so/ directory, skipping $HOME/.k2so.
+# Daemon home: ~/.k2 post-0.40 (the migration leaves ~/.k2so as a compat
+# symlink, so either resolves to the same files — prefer the new name,
+# fall back for a not-yet-migrated machine).
+K2_HOME="${HOME}/.k2"
+[ -d "$K2_HOME" ] || K2_HOME="${HOME}/.k2so"
+
+# Workspace dot-dir for a project root: .k2/ preferred when present,
+# .k2so/ is the 0.x default (Q2 dual-compat; full flip lands pre-1.0.0).
+_ws_dot_dir() {
+    if [ -d "$1/.k2" ]; then echo "$1/.k2"; else echo "$1/.k2so"; fi
+}
+
+# Resolve project root: if K2_PROJECT_PATH is set, use it directly.
+# Otherwise walk up from CWD to find a .k2/ or .k2so/ directory, skipping $HOME.
 # Also handles git worktrees: if CWD is inside a worktree, resolve back to
-# the main repo root where .k2so/ lives.
+# the main repo root where the workspace dot-dir lives.
 PROJECT="${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-$(pwd)}}"
 if [ -z "${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-}}" ]; then
     _dir="$(pwd)"
     _found=""
     while [ "$_dir" != "/" ]; do
-        if [ -d "$_dir/.k2so" ] && [ "$_dir" != "$HOME" ]; then
+        if { [ -d "$_dir/.k2so" ] || [ -d "$_dir/.k2" ]; } && [ "$_dir" != "$HOME" ]; then
             _found="$_dir"
             break
         fi
@@ -36,7 +48,7 @@ if [ -z "${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-}}" ]; then
         # silent exit 128 (GH #16). Swallow it so a non-git CWD just leaves
         # _main_root empty and we fall back to $PWD as PROJECT.
         _main_root=$(git -C "$(pwd)" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/.git$||' || true)
-        if [ -n "$_main_root" ] && [ -d "$_main_root/.k2so" ]; then
+        if [ -n "$_main_root" ] && { [ -d "$_main_root/.k2so" ] || [ -d "$_main_root/.k2" ]; }; then
             _found="$_main_root"
         fi
     fi
@@ -44,9 +56,9 @@ if [ -z "${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-}}" ]; then
     unset _dir _found _main_root
 fi
 
-# Auto-discover connection from ~/.k2so/ if not in a K2SO terminal
+# Auto-discover connection from the daemon home if not in a K2 terminal
 if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
-    K2SO_HOME="${HOME}/.k2so"
+    K2SO_HOME="$K2_HOME"
     if [ -f "${K2SO_HOME}/heartbeat.port" ] && [ -f "${K2SO_HOME}/heartbeat.token" ]; then
         PORT="${PORT:-$(cat "${K2SO_HOME}/heartbeat.port" 2>/dev/null)}"
         TOKEN="${TOKEN:-$(cat "${K2SO_HOME}/heartbeat.token" 2>/dev/null)}"
@@ -65,7 +77,7 @@ _skip_conn_gate=0
 if [ "$_skip_conn_gate" != "1" ] && { [ -z "$PORT" ] || [ -z "$TOKEN" ]; }; then
     echo "Error: Cannot connect to K2SO." >&2
     echo "Either run this from a K2SO terminal, or ensure K2SO is running." >&2
-    echo "(Connection details: ~/.k2so/heartbeat.port and ~/.k2so/heartbeat.token)" >&2
+    echo "(Connection details: ~/.k2/heartbeat.port and ~/.k2/heartbeat.token)" >&2
     exit 1
 fi
 unset _skip_conn_gate
@@ -804,11 +816,17 @@ else:
 # NOT duplicate that wiring here; the CLI only does start/stop/restart
 # against an already-installed plist.
 
-_daemon_label="com.k2so.k2so-daemon"
+# dev.k2.daemon post-0.40; fall back to the pre-rename label when only
+# the old plist is installed (machine not yet migrated).
+_daemon_label="dev.k2.daemon"
 _daemon_plist="$HOME/Library/LaunchAgents/${_daemon_label}.plist"
-_daemon_port_file="$HOME/.k2so/daemon.port"
-_daemon_token_file="$HOME/.k2so/daemon.token"
-_daemon_stdout_log="$HOME/.k2so/daemon.stdout.log"
+if [ ! -f "$_daemon_plist" ] && [ -f "$HOME/Library/LaunchAgents/com.k2so.k2so-daemon.plist" ]; then
+    _daemon_label="com.k2so.k2so-daemon"
+    _daemon_plist="$HOME/Library/LaunchAgents/${_daemon_label}.plist"
+fi
+_daemon_port_file="$K2_HOME/daemon.port"
+_daemon_token_file="$K2_HOME/daemon.token"
+_daemon_stdout_log="$K2_HOME/daemon.stdout.log"
 
 cmd_daemon_status() {
     local as_json=0
@@ -952,7 +970,7 @@ cmd_daemon_restart() {
 
     # ── REMOTE restart ────────────────────────────────────────────────
     if [ -n "$host" ]; then
-        # Default the owner token from ~/.k2so/daemon.token when --token
+        # Default the owner token from ~/.k2/daemon.token when --token
         # is omitted (works when targeting the local daemon's own base URL).
         if [ -z "$token" ]; then
             if [ -f "$_daemon_token_file" ] && [ -s "$_daemon_token_file" ]; then
@@ -1045,7 +1063,7 @@ cmd_daemon_uninstall() {
     [ "${1:-}" = "--yes" ] || [ "${1:-}" = "-y" ] && force=1
     if [ "$force" != "1" ]; then
         echo "This will remove the K2SO daemon launch agent and stop the daemon."
-        echo "Your workspace data (~/.k2so/k2so.db, agent files) is preserved."
+        echo "Your workspace data (~/.k2/k2so.db, agent files) is preserved."
         printf "Proceed? [y/N] "
         read -r answer
         case "$answer" in
@@ -1326,7 +1344,7 @@ WantedBy=default.target
 EOF
             echo "Wrote systemd user unit: $svc_path"
             echo "Enable + start it with:"
-            echo "  systemctl --user daemon-reload && systemctl --user enable --now k2so-daemon"
+            echo "  systemctl --user daemon-reload && systemctl --user enable --now k2-daemon"
         else
             mkdir -p "$(dirname "$svc_path")"
             cat > "$svc_path" <<EOF
@@ -1345,9 +1363,9 @@ EOF
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/.k2so/daemon.stdout.log</string>
+    <string>$HOME/.k2/daemon.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.k2so/daemon.stderr.log</string>
+    <string>$HOME/.k2/daemon.stderr.log</string>
 </dict>
 </plist>
 EOF
@@ -1610,10 +1628,10 @@ import json, sys, subprocess, os
 port = os.environ.get('K2SO_PORT', '')
 token = os.environ.get('K2SO_HOOK_TOKEN', '')
 if not port:
-    try: port = open(os.path.expanduser('~/.k2so/heartbeat.port')).read().strip()
+    try: port = open(os.path.expanduser('$K2_HOME/heartbeat.port')).read().strip()
     except: pass
 if not token:
-    try: token = open(os.path.expanduser('~/.k2so/heartbeat.token')).read().strip()
+    try: token = open(os.path.expanduser('$K2_HOME/heartbeat.token')).read().strip()
     except: pass
 
 project = '$PROJECT'
@@ -1652,7 +1670,7 @@ print('yes' if (agent_inbox or ws_inbox) else 'no')
     session_info=$(python3 -c "
 import json, os, sqlite3
 try:
-    db = os.path.expanduser('~/.k2so/k2so.db')
+    db = os.path.expanduser('$K2_HOME/k2so.db')
     conn = sqlite3.connect(db)
     project = '$PROJECT'
     row = conn.execute('SELECT id FROM projects WHERE path = ?', (project,)).fetchone()
@@ -2326,11 +2344,11 @@ cmd_signal() {
     # path as the workspace id, which FK-violates against
     # projects.id (UUIDs) and silently drops audit.
     local workspace_id="$PROJECT"
-    if [ -f "${HOME}/.k2so/k2so.db" ] && command -v sqlite3 >/dev/null 2>&1; then
+    if [ -f "$K2_HOME/k2so.db" ] && command -v sqlite3 >/dev/null 2>&1; then
         # SQL-escape single quotes in the path (doubled per SQL spec).
         local _safe_path="${PROJECT//\'/\'\'}"
         local _resolved
-        _resolved=$(sqlite3 "${HOME}/.k2so/k2so.db" \
+        _resolved=$(sqlite3 "$K2_HOME/k2so.db" \
             "SELECT id FROM projects WHERE path = '${_safe_path}' LIMIT 1;" 2>/dev/null || true)
         if [ -n "$_resolved" ]; then
             workspace_id="$_resolved"
@@ -2439,7 +2457,7 @@ cmd_sessions_list() {
             *) shift ;;
         esac
     done
-    local sessions_dir="${PROJECT}/.k2so/sessions"
+    local sessions_dir="$(_ws_dot_dir "$PROJECT")/sessions"
     if [ ! -d "$sessions_dir" ]; then
         if [ -n "$json_mode" ]; then
             echo "[]"
@@ -2519,7 +2537,7 @@ cmd_sessions_compact() {
         echo "(use 'k2 sessions list' to find session ids)" >&2
         exit 1
     }
-    local session_dir="${PROJECT}/.k2so/sessions/${session_id}"
+    local session_dir="$(_ws_dot_dir "$PROJECT")/sessions/${session_id}"
     if [ ! -d "$session_dir" ]; then
         echo "No archive directory for session $session_id at $session_dir" >&2
         exit 1

@@ -53,7 +53,7 @@ pub struct LegacyAgentTypesOutcome {
 /// is best-effort, not blocking. The daemon caller logs the aggregate
 /// count; debugging individual failures is a future task.
 pub fn rewrite_workspace(project_path: &Path) -> usize {
-    let agents_dir = project_path.join(".k2so").join("agents");
+    let agents_dir = crate::workspace_dot_dir(&project_path).join("agents");
     if !agents_dir.exists() {
         return 0;
     }

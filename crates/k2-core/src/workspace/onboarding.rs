@@ -89,9 +89,7 @@ pub const SKIP_HARNESS_FLAG_FILENAME: &str = ".skip-harness-management";
 /// Absolute path to the skip-harness-management flag file for a
 /// given project root.
 pub fn skip_flag_path(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path)
-        .join(".k2so")
-        .join(SKIP_HARNESS_FLAG_FILENAME)
+    crate::workspace_dot_dir(project_path).join(SKIP_HARNESS_FLAG_FILENAME)
 }
 
 /// Whether the user has opted out of K2SO touching harness files
@@ -121,9 +119,7 @@ pub const HARNESS_FANOUT_FLAG_FILENAME: &str = ".harness-fanout-enabled";
 
 /// Absolute path to the harness-fanout opt-in marker for a project.
 pub fn harness_fanout_flag_path(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path)
-        .join(".k2so")
-        .join(HARNESS_FANOUT_FLAG_FILENAME)
+    crate::workspace_dot_dir(project_path).join(HARNESS_FANOUT_FLAG_FILENAME)
 }
 
 /// Whether user-visible harness fan-out is enabled for this workspace.
@@ -304,7 +300,7 @@ pub fn adopt_harness_as_project_md(
     // Archive the source first so we have a recovery point if any
     // subsequent step fails.
     let project_root = PathBuf::from(project_path);
-    let archive_dir = project_root.join(".k2so").join("migration");
+    let archive_dir = crate::workspace_dot_dir(&project_root).join("migration");
     fs::create_dir_all(&archive_dir).map_err(|e| format!("create archive dir: {e}"))?;
     let leaf = source_path
         .file_name()
@@ -317,7 +313,7 @@ pub fn adopt_harness_as_project_md(
     // Write PROJECT.md. Don't clobber substantive existing content
     // — onboarding is gated on "fresh PROJECT.md" upstream, but we
     // double-check here for defense-in-depth.
-    let project_md = project_root.join(".k2so").join("PROJECT.md");
+    let project_md = crate::workspace_dot_dir(&project_root).join("PROJECT.md");
     if let Some(parent) = project_md.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create .k2so/: {e}"))?;
     }

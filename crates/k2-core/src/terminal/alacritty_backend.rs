@@ -388,7 +388,7 @@ impl TerminalManager {
             let mut dir = std::path::PathBuf::from(&safe_cwd);
             let mut found = None;
             for _ in 0..20 { // safety limit
-                if dir.join(".k2so").is_dir() {
+                if crate::workspace_dot_dir(&dir).is_dir() {
                     found = Some(dir.to_string_lossy().to_string());
                     break;
                 }

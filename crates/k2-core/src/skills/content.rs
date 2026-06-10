@@ -951,7 +951,7 @@ pub fn compose_agent_wake_context(
 
     // Read shared project context (.k2so/PROJECT.md) — manager mode agents
     let is_manager_type = agent_type == "manager" || agent_type == "agent-template";
-    let project_md_path = PathBuf::from(project_path).join(".k2so").join("PROJECT.md");
+    let project_md_path = crate::workspace_dot_dir(project_path).join("PROJECT.md");
     let project_context = if is_manager_type && project_md_path.exists() {
         let raw = safe_read_to_string(&project_md_path).unwrap_or_default();
         let stripped = strip_frontmatter(&raw);
@@ -1049,7 +1049,7 @@ pub fn compose_agent_wake_context(
     }
 
     // Work queue info (absolute paths for worktree compatibility)
-    let work_dir_abs = PathBuf::from(project_path).join(".k2so").join("agents").join(agent_name).join("work");
+    let work_dir_abs = crate::workspace_dot_dir(project_path).join("agents").join(agent_name).join("work");
     md.push_str("## Work Queue\n\n");
     md.push_str(&format!(
         "Your work items are at: `{}/`\n",

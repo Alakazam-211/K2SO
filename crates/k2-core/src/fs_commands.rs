@@ -332,7 +332,7 @@ pub fn ensure_downloads_dir(workspace_path: &str) -> Result<PathBuf, String> {
     if workspace_path.is_empty() {
         return Err("Workspace path is empty".to_string());
     }
-    let dir = Path::new(workspace_path).join(".k2so").join("downloads");
+    let dir = crate::workspace_dot_dir(workspace_path).join("downloads");
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create downloads dir: {e}"))?;
     Ok(dir)

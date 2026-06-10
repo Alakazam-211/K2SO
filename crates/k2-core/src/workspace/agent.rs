@@ -208,9 +208,7 @@ pub fn create(
     // agent exists used to error here ("Agent already exists"); now
     // they get back the existing K2soAgentInfo and proceed to the
     // edit flow.
-    let unified_primary = std::path::PathBuf::from(&project_path)
-        .join(".k2so")
-        .join("agent");
+    let unified_primary = crate::workspace_dot_dir(&project_path).join("agent");
     if unified_primary.join("AGENT.md").exists() {
         let existing_type = agent_type_for(&project_path, &name);
         return Ok(K2soAgentInfo {

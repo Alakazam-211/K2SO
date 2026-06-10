@@ -162,7 +162,7 @@ pub fn reserve(
     }
     let project_id = open_project(&project_path)?;
 
-    let k2so_dir = PathBuf::from(&project_path).join(".k2so");
+    let k2so_dir = crate::workspace_dot_dir(&project_path);
     fs::create_dir_all(&k2so_dir).ok();
 
     let path = reservations_path(&project_path);

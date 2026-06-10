@@ -528,7 +528,7 @@ pub struct UnwindAction {
 /// directory under `.k2so/backups/`). Used by the K2 Canonical Agent
 /// manage/undo mode to find the exact undo.
 pub fn latest_manifest(project_path: &str) -> Option<SetupManifest> {
-    let backups_root = PathBuf::from(project_path).join(".k2so").join("backups");
+    let backups_root = crate::workspace_dot_dir(project_path).join("backups");
     let entries = fs::read_dir(&backups_root).ok()?;
     let mut best: Option<(String, PathBuf)> = None;
     for entry in entries.flatten() {

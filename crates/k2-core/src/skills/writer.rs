@@ -54,8 +54,7 @@ pub const K2SO_SECTION_END: &str = "<!-- K2SO:END -->";
 /// SKILL passes whichever agent is the workspace's primary (or `None`
 /// for a generic pointer).
 pub fn skill_update_footer(project_path: &str, agent_name: Option<&str>) -> String {
-    let project_md = PathBuf::from(project_path)
-        .join(".k2so")
+    let project_md = crate::workspace_dot_dir(project_path)
         .join("PROJECT.md")
         .display()
         .to_string();

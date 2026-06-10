@@ -16,25 +16,23 @@ use std::path::{Path, PathBuf};
 /// Marker file written after a successful (or no-op) consolidation
 /// pass. Subsequent calls short-circuit on this.
 fn consolidation_marker(workspace: &Path) -> PathBuf {
-    workspace
-        .join(".k2so")
-        .join(".skills-consolidation-v1-done")
+    crate::workspace_dot_dir(workspace).join(".skills-consolidation-v1-done")
 }
 
 fn skills_root(workspace: &Path) -> PathBuf {
-    workspace.join(".k2so").join("skills")
+    crate::workspace_dot_dir(&workspace).join("skills")
 }
 
 fn agents_root(workspace: &Path) -> PathBuf {
-    workspace.join(".k2so").join("agents")
+    crate::workspace_dot_dir(&workspace).join("agents")
 }
 
 fn agent_templates_root(workspace: &Path) -> PathBuf {
-    workspace.join(".k2so").join("agent-templates")
+    crate::workspace_dot_dir(&workspace).join("agent-templates")
 }
 
 fn workspace_heartbeats_root(workspace: &Path) -> PathBuf {
-    workspace.join(".k2so").join("heartbeats")
+    crate::workspace_dot_dir(&workspace).join("heartbeats")
 }
 
 /// Outcome of [`consolidate_skills_v1`]. Counts are zero on
@@ -101,7 +99,7 @@ pub fn consolidate_skills_v1(workspace: &Path) -> ConsolidationOutcome {
 
     // Ensure .k2so/ exists so we can at least write the marker on a
     // fresh workspace.
-    if let Err(e) = fs::create_dir_all(workspace.join(".k2so")) {
+    if let Err(e) = fs::create_dir_all(crate::workspace_dot_dir(&workspace)) {
         outcome.errors.push(format!(
             "create .k2so/: {}",
             e

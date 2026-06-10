@@ -34,7 +34,7 @@ pub fn resolve_project_id(conn: &rusqlite::Connection, path: &str) -> Option<Str
 /// briefly by older code paths that still scaffold it). Prefer
 /// [`workspace_agent_path`] / [`agent_template_dir`] for new code.
 pub fn agents_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("agents")
+    crate::workspace_dot_dir(project_path).join("agents")
 }
 
 /// Post-0.37.0: `<project>/.k2so/agent/` — the single workspace
@@ -42,7 +42,7 @@ pub fn agents_dir(project_path: &str) -> PathBuf {
 /// call site that historically did `agent_dir(project, primary_name)`
 /// converges on this path after the migration runs.
 pub fn workspace_agent_path(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("agent")
+    crate::workspace_dot_dir(project_path).join("agent")
 }
 
 /// `<project>/.k2so/agent/AGENT.md` — the workspace agent's persona
@@ -55,8 +55,7 @@ pub fn workspace_agent_md_path(project_path: &str) -> PathBuf {
 /// Post-0.37.0: `<project>/.k2so/agent-templates/<template_name>/` —
 /// role personas for delegation/worktrees.
 pub fn agent_template_dir(project_path: &str, template_name: &str) -> PathBuf {
-    PathBuf::from(project_path)
-        .join(".k2so")
+    crate::workspace_dot_dir(project_path)
         .join("agent-templates")
         .join(template_name)
 }
@@ -68,7 +67,7 @@ pub fn agent_template_dir(project_path: &str, template_name: &str) -> PathBuf {
 /// The unification migration moves them to this workspace-level
 /// path; new heartbeats scaffold here directly.
 pub fn workspace_heartbeats_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("heartbeats")
+    crate::workspace_dot_dir(project_path).join("heartbeats")
 }
 
 /// Post-Phase-2.5b: `<project>/.k2so/skills/` — the unified home for
@@ -81,7 +80,7 @@ pub fn workspace_heartbeats_dir(project_path: &str) -> PathBuf {
 /// runs at daemon boot per upgraded workspace; see
 /// [`crate::skills::consolidation::consolidate_skills_v1`].
 pub fn skills_dir(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("skills")
+    crate::workspace_dot_dir(project_path).join("skills")
 }
 
 /// Post-Phase-2.5b: `<project>/.k2so/skills/<skill_name>/` — a single

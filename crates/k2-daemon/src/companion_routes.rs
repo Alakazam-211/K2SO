@@ -151,7 +151,10 @@ fn derive_agent_and_label(
     ws_path: &str,
     ws_name: &str,
 ) -> (String, String) {
-    let worktree_prefix = format!("{ws_path}/.k2so/worktrees/");
+    let worktree_prefix = format!(
+        "{}/worktrees/",
+        k2_core::workspace_dot_dir(ws_path).display()
+    );
     if let Some(rest) = cwd.strip_prefix(&worktree_prefix) {
         let name = rest.split('/').next().unwrap_or("agent");
         return (name.to_string(), name.to_string());

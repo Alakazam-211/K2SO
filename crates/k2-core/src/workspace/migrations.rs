@@ -567,9 +567,7 @@ pub fn migrate_or_scaffold_lead_heartbeat(project_path: &str) {
 /// situation so the user can check `.k2so/migration/` for stale archives
 /// if they hit unexpected data loss.
 pub fn detect_interrupted_regen(project_path: &str) -> bool {
-    let marker = PathBuf::from(project_path)
-        .join(".k2so")
-        .join(".regen-in-flight");
+    let marker = crate::workspace_dot_dir(project_path).join(".regen-in-flight");
     if !marker.exists() {
         return false;
     }
@@ -592,14 +590,12 @@ pub fn detect_interrupted_regen(project_path: &str) -> bool {
 /// Gated with `.k2so/.harvest-0.32.7-done` so a user who later runs
 /// `generate-md` isn't re-harvested on the next boot. First-run only.
 pub fn harvest_per_agent_claude_md_files(project_path: &str) {
-    let sentinel = PathBuf::from(project_path)
-        .join(".k2so")
-        .join(".harvest-0.32.7-done");
+    let sentinel = crate::workspace_dot_dir(project_path).join(".harvest-0.32.7-done");
     if sentinel.exists() {
         return;
     }
 
-    let agents_root = PathBuf::from(project_path).join(".k2so").join("agents");
+    let agents_root = crate::workspace_dot_dir(project_path).join("agents");
     let mut archived_paths: Vec<PathBuf> = Vec::new();
     let mut any_failure = false;
     if let Ok(read_dir) = fs::read_dir(&agents_root) {
@@ -685,7 +681,7 @@ pub(crate) fn archive_claude_md_file(
         Some((parent, leaf)) => (Some(parent), leaf),
         None => (None, relative_id),
     };
-    let mut target_dir = PathBuf::from(project_path).join(".k2so").join("migration");
+    let mut target_dir = crate::workspace_dot_dir(project_path).join("migration");
     if let Some(sub) = subdir {
         target_dir = target_dir.join(sub);
     }
@@ -723,9 +719,7 @@ pub(crate) fn inject_first_migration_banner(project_path: &str, archived_paths: 
     if archived_paths.is_empty() {
         return;
     }
-    let notice_path = PathBuf::from(project_path)
-        .join(".k2so")
-        .join("MIGRATION-0.32.7.md");
+    let notice_path = crate::workspace_dot_dir(project_path).join("MIGRATION-0.32.7.md");
     if notice_path.exists() {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -763,7 +757,7 @@ pub(crate) fn inject_first_migration_banner(project_path: &str, archived_paths: 
 
 /// Append a drift / conflict note to `.k2so/logs/adoption-conflicts.log`.
 pub(crate) fn log_adoption_event(project_path: &str, line: &str) {
-    let log_dir = PathBuf::from(project_path).join(".k2so").join("logs");
+    let log_dir = crate::workspace_dot_dir(project_path).join("logs");
     let _ = fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("adoption-conflicts.log");
     let ts = std::time::SystemTime::now()

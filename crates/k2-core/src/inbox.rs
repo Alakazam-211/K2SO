@@ -52,7 +52,7 @@ pub struct InboxItem {
 
 /// Path to `<workspace>/.k2so/inbox/`. Doesn't create.
 pub fn inbox_root(workspace: &Path) -> PathBuf {
-    workspace.join(".k2so").join("inbox")
+    crate::workspace_dot_dir(&workspace).join("inbox")
 }
 
 /// Path to a folder under the inbox root (e.g. "active" → `.k2so/inbox/active/`).
@@ -67,7 +67,7 @@ pub fn folder_path(workspace: &Path, folder: &str) -> PathBuf {
 
 /// Marker file written by [`migrate_work_to_inbox`] after success.
 fn migration_marker(workspace: &Path) -> PathBuf {
-    workspace.join(".k2so").join(".work-to-inbox-migration-v1-done")
+    crate::workspace_dot_dir(&workspace).join(".work-to-inbox-migration-v1-done")
 }
 
 /// Slugify a title into a safe filename stem (lowercase, hyphenated,
@@ -388,10 +388,10 @@ pub fn migrate_work_to_inbox(workspace: &Path) -> MigrationReport {
             errors: Vec::new(),
         };
     }
-    let work_root = workspace.join(".k2so").join("work");
+    let work_root = crate::workspace_dot_dir(&workspace).join("work");
     if !work_root.exists() {
         // Nothing to migrate — write marker so we don't keep checking.
-        let _ = fs::create_dir_all(workspace.join(".k2so"));
+        let _ = fs::create_dir_all(crate::workspace_dot_dir(&workspace));
         let _ = fs::write(&marker, "v1");
         return MigrationReport {
             already_migrated: true,

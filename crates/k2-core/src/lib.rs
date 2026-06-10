@@ -62,6 +62,8 @@ pub mod daemon_lifecycle;
 pub mod db;
 pub mod migration_home;
 pub mod migration_launchd;
+pub mod workspace_dir;
+pub use workspace_dir::workspace_dot_dir;
 pub mod db_ops;
 // Phase 2.5c: retired-but-preserved surface; modules here are
 // `#[deprecated]` and exist only for the deprecation window.

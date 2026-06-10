@@ -63,7 +63,7 @@ pub fn agent_wakeup_path(project_path: &str, agent_name: &str) -> PathBuf {
 /// Canonical location of the workspace-level WAKEUP.md (used by the
 /// workspace's manager-mode primary agent).
 pub fn workspace_wakeup_path(project_path: &str) -> PathBuf {
-    PathBuf::from(project_path).join(".k2so").join("WAKEUP.md")
+    crate::workspace_dot_dir(project_path).join("WAKEUP.md")
 }
 
 /// Read an agent's `WAKEUP.md`, falling back to the shipped template
