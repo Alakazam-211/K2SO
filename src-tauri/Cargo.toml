@@ -1,17 +1,17 @@
 [package]
-name = "k2so"
+name = "k2"
 version = "0.39.47"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
 
 [lib]
-name = "k2so_lib"
+name = "k2_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 path = "src/lib.rs"
 
 [[bin]]
-name = "k2so"
+name = "k2"
 path = "src/main.rs"
 
 [dependencies]

@@ -19,7 +19,7 @@ mod tray;
 // `crate::companion::*` paths (commands/companion.rs, agent_hooks.rs,
 // commands/settings.rs) keep working.
 pub use k2_core::companion;
-// Modules opened for the benches at src-tauri/benches/perf.rs — the k2so_lib
+// Modules opened for the benches at src-tauri/benches/perf.rs — the k2_lib
 // crate is not published, so this is a no-op for real consumers. Revert to
 // `mod` once the perf pass is over if we decide the benches' existence
 // doesn't justify open modules.

@@ -24,7 +24,7 @@ fn main() {
     // head start on daemon startup + window hydration. Restored
     // terminals that spawn during React rehydration then hit an
     // already-warm pool instead of paying 600ms of first-call cost.
-    k2so_lib::warm_http_pool_async();
+    k2_lib::warm_http_pool_async();
 
-    k2so_lib::run()
+    k2_lib::run()
 }

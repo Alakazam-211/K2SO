@@ -1,6 +1,10 @@
 #!/bin/bash
-# K2SO Release Script
-# Builds, signs, notarizes, and releases K2SO with both DMG and update bundle.
+# K2 Release Script
+# Builds, signs, notarizes, and releases K2 with both DMG and update bundle.
+#
+# RELEASE_REPO selects the GitHub repo for `gh release create` + all
+# manifest/download URLs. Defaults to the new K2 home; override with
+# K2_RELEASE_REPO=Alakazam-211/K2SO for an old-repo (bridge) release.
 #
 # Prerequisites:
 #   - TAURI_SIGNING_PRIVATE_KEY env var (or ~/.tauri/k2-updater.key)
@@ -27,7 +31,8 @@ fi
 
 TAG="v${VERSION}"
 SIGNING_IDENTITY="Developer ID Application: LZTEK, LLC (36B8R93HXV)"
-KEYCHAIN_PROFILE="K2SO-notarize"
+KEYCHAIN_PROFILE="K2SO-notarize"   # machine-local notarytool profile name — NOT renamed
+RELEASE_REPO="${K2_RELEASE_REPO:-Alakazam-211/K2}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Notarization auth (0.39.45): prefer DIRECT App Store Connect API-key
@@ -60,7 +65,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "═══════════════════════════════════════════════════"
-echo "  K2SO Release: ${TAG}"
+echo "  K2 Release: ${TAG}  →  ${RELEASE_REPO}"
 echo "═══════════════════════════════════════════════════"
 
 # Load .env file if present (contains TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
@@ -151,10 +156,10 @@ echo "  Build complete."
 
 # ── Step 2.5: Build + bundle k2-daemon sidecar ──
 #
-# k2so-daemon is a peer binary to the main Tauri app that owns the
+# k2-daemon is a peer binary to the main Tauri app that owns the
 # persistent-agent runtime (launched by launchd, outlives the Tauri
-# process). It needs to sit next to `k2so` inside `Contents/MacOS/`
-# so `std::env::current_exe()?.parent()?.join("k2so-daemon")` — used
+# process). It needs to sit next to `k2` inside `Contents/MacOS/`
+# so `std::env::current_exe()?.parent()?.join("k2-daemon")` — used
 # by the `install_daemon_plist_v1` code migration — can find it on
 # first launch of a release build.
 #
@@ -164,9 +169,9 @@ echo "  Build complete."
 # signing in Step 3 covers this binary too.
 echo ""
 echo "Step 2.5: Bundling k2-daemon sidecar..."
-# cargo workspace root is the repo root — both `k2so` (Tauri) and
-# `k2so-daemon` build into `target/release/`. Tauri's bundler writes
-# only its own primary bin into the .app, so we copy k2so-daemon in
+# cargo workspace root is the repo root — both `k2` (Tauri) and
+# `k2-daemon` build into `target/release/`. Tauri's bundler writes
+# only its own primary bin into the .app, so we copy k2-daemon in
 # explicitly.
 cargo build --release -p k2-daemon
 DAEMON_SRC="target/release/k2-daemon"
@@ -175,8 +180,8 @@ if [ ! -x "$DAEMON_SRC" ]; then
     exit 1
 fi
 cp "$DAEMON_SRC" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2-daemon"
-echo "  k2so-daemon copied into K2SO.app/Contents/MacOS/"
+    "target/release/bundle/macos/K2.app/Contents/MacOS/k2-daemon"
+echo "  k2-daemon copied into K2.app/Contents/MacOS/"
 
 # ── Step 3: Sign with hardened runtime ──
 echo ""
@@ -196,15 +201,15 @@ fi
 codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
+    "target/release/bundle/macos/K2.app/Contents/MacOS/k2"
 codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2-daemon"
+    "target/release/bundle/macos/K2.app/Contents/MacOS/k2-daemon"
 # frpc tunnel sidecar (Tauri externalBin → Contents/MacOS/frpc). Re-sign
-# with hardened runtime so the binary the app stages to ~/.k2so/bin/frpc
+# with hardened runtime so the binary the app stages to ~/.k2/bin/frpc
 # is notarization-covered and runs without a Gatekeeper quarantine block.
-FRPC_BIN="target/release/bundle/macos/K2SO.app/Contents/MacOS/frpc"
+FRPC_BIN="target/release/bundle/macos/K2.app/Contents/MacOS/frpc"
 if [ -x "$FRPC_BIN" ]; then
     codesign --force --options runtime --timestamp \
         --sign "$SIGNING_IDENTITY" \
@@ -217,31 +222,31 @@ fi
 codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
-    "target/release/bundle/macos/K2SO.app"
+    "target/release/bundle/macos/K2.app"
 echo "  Signed (main + daemon + frpc + bundle) with entitlements."
 
 # ── Step 4: Notarize app via ZIP ──
 echo ""
 echo "Step 4: Notarizing app..."
 cd target/release/bundle/macos
-ditto -c -k --keepParent "K2SO.app" "/tmp/K2SO_${VERSION}.zip"
+ditto -c -k --keepParent "K2.app" "/tmp/K2_${VERSION}.zip"
 NOTARY_AUTH=()
 while IFS= read -r arg; do NOTARY_AUTH+=("$arg"); done < <(notary_auth_args)
-xcrun notarytool submit "/tmp/K2SO_${VERSION}.zip" \
+xcrun notarytool submit "/tmp/K2_${VERSION}.zip" \
     "${NOTARY_AUTH[@]}" --wait
-xcrun stapler staple "K2SO.app"
+xcrun stapler staple "K2.app"
 echo "  App notarized and stapled."
 
 # ── Step 5: Create update bundle (tar.gz) from notarized app + sign it ──
 echo ""
 echo "Step 5: Creating and signing update bundle..."
 cd "$PROJECT_DIR"
-COPYFILE_DISABLE=1 tar -czf "target/release/bundle/macos/K2SO.app.tar.gz" \
-    -C "target/release/bundle/macos" "K2SO.app"
+COPYFILE_DISABLE=1 tar -czf "target/release/bundle/macos/K2.app.tar.gz" \
+    -C "target/release/bundle/macos" "K2.app"
 
 # Sign the update bundle with Tauri updater key
 bunx @tauri-apps/cli@2 signer sign \
-    "target/release/bundle/macos/K2SO.app.tar.gz" \
+    "target/release/bundle/macos/K2.app.tar.gz" \
     --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
     --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
 echo "  Update bundle signed."
@@ -249,28 +254,28 @@ echo "  Update bundle signed."
 # ── Step 6: Create DMG from notarized app ──
 echo ""
 echo "Step 6: Creating DMG..."
-rm -f "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
-hdiutil create -volname "K2SO" \
-    -srcfolder "target/release/bundle/macos/K2SO.app" \
+rm -f "target/release/bundle/dmg/K2_${VERSION}_aarch64.dmg"
+hdiutil create -volname "K2" \
+    -srcfolder "target/release/bundle/macos/K2.app" \
     -ov -format UDZO \
-    "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+    "target/release/bundle/dmg/K2_${VERSION}_aarch64.dmg"
 codesign --force --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+    "target/release/bundle/dmg/K2_${VERSION}_aarch64.dmg"
 
 # ── Step 7: Notarize DMG ──
 echo ""
 echo "Step 7: Notarizing DMG..."
-xcrun notarytool submit "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg" \
+xcrun notarytool submit "target/release/bundle/dmg/K2_${VERSION}_aarch64.dmg" \
     "${NOTARY_AUTH[@]}" --wait
-xcrun stapler staple "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
+xcrun stapler staple "target/release/bundle/dmg/K2_${VERSION}_aarch64.dmg"
 echo "  DMG notarized and stapled."
 
 # ── Step 8: Generate latest.json ──
 echo ""
 echo "Step 8: Generating latest.json..."
 SIG_CONTENT=""
-SIG_FILE="target/release/bundle/macos/K2SO.app.tar.gz.sig"
+SIG_FILE="target/release/bundle/macos/K2.app.tar.gz.sig"
 if [ -f "$SIG_FILE" ]; then
     SIG_CONTENT=$(cat "$SIG_FILE")
 fi
@@ -279,12 +284,12 @@ PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 cat > "/tmp/latest.json" <<MANIFEST
 {
   "version": "${VERSION}",
-  "notes": "K2SO ${TAG}",
+  "notes": "K2 ${TAG}",
   "pub_date": "${PUB_DATE}",
   "platforms": {
     "darwin-aarch64": {
       "signature": "${SIG_CONTENT}",
-      "url": "https://github.com/Alakazam-211/K2SO/releases/download/${TAG}/K2SO.app.tar.gz"
+      "url": "https://github.com/${RELEASE_REPO}/releases/download/${TAG}/K2.app.tar.gz"
     }
   }
 }
@@ -293,7 +298,7 @@ echo "  latest.json generated."
 
 # ── Step 8.5: Standalone per-OS daemon binary + signature + manifest ──
 #
-# Remote-update P1: publish a STANDALONE k2so-daemon binary (no .app
+# Remote-update P1: publish a STANDALONE k2-daemon binary (no .app
 # wrapper) so headless servers and the daemon self-update path (P3) can
 # fetch + verify + install the daemon on its own.
 #
@@ -337,7 +342,7 @@ MAC_ASSET="k2-daemon-macos-aarch64"
 cp "$PROJECT_DIR/target/release/k2-daemon" "$DIST_DIR/$MAC_ASSET"
 
 # Sign with the Tauri updater key (minisign-format .sig, identical
-# mechanism to Step 5's K2SO.app.tar.gz.sig).
+# mechanism to Step 5's K2.app.tar.gz.sig).
 bunx @tauri-apps/cli@2 signer sign \
     "$DIST_DIR/$MAC_ASSET" \
     --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
@@ -345,7 +350,7 @@ bunx @tauri-apps/cli@2 signer sign \
 MAC_SHA256=$(shasum -a 256 "$DIST_DIR/$MAC_ASSET" | awk '{print $1}')
 echo "  macos-aarch64 daemon built, signed, hashed."
 
-DL_BASE="https://github.com/Alakazam-211/K2SO/releases/download/${TAG}"
+DL_BASE="https://github.com/${RELEASE_REPO}/releases/download/${TAG}"
 
 # Build the artifacts object incrementally. macos-aarch64 is always present.
 ARTIFACTS_JSON=$(cat <<JSON
@@ -359,7 +364,7 @@ JSON
 
 # Merge any CI-produced Linux artifacts present in $DIST_DIR.
 for LX in "linux-x86_64" "linux-aarch64"; do
-    LX_ASSET="k2so-daemon-${LX}"
+    LX_ASSET="k2-daemon-${LX}"
     if [ -f "$DIST_DIR/$LX_ASSET" ] && [ -f "$DIST_DIR/${LX_ASSET}.sig" ]; then
         LX_SHA256=$(shasum -a 256 "$DIST_DIR/$LX_ASSET" | awk '{print $1}')
         ARTIFACTS_JSON="${ARTIFACTS_JSON},
@@ -389,8 +394,8 @@ echo "  daemon-latest.json generated at $DIST_DIR/daemon-latest.json"
 echo ""
 echo "Step 9: Creating GitHub release ${TAG}..."
 ASSETS=(
-    "target/release/bundle/dmg/K2SO_${VERSION}_aarch64.dmg"
-    "target/release/bundle/macos/K2SO.app.tar.gz"
+    "target/release/bundle/dmg/K2_${VERSION}_aarch64.dmg"
+    "target/release/bundle/macos/K2.app.tar.gz"
 )
 [ -f "$SIG_FILE" ] && ASSETS+=("$SIG_FILE")
 ASSETS+=("/tmp/latest.json")
@@ -406,7 +411,7 @@ ASSETS+=(
     "$DIST_DIR/daemon-latest.json"
 )
 for LX in "linux-x86_64" "linux-aarch64"; do
-    LX_ASSET="k2so-daemon-${LX}"
+    LX_ASSET="k2-daemon-${LX}"
     if [ -f "$DIST_DIR/$LX_ASSET" ] && [ -f "$DIST_DIR/${LX_ASSET}.sig" ]; then
         ASSETS+=("$DIST_DIR/$LX_ASSET" "$DIST_DIR/${LX_ASSET}.sig")
     fi
@@ -421,7 +426,7 @@ else
     # "What's New" site mirrors the GH release body, so leaving a
     # placeholder here silently empties the site — this makes the notes
     # impossible to forget.
-    NOTES_SRC="$(mktemp -t k2so-relnotes)"
+    NOTES_SRC="$(mktemp -t k2-relnotes)"
     awk -v ver="$VERSION" '
         $0 ~ "^## " ver " " { inblock = 1; print; next }
         inblock && /^## / { exit }
@@ -430,6 +435,7 @@ else
     echo "  Using WHATS_NEW.md '## ${VERSION}' section as the release body."
 fi
 gh release create "$TAG" "${ASSETS[@]}" \
+    --repo "$RELEASE_REPO" \
     --title "$TAG" \
     --notes-file "$NOTES_SRC"
 
@@ -444,7 +450,7 @@ gh release create "$TAG" "${ASSETS[@]}" \
 # (a 504 HTML page or a stale manifest both fail this).
 echo ""
 echo "Step 10: Verifying updater endpoints serve valid v${VERSION} JSON..."
-VERIFY_BASE="https://github.com/Alakazam-211/K2SO/releases/latest/download"
+VERIFY_BASE="https://github.com/${RELEASE_REPO}/releases/latest/download"
 VERIFY_FAILED=""
 verify_manifest() {
     local label="$1" url="$2" ok="" body=""
@@ -471,6 +477,6 @@ verify_manifest "daemon-latest.json" "${VERIFY_BASE}/daemon-latest.json"
 echo ""
 echo "═══════════════════════════════════════════════════"
 echo "  Release ${TAG} complete!"
-echo "  https://github.com/Alakazam-211/K2SO/releases/tag/${TAG}"
+echo "  https://github.com/${RELEASE_REPO}/releases/tag/${TAG}"
 [ -n "$VERIFY_FAILED" ] && echo "  ⚠  UPDATER MANIFEST CHECK FAILED — see Step 10 above (updater may 'Could not fetch a valid release JSON' until it clears)"
 echo "═══════════════════════════════════════════════════"
