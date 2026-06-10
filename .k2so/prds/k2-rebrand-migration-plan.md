@@ -123,9 +123,18 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
   PRIVATE mirror (`Alakazam-211/K2-history` or local) for blame and
   archaeology; this also disposes of the PRD-privacy question entirely
   (no history → no PRDs ever public on the new repo).
-- Internal-docs policy (Q5): public repo `.gitignore`s `.k2so/` agent
-  dirs + PRDs; PRDs migrate to the private mirror; only user-facing
-  docs/ ship publicly.
+- Internal-docs policy (Q5, hardened 2026-06-10 — "don't give away the
+  roadmap"): the R4 import is a CURATED tree. Public repo `.gitignore`s
+  `.k2so/` AND `.k2/` wholesale (agents, PRDs, inbox, notes, skills).
+  `docs/` is curated: user-facing docs only — the design-review HTMLs
+  (e.g. final-creature-comforts-review.html), research notes
+  (terminal-scrolling-research.md), and any roadmap-bearing material
+  stay internal (private mirror). Also exclude stray working files
+  (build logs, .harness-fanout-enabled). Import checklist runs a final
+  `git ls-files | grep -iE 'prd|roadmap|review|research'` sweep before
+  the first public push. Honest-shift framing stays: README presents
+  the K2SO→K2 transition and MIT history openly; we just don't publish
+  strategy docs.
 - CONTRIBUTING.md with DCO sign-off (layer 5 of licensing strategy).
 - **Lawyer-pass gate** on LICENSE/GRANT/TRADEMARKS before the first
   release is published here.
