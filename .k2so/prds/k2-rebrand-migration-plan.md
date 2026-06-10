@@ -160,6 +160,15 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
    read-only)**. PRD scrub is subsumed — the stub removes the whole tree.
 5. k2.dev: copy + download links + Fair Source page + hosting-grant page.
 
+**R5.5 — trademark filing (lawyer task, time with the 0.40.0 launch):**
+file USPTO application(s) for the composite mark "K2 by Alakazam Labs"
+(word mark + the logo). Intent-to-use filing is possible BEFORE launch;
+use-based once 0.40.0 ships under the brand. Until registration: rely on
+common-law rights from use in commerce, use ™ (never ®), keep the
+composite mark consistently in commerce (README hero, About, DMG, site).
+The kimi-k2 §2(d) analysis (Nintex etc.) is the prior-art landscape the
+attorney should start from.
+
 **R6 — aftermath:** close #613; claim @alakazamlabs/k2 (Q4); update
 memories (project_vision "MIT" reference, taxonomy); monitor old-repo
 traffic for stragglers; bridge manifest stays frozen forever.
