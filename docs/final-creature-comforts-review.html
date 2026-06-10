@@ -60,6 +60,7 @@
   <ol>
     <li><a href="#presence">Presence — who's viewing the server</a></li>
     <li><a href="#viewer">Viewer role — attach without claiming</a></li>
+    <li><a href="#sizeclaim">Size claim &amp; auto-fit — multi-user sessions</a></li>
     <li><a href="#follow">Follow mode (bonus)</a></li>
     <li><a href="#composer">Message Composer / Queue</a></li>
     <li><a href="#notify">Work-finish notifications — visual</a></li>
@@ -128,6 +129,66 @@ session or resize the operator's terminal.</div>
 A Viewer can rearrange their own ephemeral view (view state is per-client since 0.39.42), but
 layout <i>persistence</i> writes are rejected — their arrangement resets on reload. Per-user saved
 layouts are a separate future feature; this release doesn't attempt it.</div>
+
+<!-- ════════════════════ 2.5 SIZE CLAIM ════════════════════ -->
+<h2 id="sizeclaim"><span class="n">2.5</span>Size claim &amp; auto-fit — multi-user sessions <span class="tag m">MEDIUM</span><span class="tag daemon">DAEMON</span><span class="tag client">CLIENT</span></h2>
+
+<p><b>The reframe first:</b> once the composer (§4) exists, most collaboration never touches
+the PTY's size or input box — humans talk to the agent through serialized, identity-stamped
+composer sends. <i>Claiming</i> becomes a control handoff for the rare "I need the wheel"
+moments (menus, /commands, Ctrl+C), not the default mode of participation. That's why the
+composer builds first: it shrinks this problem before we solve it.</p>
+
+<h3>What counts as an interaction</h3>
+<ul>
+  <li><b>Raw keystrokes</b> into the terminal — already claim (since 0.39.43).</li>
+  <li><b>Explicit focus claims</b> with viewport dims — already tracked.</li>
+  <li><b>Composer sends never claim</b> — deliberate.</li>
+  <li><b>Scrolling never claims</b> — reading must not steal the size from whoever's typing.</li>
+</ul>
+<p>New daemon tracking (small): a per-viewer <code>last_interaction_at</code> timestamp, the
+username stamped on the claim, a <code>size_claim_changed</code> broadcast, and claim-clear
+when the owner disconnects (no ghost owners).</p>
+
+<h3>Reclaim rules</h3>
+<ul>
+  <li><b>Last-typist-wins stays</b>, with <b>~5s hysteresis</b>: a challenger's keystrokes go
+  through immediately, but the <i>resize</i> waits until the current owner pauses typing.
+  Kills resize ping-pong without ever blocking input.</li>
+  <li><b>Explicit handoff</b>: click the ownership chip to claim; the displaced owner gets a
+  quiet toast. No request/approve ceremony — trusted-team default.</li>
+  <li><b>"&lt;user&gt; is typing" hint</b> when another viewer's keystrokes are flowing — the
+  social signal that prevents two people grabbing the wheel.</li>
+</ul>
+
+<div class="where"><b>WHERE IT LIVES</b><br>
+① <b>Terminal pane header</b>: an ownership chip — <code>⌗ sized for rosson</code> — click to claim.<br>
+② <b>Terminal pane header</b> (transient): "baden is typing…" hint.<br>
+③ <b>Auto-fit indicator</b> in the pane's overflow (⋯) menu: auto-fit on/off + current scale.</div>
+
+<div class="mock"><span class="dimm">┌─ claude · nsi-plan01 ─────────</span> <span class="acc">⌗ sized for rosson</span> <span class="dimm">· baden is typing… ─┐</span>
+<span class="dimm">│</span> <span class="hl">(viewer at 90% auto-fit — full 190×52 grid visible, letterboxed)</span> <span class="dimm">│</span>
+<span class="dimm">└────────────────────────────────────────────────────────────────────┘</span></div>
+
+<h3>Auto-fit (the CMD+Shift+± mechanism, automated)</h3>
+<ul>
+  <li>Non-owners default to <b>auto-fit</b>: the per-terminal font steps down until the owner's
+  full grid fits the local pane; letterboxed centered when the pane is larger. The whole-app
+  zoom (CMD+±) stays personal and untouched.</li>
+  <li><b>Font floor ~9px</b> — below it, stop shrinking and clip+scroll instead (a laptop
+  watching an ultrawide shouldn't render 4px glyphs).</li>
+  <li>Manual CMD+Shift+± overrides auto-fit for that pane until reset; becoming the owner
+  restores native sizing.</li>
+</ul>
+
+<div class="nuance"><b class="h">NUANCE — auto-fit cannot re-wrap</b>
+A TUI renders for exactly ONE width (the kernel's TIOCSWINSZ truth) — viewers see the owner's
+reflow faithfully, just scaled. Correct-but-small beats wrong-but-comfortable. Per-viewer
+re-rendering would require tmux-style re-hosting of the app — explicitly out of scope.</div>
+
+<div class="decision"><b class="h">DECISION D7 — no request/approve handoff ceremony</b>
+Click-to-claim is instant (with the hysteresis guard). A polite "request control" flow is a
+later, hosted-tier option if customers want it — a two-person trusted team doesn't.</div>
 
 <!-- ════════════════════ 3. FOLLOW ════════════════════ -->
 <h2 id="follow"><span class="n">3</span>Follow mode (bonus) <span class="tag s">SMALL</span><span class="tag client">CLIENT</span></h2>
@@ -248,6 +309,7 @@ fast; a blocked agent is the thing genuinely worth a sound. Push back if you wan
   <tr><td>5</td><td>Audio notifications</td><td>S</td><td>4</td></tr>
   <tr><td>6</td><td>Follow-the-activity</td><td>S</td><td>1, 2</td></tr>
   <tr><td>7</td><td>Composer queue=true (drain-on-idle)</td><td>M</td><td>3 · can slip to 0.40</td></tr>
+  <tr><td>8</td><td>Size claim &amp; auto-fit (§2.5)</td><td>M</td><td>1, 2, 3</td></tr>
 </table>
 
 <div class="nuance"><b class="h">THE #12 RIDER</b>
