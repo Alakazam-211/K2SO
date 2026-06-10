@@ -169,20 +169,40 @@ traffic for stragglers; bridge manifest stays frozen forever.
   0.40.0's first-boot migration handles their ~/.k2so data regardless of
   which version it came from.
 
-## 5. Open questions for Rosson (Q1–Q5)
+## 5. Decisions — ANSWERED (Rosson, 2026-06-10) + verification results
 
-1. **Internal IDs:** adopt `dev.k2.*` (bundle id `dev.k2.app`, launchd
-   `dev.k2.daemon` etc., keychain `dev.k2.*`) per the held 0.40 decision —
-   confirm? (Identifier change = macOS treats it as a new app: permission
-   prompts re-appear once; R1 rig will quantify.)
-2. **Per-workspace `.k2so/` dirs:** keep for 0.40 (recommended — they live
-   in users' repos and agents reference them), with dual-read `.k2/`
-   arriving later? Or hard-rename now with a `k2 migrate-workspace`
-   command?
-3. **Copyright entity:** LICENSE notice currently "Alakazam Labs"; code
-   signing is "LZTEK, LLC". Lawyer should confirm which entity holds the
-   IP (and the © line should match it).
-4. **npm:** claim `@alakazamlabs/k2` now? (taxonomy memory expects it)
-5. **PRD privacy:** confirmed direction — new repo never carries internal
-   PRDs (public repo gitignores agent/PRD dirs; internal docs move to a
-   private home). Old-repo exposure is resolved by the shell maneuver.
+1. **Internal IDs: YES `dev.k2.*`** — bundle `dev.k2.app`, launchd
+   `dev.k2.daemon`/`dev.k2.heartbeat`/`dev.k2.claude-auth`, keychain
+   `dev.k2.*`.
+2. **`.k2so/` workspace dirs: DUAL-COMPATIBLE in 0.40** — `.k2/` preferred
+   when present, `.k2so/` fully works; user-facing deprecation notice
+   (release notes + docs + gentle CLI note) that `.k2so/` phases out and
+   everything migrates under `.k2/` BEFORE 1.0.0.
+3. **Entities:** Alakazam Labs OWNS the IP (© lines = Alakazam Labs);
+   LZTEK, LLC hosts/operates K2 Connect AS A SERVICE for Alakazam Labs
+   (grant wording: "operated by or on behalf of Alakazam Labs").
+4. **npm: claim BOTH** `@alakazamlabs/k2` and `@lztek/k2` (org already has
+   @lztek/k2so). BLOCKED on npm auth — token stale (E401); needs
+   interactive `npm login`, then publish placeholders.
+5. **Old repo: GREENLIT for the shell maneuver + archive** at R5.
+   Destructive step deliberately HELD until after 0.40.0 + bridge exist
+   (it's our active dev repo until then).
+
+**LICENSE GREENLIT** (lawyer OK per Rosson): DRAFT banners removed from
+GRANT + TRADEMARKS on Alakazam-211/K2; final wording tweaks applied
+(on-behalf-of operator language; MIT-era note).
+
+**Versioning:** rebrand ships as **0.40.0**; **1.0.0** comes later, after
+post-rebrand stabilization + remaining polish (incl. the `.k2so/`→`.k2/`
+workspace-dir migration completing pre-1.0.0).
+
+**SHELL MANEUVER VERIFIED (2026-06-10, sacrificial repo):** after tag
+force-move to an orphan stub + force-push: release stayed published (not
+drafted), `releases/latest/download/<asset>` served anonymously (200,
+correct bytes), tag-pinned download path served, auto source-zip
+regenerated FROM THE STUB, and the original commit was not even fetchable
+by SHA immediately. The earlier 404 was visibility-flip propagation only.
+Gate: PASSED — R5 §0.B is safe to execute when its time comes.
+(Test repo `shell-maneuver-test` set back to private; delete needs
+`gh auth refresh -s delete_repo` or the web UI.)
+
