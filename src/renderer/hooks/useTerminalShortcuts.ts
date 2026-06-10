@@ -239,7 +239,9 @@ function switchToActiveByIndex(targetIdx: number): void {
     if (firstWorkspace) {
       const focusState = useFocusGroupsStore.getState()
       if (focusState.focusGroupsEnabled && project.focusGroupId !== focusState.activeFocusGroupId) {
-        focusState.setActiveFocusGroup(project.focusGroupId)
+        // autoActivate: false — the shortcut's target is activated
+        // explicitly below (double-switch race otherwise).
+        focusState.setActiveFocusGroup(project.focusGroupId, { autoActivate: false })
       }
       useProjectsStore.getState().setActiveWorkspace(project.id, firstWorkspace.id)
     }

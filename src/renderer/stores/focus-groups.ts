@@ -60,7 +60,15 @@ interface FocusGroupsState {
   focusGroupsEnabled: boolean
 
   fetchFocusGroups: () => Promise<void>
-  setActiveFocusGroup: (id: string | null) => void
+  /** Switch the active focus group. `autoActivate` (default true)
+   *  additionally activates the first workspace in the group — the
+   *  right UX for clicking a GROUP (tab/dropdown), and exactly wrong
+   *  for callers about to activate a SPECIFIC project themselves:
+   *  the nested setActiveWorkspace made every such entry point a
+   *  DOUBLE workspace switch whose deferred pinned-tab resolutions
+   *  raced — the Active-bar wrong-session pinned tab (#9/#27 family).
+   *  Those callers pass { autoActivate: false }. */
+  setActiveFocusGroup: (id: string | null, opts?: { autoActivate?: boolean }) => void
   createFocusGroup: (name: string, color?: string) => Promise<void>
   deleteFocusGroup: (id: string) => Promise<void>
   renameFocusGroup: (id: string, name: string) => Promise<void>
@@ -87,7 +95,7 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
     }
   },
 
-  setActiveFocusGroup: (id: string | null) => {
+  setActiveFocusGroup: (id: string | null, opts?: { autoActivate?: boolean }) => {
     set({ activeFocusGroupId: id })
     // Persist to settings so it restores on next launch
     if (id !== null) {
@@ -95,7 +103,15 @@ export const useFocusGroupsStore = create<FocusGroupsState>((set, get) => ({
         settingsUpdate({ activeFocusGroupId: id }).catch((e) => console.warn('[focus-groups] settings_update failed:', e))
       }
 
-      // Auto-activate the first workspace in the new focus group
+      // Auto-activate the first workspace in the new focus group —
+      // UNLESS the caller is about to activate a specific project
+      // itself (autoActivate: false). The nested setActiveWorkspace
+      // here turned ActiveBar / palette / shortcut / review-jump
+      // switches into back-to-back DOUBLE switches whose deferred
+      // ensurePinnedAgentTabForMode callbacks raced, stamping the
+      // group's first project's identity/session into the clicked
+      // project's pinned tab (the wrong-session render).
+      if (opts?.autoActivate === false) return
       const projectsState = useProjectsStore.getState()
       const groupProjects = projectsState.projects.filter((p) => p.focusGroupId === id)
       if (groupProjects.length > 0) {

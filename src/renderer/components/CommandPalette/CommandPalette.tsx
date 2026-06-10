@@ -130,7 +130,10 @@ export default function CommandPalette(): React.JSX.Element | null {
   const selectResult = useCallback(
     (result: Result) => {
       if (result.type === 'focus-group') {
-        setActiveFocusGroup(result.id)
+        // autoActivate: false — we pick + activate the first project
+        // ourselves below; the store's nested activation would switch
+        // to it TWICE (stash/restore churn + pinned-tab race).
+        setActiveFocusGroup(result.id, { autoActivate: false })
         // Find first project in this group
         const firstProject = projects.find((p) => p.focusGroupId === result.id)
         if (firstProject) {
@@ -142,7 +145,9 @@ export default function CommandPalette(): React.JSX.Element | null {
       } else {
         // Project
         if (result.focusGroupId && focusGroupsEnabled) {
-          setActiveFocusGroup(result.focusGroupId)
+          // autoActivate: false — the selected project is activated
+          // explicitly below (double-switch race otherwise).
+          setActiveFocusGroup(result.focusGroupId, { autoActivate: false })
         }
         setActiveProject(result.id)
         const project = projects.find((p) => p.id === result.id)

@@ -66,7 +66,10 @@ export default function ReviewQueueModal(): React.JSX.Element | null {
       // Set focus group if applicable
       const project = projects.find((p) => p.id === review.projectId)
       if (project?.focusGroupId) {
-        useFocusGroupsStore.getState().setActiveFocusGroup(project.focusGroupId)
+        // autoActivate: false — the review's workspace was activated
+        // explicitly above; the nested first-project activation would
+        // double-switch and race the pinned-tab resolution.
+        useFocusGroupsStore.getState().setActiveFocusGroup(project.focusGroupId, { autoActivate: false })
       }
 
       // Open Reviews panel

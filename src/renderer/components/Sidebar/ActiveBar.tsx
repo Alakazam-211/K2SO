@@ -402,9 +402,13 @@ export default function ActiveBar(): React.JSX.Element | null {
     const firstWs = project.workspaces[0]
     if (!firstWs) return
 
-    // Switch focus group if needed
+    // Switch focus group if needed — WITHOUT its auto-activation:
+    // we activate the clicked project explicitly below. The nested
+    // activation made this a double workspace switch whose racing
+    // pinned-tab resolutions rendered the wrong session (#9/#27
+    // family, Active-bar variant).
     if (focusGroupsEnabled && project.focusGroupId) {
-      setActiveFocusGroup(project.focusGroupId)
+      setActiveFocusGroup(project.focusGroupId, { autoActivate: false })
     }
 
     setActiveWorkspace(project.id, firstWs.id)

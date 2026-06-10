@@ -51,9 +51,17 @@ vi.mock('./toast', () => ({
   useToastStore: { getState: () => ({ addToast }) },
 }))
 
-// ── Projects store (setActiveFocusGroup reads it; not exercised here) ────
+// ── Projects store (setActiveFocusGroup's auto-activation reads it) ──────
+const setActiveWorkspaceSpy = vi.fn()
+let mockProjects: Array<{
+  id: string
+  focusGroupId: string | null
+  workspaces: Array<{ id: string }>
+}> = []
 vi.mock('./projects', () => ({
-  useProjectsStore: { getState: () => ({ projects: [], setActiveWorkspace: vi.fn() }) },
+  useProjectsStore: {
+    getState: () => ({ projects: mockProjects, setActiveWorkspace: setActiveWorkspaceSpy }),
+  },
 }))
 
 import { useFocusGroupsStore, type FocusGroup } from './focus-groups'
@@ -160,5 +168,41 @@ describe('focus-groups store — Plan B host-aware migration', () => {
     await useFocusGroupsStore.getState().createFocusGroup('Work')
 
     expect(emitMock).not.toHaveBeenCalledWith('sync:focus-groups')
+  })
+})
+
+// ── setActiveFocusGroup auto-activation (0.39.47 wrong-session fix) ──────
+//
+// Switching the group auto-activates its first workspace — the right UX
+// for clicking a GROUP, and exactly wrong for callers (ActiveBar, command
+// palette, shortcuts, review-jump) that activate a SPECIFIC project
+// themselves: the nested setActiveWorkspace made those entry points a
+// DOUBLE workspace switch whose racing deferred pinned-tab resolutions
+// rendered another workspace's session in the pinned tab.
+describe('setActiveFocusGroup auto-activation', () => {
+  beforeEach(() => {
+    setActiveWorkspaceSpy.mockClear()
+    mockProjects = [
+      { id: 'proj-first', focusGroupId: 'fg-1', workspaces: [{ id: 'ws-first' }] },
+      { id: 'proj-clicked', focusGroupId: 'fg-1', workspaces: [{ id: 'ws-clicked' }] },
+    ]
+  })
+
+  it('auto-activates the first workspace in the group by default (group-tab UX)', () => {
+    useFocusGroupsStore.getState().setActiveFocusGroup('fg-1')
+    expect(setActiveWorkspaceSpy).toHaveBeenCalledTimes(1)
+    expect(setActiveWorkspaceSpy).toHaveBeenCalledWith('proj-first', 'ws-first')
+  })
+
+  it('does NOT auto-activate with { autoActivate: false } — the caller activates explicitly', () => {
+    useFocusGroupsStore.getState().setActiveFocusGroup('fg-1', { autoActivate: false })
+    expect(setActiveWorkspaceSpy).not.toHaveBeenCalled()
+    // The group itself still switched.
+    expect(useFocusGroupsStore.getState().activeFocusGroupId).toBe('fg-1')
+  })
+
+  it('clearing the group (null) never auto-activates', () => {
+    useFocusGroupsStore.getState().setActiveFocusGroup(null)
+    expect(setActiveWorkspaceSpy).not.toHaveBeenCalled()
   })
 })

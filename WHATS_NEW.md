@@ -3,6 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.47 — Active-bar switches land on the right pinned chat
+
+- **Switching workspaces from the Active section no longer flashes the wrong
+  conversation.** Clicking a workspace in the Active bar (and jumping via the
+  command palette, keyboard shortcuts, or the review queue) could briefly run a
+  hidden *double* workspace switch — the focus-group change auto-activated the
+  group's first workspace before your actual target — and the two racing
+  switches could stamp another workspace's pinned Chat session into the one you
+  opened. Every entry point now performs exactly one switch, same as clicking
+  in the main workspace list.
+
 ## 0.39.46 — Remote terminals stop losing lines
 
 - **The "missing line" remote-terminal bug is fixed at the root.** When viewing
