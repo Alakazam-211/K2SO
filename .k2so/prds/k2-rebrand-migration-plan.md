@@ -166,8 +166,14 @@ file USPTO application(s) for the composite mark "K2 by Alakazam Labs"
 use-based once 0.40.0 ships under the brand. Until registration: rely on
 common-law rights from use in commerce, use ™ (never ®), keep the
 composite mark consistently in commerce (README hero, About, DMG, site).
-The kimi-k2 §2(d) analysis (Nintex etc.) is the prior-art landscape the
-attorney should start from.
+File the COMPOSITE + logo ONLY — never bare "K2" (Nintex Reg. 4869089,
+Class 042, live + renewed; ~90-95% refusal on bare K2). Goods recital
+VERBATIM (locked, Rosson): "agent server software — a server where AI
+agents run" — explicitly NOT business-process orchestration. Required
+per the analysis: 30-min likelihood-of-confusion consult BEFORE
+app-store/marketing spend; also put to counsel: dock/menu showing bare
+"K2" with composite-branded chrome (About/DMG/site). The kimi-k2 §2(d)
+memory is the full prior-art landscape to hand the attorney.
 
 **R6 — aftermath:** close #613; claim @alakazamlabs/k2 (Q4); update
 memories (project_vision "MIT" reference, taxonomy); monitor old-repo
