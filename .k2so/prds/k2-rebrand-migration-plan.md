@@ -80,7 +80,25 @@ bundle identifier. Determine:
   K2.app? leave both? fail signature/identifier checks?
 - do macOS permission grants (notifications etc.) survive?
 
-Outcomes → 0.39.48 scope:
+**VERDICT (2026-06-10, rig executed end-to-end): CLEAN RENAME ✅.**
+Live test on this machine: installed rig K2SO.app (0.39.47, local
+manifest endpoint) → updater fetched the manifest, downloaded the
+signed K2.app bundle (identifier dev.k2.app, v0.40.0), staged it
+("ready to install / app will restart"), Install & Relaunch
+REPLACED THE BUNDLE CONTENTS IN PLACE and relaunched successfully:
+CFBundleIdentifier=dev.k2.app, version=0.40.0, CFBundleName/
+DisplayName="K2" (dock/menu show K2). The bundle DIRECTORY keeps its
+old on-disk name (K2SO.app) for auto-updated users — cosmetic only;
+fresh DMG installs get K2.app. → **0.39.48 needs NO updater shim**
+(announcement + license disclosure + k2 CLI teaser only).
+Rig footnotes for posterity: (a) tauri updater refuses http
+endpoints without dangerousInsecureTransportProtocol (test-only);
+(b) updater refuses to run from a path containing a SYMLINK
+("StartingBinary found current_exe() that contains a symlink" — /tmp
+→ /private/tmp tripped it; ~/dir worked). Neither affects production
+(https + /Applications).
+
+Outcomes → 0.39.48 scope (historical pre-verdict analysis):
 - **Clean rename:** 0.39.48 is cosmetic (announcement + `k2` CLI teaser).
 - **Updater can't rename:** choose between (a) 0.39.48 ships a custom
   install hook that performs app-swap (download new, bless, remove old,
