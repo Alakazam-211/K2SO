@@ -560,6 +560,17 @@ pub fn run() {
     #[cfg(unix)]
     k2_core::enrich_path_from_login_shell();
 
+    // 0.40.0 rebrand — one-time ~/.k2so → ~/.k2 home migration. MUST run
+    // before db::init_database() below: the DB now lives at ~/.k2/k2so.db,
+    // and opening it first would create a fresh empty ~/.k2 (abandoning
+    // the user's data in ~/.k2so and forcing the migration's Conflict
+    // branch — caught by the convergence rig, 2026-06-10). The daemon
+    // boot runs the same idempotent call; first process wins.
+    match k2_core::migration_home::migrate_home_dir() {
+        Ok(o) => eprintln!("[boot] home migration: {o:?}"),
+        Err(e) => eprintln!("[boot] home migration failed: {e} — continuing on legacy layout"),
+    }
+
     // Rustls 0.23 compiles both aws-lc-rs (via reqwest rustls-tls) and ring
     // (via ngrok) into the binary; it refuses to auto-pick and panics on
     // first TLS use unless a provider is explicitly installed.
@@ -604,14 +615,6 @@ pub fn run() {
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
         .setup(|app| {
-            // 0.40.0 rebrand — one-time ~/.k2so → ~/.k2 home migration.
-            // Must precede the daemon plist install/heal + handshake so
-            // both sides agree on the home layout (daemon boot runs the
-            // same idempotent call).
-            match k2_core::migration_home::migrate_home_dir() {
-                Ok(o) => eprintln!("[boot] home migration: {o:?}"),
-                Err(e) => eprintln!("[boot] home migration failed: {e} — continuing on legacy layout"),
-            }
             // 0.40.0 — retire com.k2so.* LaunchAgents (the daemon plist
             // re-installs below under dev.k2.daemon; heartbeat +
             // claude-auth re-ensure from the daemon's own boot).
@@ -733,7 +736,7 @@ pub fn run() {
                     // may ship without it.
                     let maybe_daemon = std::env::current_exe()
                         .ok()
-                        .and_then(|p| p.parent().map(|d| d.join("k2so-daemon")))
+                        .and_then(|p| k2_core::daemon_lifecycle::bundled_daemon_path(&p))
                         .filter(|p| p.exists());
                     match maybe_daemon {
                         Some(daemon_bin)
@@ -832,9 +835,40 @@ pub fn run() {
                         log_debug!("[k2so] daemon plist loaded (was unloaded)");
                     }
                     Ok(k2_core::wake::LoadOutcome::NotInstalled) => {
-                        log_debug!(
-                            "[k2so] daemon plist not installed — install migration will handle it"
-                        );
+                        // Self-heal EVERY boot, not just first install: the
+                        // 0.40 launchd sweep retires com.k2so.k2so-daemon,
+                        // and on updated machines install_daemon_plist_v1 is
+                        // already marked applied in the DB — deferring to
+                        // "the install migration" here would leave the
+                        // machine daemonless forever (caught by the
+                        // convergence rig, 2026-06-10). Re-install from the
+                        // bundled daemon and load, same transient-location
+                        // guard as the migration path (#14).
+                        let healed = std::env::current_exe()
+                            .ok()
+                            .and_then(|p| k2_core::daemon_lifecycle::bundled_daemon_path(&p))
+                            .filter(|p| p.exists())
+                            .filter(|p| !k2_core::daemon_lifecycle::is_transient_exe_location(p));
+                        match healed {
+                            Some(daemon_bin) => {
+                                let plist =
+                                    k2_core::wake::DaemonPlist::canonical(daemon_bin.clone());
+                                match k2_core::wake::install(&plist)
+                                    .and_then(|_| k2_core::wake::ensure_loaded(&plist))
+                                {
+                                    Ok(_) => log_debug!(
+                                        "[k2so] daemon plist healed + loaded (was missing) → {}",
+                                        daemon_bin.display()
+                                    ),
+                                    Err(e) => log_debug!(
+                                        "[k2so] daemon plist heal failed: {e}"
+                                    ),
+                                }
+                            }
+                            None => log_debug!(
+                                "[k2so] daemon plist missing and no bundled daemon to heal from                                  (dev build or transient location) — daemon stays down"
+                            ),
+                        }
                     }
                     Err(e) => {
                         log_debug!("[k2so] daemon autostart failed: {e}");
