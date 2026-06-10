@@ -93,7 +93,18 @@ fresh DMG installs get K2.app. → **0.39.48 needs NO updater shim**
 (announcement + license disclosure + k2 CLI teaser only).
 Rig footnotes for posterity: (a) tauri updater refuses http
 endpoints without dangerousInsecureTransportProtocol (test-only);
-(b) updater refuses to run from a path containing a SYMLINK
+(b) RIG OBSERVATION (Rosson): the relaunched 0.40.0 app did NOT
+reconnect to the daemon — expected in the rig (dev-box plist points at
+target/release; Build B's bundled daemon was version-skewed by
+construction; no migration module yet) but it makes the ACCEPTANCE
+GATE explicit: **after a cross-rename update, first boot MUST converge
+app↔daemon unaided** — lockstep-versioned bundled daemon, plist healed
+to the RENAMED binary path (k2-daemon; DAEMON_BINARY_NAME constant +
+'recorded binary missing' heal covers it), launchd LABEL migrated
+(bootout com.k2so.*, bootstrap dev.k2.*). R2 ships a first-boot
+migration test for this; R4's release rig re-verifies end-to-end
+before the bridge manifest is published.
+(c) updater refuses to run from a path containing a SYMLINK
 ("StartingBinary found current_exe() that contains a symlink" — /tmp
 → /private/tmp tripped it; ~/dir worked). Neither affects production
 (https + /Applications).
