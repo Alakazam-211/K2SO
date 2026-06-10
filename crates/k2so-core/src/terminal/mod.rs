@@ -47,9 +47,9 @@ pub use daemon_pty::{
 pub use alacritty_terminal::grid::Dimensions;
 
 pub use grid_snapshot::{
-    build_emit, cell_to_run, encode_row_runs, resolve_color, snapshot_term,
-    CellRun, CursorSnapshot, DamagedRow, EmitDecision, EmitState,
-    TermGridDelta, TermGridSnapshot,
+    build_emit, cell_to_run, drain_damage, encode_row_runs, resolve_color,
+    snapshot_term, CellRun, CursorSnapshot, DamagedRow, EmitDecision,
+    EmitState, TermGridDelta, TermGridSnapshot,
 };
 
 use parking_lot::Mutex;

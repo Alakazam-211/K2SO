@@ -336,6 +336,22 @@ pub enum EmitDecision {
 ///   - full damage → Full snapshot (cheaper than listing every row)
 ///   - nothing changed → Skip
 ///   - otherwise → Delta of damaged rows + appended scrollback
+/// 0.39.46 — consume the Term's accumulated damage WITHOUT encoding a
+/// frame, keeping `state` coherent (`last_history_size` especially).
+/// Used by the shared grid emitter when a session has zero viewers:
+/// damage must still be drained on each Wakeup, or the stale
+/// `last_history_size` would make the first delta after a viewer
+/// attaches re-append scrollback rows that viewer's attach snapshot
+/// already contains (the client concatenates `scrollback_appended` —
+/// it is NOT idempotent).
+pub fn drain_damage<L: EventListener>(term: &mut Term<L>, state: &mut EmitState) {
+    {
+        let _ = term.damage();
+    }
+    term.reset_damage();
+    state.last_history_size = term.grid().history_size();
+}
+
 pub fn build_emit<L: EventListener>(
     pane_id: &str,
     term: &mut Term<L>,

@@ -50,6 +50,7 @@ mod connect_users_routes;
 mod db_routes;
 mod events;
 mod fs_routes;
+mod grid_emitter;
 mod git_routes;
 mod heartbeat_launch;
 mod heartbeat_routes;

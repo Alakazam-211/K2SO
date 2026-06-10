@@ -3,6 +3,22 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.46 — Remote terminals stop losing lines
+
+- **The "missing line" remote-terminal bug is fixed at the root.** When viewing
+  a terminal from a connected client, typing past a line wrap (or Claude's input
+  box growing) could leave the view missing the row that just moved — and it only
+  healed when you switched tabs and back. The cause: with more than one viewer
+  attached to a session (your remote client plus the host app counts as two),
+  each screen update was delivered to whichever viewer asked first and *silently
+  skipped* for the rest. Every session now has a single broadcaster that encodes
+  each update once and delivers it to **every** viewer — nobody gets starved, no
+  matter how many windows, machines, or tabs are watching.
+- Side benefit: with several viewers on one session, the server now does the
+  rendering work once instead of once per viewer.
+- Locked in by integration tests that attach two live viewers and assert both
+  see every keystroke — including a late-joining viewer arriving mid-session.
+
 ## 0.39.45 — Messages that actually arrive: the comms-reliability release
 
 - **`k2so msg` now confirms the Enter actually landed.** Under heavy host load

@@ -11,14 +11,18 @@
 //!      malformed, 403 on auth fail (enforced by caller in main.rs).
 //!   2. Look up the session in `v2_session_map`. 400 if not found.
 //!   3. WebSocket handshake.
-//!   4. Take ownership of the session's AlacEvent receiver via
-//!      `session.take_events()`. If already taken (second subscriber),
-//!      decline with a busy error — v2 is single-subscriber by design.
-//!   5. Emit an initial full snapshot as `{"event":"snapshot","payload":...}`.
+//!   4. Join the session's SHARED grid emitter (0.39.46,
+//!      `crate::grid_emitter`) — multiple subscribers per session are
+//!      first-class; damage is consumed by exactly ONE emitter task
+//!      and pre-encoded frames fan out to every subscriber.
+//!   5. Emit an initial READ-ONLY full snapshot as
+//!      `{"event":"snapshot","payload":...}`, stamped with the
+//!      emitter's current version (frames at/below the stamp are
+//!      dropped — the snapshot already covers them).
 //!   6. Enter select loop:
-//!        - On AlacEvent::Wakeup: call `build_emit()` under the Term
-//!          lock, send the resulting `Snapshot` or `Delta` payload.
-//!        - On AlacEvent::ChildExit: send final snapshot, close WS.
+//!        - On a shared-emitter frame: forward the pre-encoded
+//!          `Snapshot`/`Delta` text when its version clears the stamp.
+//!        - On AlacEvent::ChildExit: send final exit message, close WS.
 //!        - On inbound `{"action":"input","text":...}`: write to PTY.
 //!        - On inbound `{"action":"resize","cols":N,"rows":N}`:
 //!          SIGWINCH + Term.resize.
@@ -45,16 +49,18 @@ use tokio_tungstenite::tungstenite::Message;
 use k2so_core::log_debug;
 use k2so_core::session::SessionId;
 use k2so_core::terminal::{
-    build_emit, snapshot_term, AlacEvent, DaemonPtySession, EmitDecision,
-    EmitState, TermGridDelta, TermGridSnapshot,
+    snapshot_term, AlacEvent, DaemonPtySession, TermGridDelta, TermGridSnapshot,
 };
 
 use crate::v2_session_map;
 
 /// Outbound WS message. Tagged as `{"event":"<kind>","payload":...}`.
+/// `pub(crate)` since 0.39.46: the shared grid emitter
+/// (`crate::grid_emitter`) serializes Snapshot/Delta frames ONCE and
+/// fans the encoded text out to every subscriber.
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
-enum Outbound<'a> {
+pub(crate) enum Outbound<'a> {
     /// Full grid + scrollback. Sent once on connect; repeat only
     /// when `build_emit` returns `Full` (e.g. full damage or reset).
     Snapshot(&'a TermGridSnapshot),
@@ -338,23 +344,39 @@ pub async fn serve_session_grid_connection(
 
     let pane_id = format!("alacritty-v2-{}", session.session_id);
 
-    // Initial full snapshot. EmitState::default() has has_emitted=false,
-    // so build_emit would do the same thing — but we skip that and
-    // take an explicit snapshot first so the WS contract reads
-    // cleanly ("first message is always Snapshot").
-    let mut emit_state = EmitState::default();
+    // 0.39.46 — join the session's SHARED emitter. Damage is consumed
+    // by exactly one consumer per session (the emitter task); this
+    // connection just forwards its pre-encoded frames. Pre-0.39.46,
+    // every connection ran its own build_emit and raced the others
+    // for the Term's single damage accumulator — with two viewers
+    // (host app + K2 Connect client) the loser Skip'd and its mirror
+    // silently missed rows (the "starved remote viewer" bug).
+    //
+    // Order matters: subscribe FIRST, then snapshot — see the version
+    // floor below.
+    let (mut frames_rx, shared_emit_state) =
+        crate::grid_emitter::attach(&session, &pane_id);
+
+    // Initial full snapshot — READ-ONLY. No reset_damage (that would
+    // starve every OTHER subscriber of the damage they haven't
+    // emitted yet), no EmitState mutation (the emitter owns it).
+    // Stamped with the emitter's current version; `frame_floor`
+    // then drops any frame at/below the stamp: those cover changes
+    // this snapshot already contains, and a delta's
+    // `scrollback_appended` is NOT idempotent — forwarding one would
+    // duplicate scrollback rows on the client. The (emit_state, term)
+    // lock order matches the emitter's emit pass, which is what makes
+    // the stamp exact in every interleaving.
     let __t_first_snap = std::time::Instant::now();
+    let mut frame_floor: u64;
     let initial_snapshot = {
+        let st = shared_emit_state.lock();
         // Bind the Arc<FairMutex<...>> to a local so it outlives
         // the guard. `session.term()` returns a temporary Arc.
         let term_mutex = session.term();
-        let mut term = term_mutex.lock();
-        emit_state.has_emitted = true;
-        emit_state.version = 1;
-        let snap = snapshot_term(&pane_id, &*term, emit_state.version);
-        emit_state.last_history_size = snap.scrollback.len();
-        term.reset_damage();
-        snap
+        let term = term_mutex.lock();
+        frame_floor = st.version;
+        snapshot_term(&pane_id, &*term, frame_floor)
     };
     let snap_rows = initial_snapshot.rows;
     let snap_cols = initial_snapshot.cols;
@@ -407,6 +429,48 @@ pub async fn serve_session_grid_connection(
     // keeps the volume sane.
     loop {
         tokio::select! {
+            // 0.39.46 — pre-encoded Snapshot/Delta frames from the
+            // session's shared emitter. The version floor drops frames
+            // our attach snapshot already covers (see above).
+            frame = frames_rx.recv() => {
+                match frame {
+                    Ok(f) => {
+                        if f.version > frame_floor
+                            && write.send(Message::Text(f.text.to_string())).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Fell behind the frame stream (slow link —
+                        // tunnel backpressure). Recover with a fresh
+                        // READ-ONLY snapshot and re-stamp the floor;
+                        // the emitter's state is untouched, so other
+                        // subscribers are unaffected.
+                        log_debug!(
+                            "[daemon/sessions_grid_ws] subscriber lagged {n} frames, sending fresh snapshot"
+                        );
+                        let snap = {
+                            let st = shared_emit_state.lock();
+                            let term_mutex = session.term();
+                            let term = term_mutex.lock();
+                            frame_floor = st.version;
+                            snapshot_term(&pane_id, &*term, frame_floor)
+                        };
+                        if send_outbound(&mut write, &Outbound::Snapshot(&snap))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Emitter exited (child exit / teardown). The
+                        // events_rx arm sees ChildExit/Closed and owns
+                        // the graceful shutdown — don't break here.
+                    }
+                }
+            }
             // Phase B: out-of-band label changes (from /cli/sessions/<id>/label
             // or a multi-window peer's set). Push to this client so
             // its tab updates without a renderer round-trip.
@@ -444,23 +508,9 @@ pub async fn serve_session_grid_connection(
             ev = events_rx.recv() => {
                 match ev {
                     Ok(AlacEvent::Wakeup) => {
-                        let decision = {
-                            let term_mutex = session.term();
-                            let mut term = term_mutex.lock();
-                            build_emit(&pane_id, &mut *term, &mut emit_state)
-                        };
-                        let res = match decision {
-                            EmitDecision::Full(snap) => {
-                                send_outbound(&mut write, &Outbound::Snapshot(&snap)).await
-                            }
-                            EmitDecision::Delta(delta) => {
-                                send_outbound(&mut write, &Outbound::Delta(&delta)).await
-                            }
-                            EmitDecision::Skip => Ok(()),
-                        };
-                        if res.is_err() {
-                            break;
-                        }
+                        // 0.39.46: grid emission moved to the shared
+                        // emitter (frames_rx arm above). Wakeups still
+                        // arrive on this subscription; ignore them.
                     }
                     Ok(AlacEvent::ChildExit(status)) => {
                         let exit = Outbound::ChildExit {
@@ -524,30 +574,24 @@ pub async fn serve_session_grid_connection(
                         // grid-rendering contract.
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        // Consumer fell behind. Term state still
-                        // advancing correctly on the daemon; we
-                        // just missed `n` events. Issue a fresh
-                        // full snapshot so client state catches up.
+                        // 0.39.46: grid frames ride frames_rx now (its
+                        // own Lagged arm re-snapshots). Lagging HERE
+                        // only means missed Title/Bell lifecycle
+                        // events — re-emit the authoritative label so
+                        // the cheap-to-converge surface converges; the
+                        // rest is transient by nature.
                         log_debug!(
-                            "[daemon/sessions_grid_ws] subscriber lagged {n} events, sending fresh snapshot"
+                            "[daemon/sessions_grid_ws] subscriber lagged {n} lifecycle events"
                         );
-                        let snap = {
-                            let term_mutex = session.term();
-                            let mut term = term_mutex.lock();
-                            emit_state.has_emitted = false; // force Full on next build_emit
-                            let d = build_emit(&pane_id, &mut *term, &mut emit_state);
-                            match d {
-                                EmitDecision::Full(s) => Some(s),
-                                _ => None,
-                            }
-                        };
-                        if let Some(snap) = snap {
-                            if send_outbound(&mut write, &Outbound::Snapshot(&snap))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+                        let current = session.label();
+                        if send_outbound(
+                            &mut write,
+                            &Outbound::LabelChanged { label: current },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
