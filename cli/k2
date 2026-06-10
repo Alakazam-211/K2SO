@@ -10,15 +10,15 @@ set -euo pipefail
 
 # Connection details (set by K2SO when creating terminal sessions)
 # Falls back to ~/.k2so/heartbeat.{port,token} for external terminals
-PORT="${K2SO_PORT:-}"
-TOKEN="${K2SO_HOOK_TOKEN:-}"
+PORT="${K2_PORT:-${K2SO_PORT:-}}"
+TOKEN="${K2_HOOK_TOKEN:-${K2SO_HOOK_TOKEN:-}}"
 
 # Resolve project root: if K2SO_PROJECT_PATH is set, use it directly.
 # Otherwise walk up from CWD to find a .k2so/ directory, skipping $HOME/.k2so.
 # Also handles git worktrees: if CWD is inside a worktree, resolve back to
 # the main repo root where .k2so/ lives.
-PROJECT="${K2SO_PROJECT_PATH:-$(pwd)}"
-if [ -z "${K2SO_PROJECT_PATH:-}" ]; then
+PROJECT="${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-$(pwd)}}"
+if [ -z "${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-}}" ]; then
     _dir="$(pwd)"
     _found=""
     while [ "$_dir" != "/" ]; do
@@ -662,7 +662,7 @@ except Exception as e:
     if [ $exit_code -ne 0 ]; then exit $exit_code; fi
     [ -z "$rel_path" ] && { echo "Heartbeat '$name' has no wakeup path on file." >&2; exit 1; }
 
-    local base="${K2SO_PROJECT_PATH:-$PWD}"
+    local base="${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-$PWD}}"
     local abs_path="$base/$rel_path"
 
     case "$mode" in
@@ -2134,7 +2134,7 @@ cmd_msg() {
     # empty string, so the recipient PTY always sees a [from ...] prefix.
     local from="$explicit_from"
     if [[ -z "$from" ]]; then
-        local sender_path="${K2SO_PROJECT_PATH:-$PWD}"
+        local sender_path="${K2_PROJECT_PATH:-${K2SO_PROJECT_PATH:-$PWD}}"
         if [[ -n "$sender_path" ]]; then
             local sender_name
             sender_name=$(cli_request "/cli/workspace/resolve" "q=$(urlencode "$sender_path")" 2>/dev/null \

@@ -337,10 +337,16 @@ impl TerminalManager {
         // Agent lifecycle hook env vars
         let hook_port = crate::hook_config::get_port();
         if hook_port > 0 {
+            // 0.40.0 rebrand: emit BOTH K2_* (canonical) and K2SO_* (legacy,
+            // removed before 1.0.0) so user hook scripts keep working.
             pty_options.env.insert("K2SO_PORT".to_string(), hook_port.to_string());
+            pty_options.env.insert("K2_PORT".to_string(), hook_port.to_string());
             pty_options.env.insert("K2SO_PANE_ID".to_string(), id.clone());
+            pty_options.env.insert("K2_PANE_ID".to_string(), id.clone());
             pty_options.env.insert("K2SO_TAB_ID".to_string(), id.clone());
+            pty_options.env.insert("K2_TAB_ID".to_string(), id.clone());
             pty_options.env.insert("K2SO_HOOK_TOKEN".to_string(), crate::hook_config::get_token().to_string());
+            pty_options.env.insert("K2_HOOK_TOKEN".to_string(), crate::hook_config::get_token().to_string());
         }
 
         // K2SO CLI: add cli/ directory to PATH so agents can call `k2so` commands
@@ -390,7 +396,8 @@ impl TerminalManager {
             }
             found.unwrap_or_else(|| safe_cwd.clone())
         };
-        pty_options.env.insert("K2SO_PROJECT_PATH".to_string(), project_root);
+        pty_options.env.insert("K2SO_PROJECT_PATH".to_string(), project_root.clone());
+        pty_options.env.insert("K2_PROJECT_PATH".to_string(), project_root);
 
         // Strip unwanted env vars
         for (key, _) in std::env::vars() {

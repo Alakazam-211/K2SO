@@ -61,7 +61,7 @@ pub fn spawn(config: WatchdogConfig) -> JoinHandle<()> {
 /// `K2SO_WATCHDOG_DISABLED=1` the returned config has every
 /// threshold cleared (watchdog becomes a no-op).
 pub fn config_from_env() -> WatchdogConfig {
-    if std::env::var("K2SO_WATCHDOG_DISABLED").as_deref() == Ok("1") {
+    if std::env::var("K2_WATCHDOG_DISABLED").or_else(|_| std::env::var("K2SO_WATCHDOG_DISABLED")).as_deref() == Ok("1") {
         log_debug!("[daemon/watchdog] disabled via K2SO_WATCHDOG_DISABLED=1");
         return WatchdogConfig::disabled();
     }
