@@ -101,6 +101,35 @@ Two flavors of Enterprise BYOT to offer (both on paper from day one):
    ONLY workable answer for air-gapped/regulated customers who physically
    cannot use a cloud tunnel — the segment the public grant can never serve.
 
+## Budibase study (added 2026-06-10) — lessons applied & rejected
+
+Budibase = per-package mosaic (GPLv3 backend, MPL client so user-built
+apps aren't contaminated, BSL-1.1 `pro` package w/ 4-year change date,
+Change License **GPLv3**, anti-circumvention production grant, EU
+public-sector exception).
+
+**Adopted into our drafts (pushed to Alakazam-211/K2):**
+1. **Anti-circumvention condition on the Hosting Grant** — hosting-for-
+   others permission is void if K2 Connect integration/metering is
+   circumvented in the hosted offering. Scoped to the GRANT only:
+   internal self-hosters stripping the tunnel remain explicitly fine.
+2. **"What you build with K2 is yours"** clarification (their "apps you
+   build don't package GPL code" move) — costs nothing, kills the most
+   common licensing-FUD question for a workspace/agent tool.
+
+**Noted as an option, recommend AGAINST:** copyleft Change License
+(their BSL→GPLv3 means even expired versions force forks open). FSL's
+fixed menu is Apache/MIT; switching to BSL just to get GPL-after-expiry
+trades away the "becomes genuinely permissive" goodwill story that
+justifies the conversion at all. Protection load stays on trademark +
+tunnel, not on the expired tail.
+
+**Cautionary tale:** their license mosaic makes GitHub report
+`NOASSERTION` — scanners/legal teams can't classify the repo at a
+glance. Validates our single top-level FSL + separate grant docs.
+EU public-sector carve-out: parked as a possible Enterprise-tier
+sweetener if EU procurement ever knocks.
+
 ## Wording cautions for the grant
 
 - Tie the hosting condition to "**a current K2 Connect (K2 Toge) service
