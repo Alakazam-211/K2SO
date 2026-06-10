@@ -36,11 +36,11 @@ import { LocalLLMSettings } from '../shared/LocalLLMSettings'
 import type { SettingEntry } from '../searchManifest'
 
 export const GENERAL_MANIFEST: SettingEntry[] = [
-  { id: 'general.app-version', section: 'general', label: 'App Version', description: 'K2SO version and auto-updater', keywords: ['update', 'version', 'check', 'release'] },
+  { id: 'general.app-version', section: 'general', label: 'App Version', description: 'K2 version and auto-updater', keywords: ['update', 'version', 'check', 'release'] },
   { id: 'general.cli-version', section: 'general', label: 'CLI Version', description: 'Installed k2so CLI version + install/update button', keywords: ['k2so', 'cli', 'terminal', 'install', 'update', 'path'] },
   { id: 'general.agentic-systems', section: 'general', label: 'Agentic Systems', description: 'Enable AI agent orchestration, workspace manager, heartbeat, review queue', keywords: ['ai', 'agent', 'agentic', 'heartbeat', 'manager', 'workspace states', 'review', 'beta'] },
   { id: 'general.claude-auth-refresh', section: 'general', label: 'Auto-refresh Claude credentials', description: 'Background scheduler that keeps your Claude session alive', keywords: ['claude', 'auth', 'token', 'login', 'credentials', 'scheduler'] },
-  { id: 'general.daemon', section: 'general', label: 'K2SO Server', description: 'Background service that keeps agents running when the app is closed', keywords: ['server', 'daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
+  { id: 'general.daemon', section: 'general', label: 'K2 Server', description: 'Background service that keeps agents running when the app is closed', keywords: ['server', 'daemon', 'background', 'launchd', 'persistent', 'lid', 'sleep', 'wake', 'agent'] },
   { id: 'general.keep-daemon-on-quit', section: 'general', label: 'Keep server running when the window is closed', description: 'When on, clicking the red close button hides the window and keeps the Agent & Companion server running. When off, the red button stops everything. Cmd+Q always closes everything.', keywords: ['daemon', 'server', 'agent', 'companion', 'close', 'red button', 'window', 'hide', 'background', 'persistent'] },
   { id: 'general.restart-host', section: 'general', label: 'Restart connected host', description: 'Restart the REMOTE machine you are connected to over K2 Connect', keywords: ['restart', 'reboot', 'remote', 'host', 'connect', 'server', 'daemon', 'bounce'] },
   { id: 'general.update-host', section: 'general', label: 'Update connected host', description: 'Update the REMOTE machine you are connected to over K2 Connect', keywords: ['update', 'upgrade', 'remote', 'host', 'connect', 'server', 'daemon', 'version'] },
@@ -92,7 +92,7 @@ export function GeneralSection(): React.JSX.Element {
       <div className="space-y-4">
         {/* Version & Update */}
         <div className="flex items-center justify-between py-2 border-b border-[var(--color-border)]">
-          <span className="text-xs text-[var(--color-text-secondary)]">App Version</span>
+          <span className="text-xs text-[var(--color-text-secondary)]">K2 by Alakazam Labs</span>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
               <span
@@ -121,7 +121,7 @@ export function GeneralSection(): React.JSX.Element {
         {updateStatus === 'available' && updateVersion && (
           <div className="flex items-center justify-between p-3 bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/30">
             <div>
-              <p className="text-xs text-[var(--color-text-primary)]">K2SO v{updateVersion} is available</p>
+              <p className="text-xs text-[var(--color-text-primary)]">K2 v{updateVersion} is available</p>
               <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">You&apos;re on v{currentVersion}</p>
             </div>
             <button
@@ -180,8 +180,8 @@ export function GeneralSection(): React.JSX.Element {
                 className="px-2 py-0.5 text-[10px] text-[var(--color-accent)] border border-[var(--color-accent)]/30 hover:bg-[var(--color-accent)]/10 transition-colors no-drag cursor-pointer"
                 onClick={() => {
                   const tag = updateVersion ? `v${updateVersion}` : 'latest'
-                  invoke('plugin:opener|open_url', { url: `https://github.com/Alakazam-211/K2SO/releases/tag/${tag}` }).catch(() => {
-                    window.open(`https://github.com/Alakazam-211/K2SO/releases/tag/${tag}`)
+                  invoke('plugin:opener|open_url', { url: `https://github.com/Alakazam-211/K2/releases/tag/${tag}` }).catch(() => {
+                    window.open(`https://github.com/Alakazam-211/K2/releases/tag/${tag}`)
                   })
                 }}
               >
@@ -207,11 +207,11 @@ export function GeneralSection(): React.JSX.Element {
         {/* P1.C — configurable Active-Bar tenure window */}
         <ActiveWindowHoursRow />
 
-        {/* K2SO Daemon — persistent-agents service */}
+        {/* K2 Daemon — persistent-agents service */}
         <DaemonRow />
 
         {/* Keep-daemon-on-quit preference: honored by Cmd+Q and by the
-            menubar's Quit K2SO item. Default ON pairs with the menubar
+            menubar's Quit K2 item. Default ON pairs with the menubar
             icon so users always have visibility into what's running. */}
         <KeepDaemonOnQuitRow />
 
@@ -261,7 +261,7 @@ export function GeneralSection(): React.JSX.Element {
 // ONLY when connected to a remote host (half/half split, full-height divider —
 // see Settings.tsx). Holds the host-only controls: Restart (#661) + Update
 // (P4 / Shape A). Never mistakable for "this Mac" — local update lives in the
-// App Version row, local restart in the K2SO Server row, both in the left pane.
+// App Version row, local restart in the K2 Server row, both in the left pane.
 export function GeneralRemoteHostPanel(): React.JSX.Element {
   return (
     <div className="w-full">
@@ -488,7 +488,7 @@ function WhatsNewRow(): React.JSX.Element {
   )
 }
 
-// ── K2SO Daemon ────────────────────────────────────────────────────────
+// ── K2 Daemon ────────────────────────────────────────────────────────
 // Backs the persistent-agents feature: a launchd-managed background
 // process that keeps agents running while the Tauri window is closed
 // and (optionally) wakes the machine from sleep on a schedule. This
@@ -598,7 +598,7 @@ function DaemonRow(): React.JSX.Element {
     <div className="py-2 border-b border-[var(--color-border)]">
       <div className="flex items-center justify-between gap-4">
         <div className="flex flex-col min-w-0 flex-1">
-          <span className="text-xs text-[var(--color-text-secondary)]">K2SO Server</span>
+          <span className="text-xs text-[var(--color-text-secondary)]">K2 Server</span>
           <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
             Keeps agents, terminals, heartbeats, &amp; companion app service running when the app is closed
           </span>
@@ -686,7 +686,7 @@ function DaemonRow(): React.JSX.Element {
 // flip OFF to get "normal app" quit behavior (daemon stops with the
 // window). Honored by:
 //   - RunEvent::ExitRequested handler in src-tauri/src/lib.rs
-//   - Menubar → Quit K2SO
+//   - Menubar → Quit K2
 // Both check the same setting via `get_keep_daemon_on_quit`.
 
 function KeepDaemonOnQuitRow(): React.JSX.Element {
@@ -729,7 +729,7 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
         <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
           {keep
             ? 'Red close button hides the window; agents keep working and the mobile companion stays reachable. Menu bar shows status. Cmd+Q closes everything.'
-            : 'Red close button stops everything, same as Cmd+Q. Agents pause and the mobile companion disconnects until you reopen K2SO.'}
+            : 'Red close button stops everything, same as Cmd+Q. Agents pause and the mobile companion disconnects until you reopen K2.'}
         </p>
       </div>
       <button
@@ -767,7 +767,7 @@ function KeepDaemonOnQuitRow(): React.JSX.Element {
 //
 //   * The row renders ONLY when the active host is a REMOTE ConnectHost.
 //     For the local Mac it renders NOTHING — the local-Mac restart lives
-//     in the K2SO Server (DaemonRow) above. No ambiguity, no shared button.
+//     in the K2 Server (DaemonRow) above. No ambiguity, no shared button.
 //   * A prominent REMOTE badge + the host's display name + hostname sit on
 //     the row, and the confirm dialog NAMES the host explicitly:
 //     "This will restart <host> (the machine you're connected to)…".

@@ -714,7 +714,7 @@ function agentModeLabel(mode: string | null | undefined, fallbackName: string | 
     case 'pod':
       return 'Workspace Manager'
     case 'agent':
-      return 'K2SO Agent'
+      return 'K2 Agent'
     case 'custom':
       // Custom agents have a meaningful display name — show it.
       return fallbackName ?? 'Custom Agent'

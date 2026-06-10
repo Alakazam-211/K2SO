@@ -20,7 +20,7 @@ interface WhatsNewModalProps {
    * - `auto` (default): runs `whats_new_check` on mount; opens the
    *   popup if `has_new: true`. Used in the main + focus-mode layouts
    *   so the popup fires automatically on first launch after every
-   *   K2SO update.
+   *   K2 update.
    * - `button-only`: skips the mount-time check. Stays dormant until
    *   the Settings "Read what's new" button dispatches
    *   `k2so:show-whats-new`. Used in the Settings layout so opening
@@ -39,7 +39,7 @@ interface WhatsNewModalProps {
  * `whats_new_check`). If yes, shows a modal — one version per page,
  * newest first. The user can navigate through every version they
  * skipped. "Got it" marks the current daemon version as seen; the
- * modal won't reopen until the next K2SO update.
+ * modal won't reopen until the next K2 update.
  *
  * Daemon-side logic lives in `k2so_core::whats_new`. This component
  * does client-side splitting of the markdown into per-version pages
@@ -322,7 +322,7 @@ export default function WhatsNewModal({
               color: 'var(--color-text-primary)'
             }}
           >
-            What's new in K2SO
+            What's new in K2
           </div>
 
           <div

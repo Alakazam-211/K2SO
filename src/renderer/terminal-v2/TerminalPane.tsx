@@ -302,7 +302,7 @@ export interface TerminalPaneProps {
    *  common case "I know the right label, don't let the PTY
    *  smudge it." */
   lockLabel?: boolean
-  /** K2SO #682 — fired when the daemon reports the child process
+  /** K2 #682 — fired when the daemon reports the child process
    *  exited (`child_exit`). Carries the exit code so the consumer can
    *  distinguish a clean quit from a crash, and is the signal a
    *  spawn-loop circuit breaker counts. The pinned Chat tab
@@ -418,7 +418,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
   // isTabVisible) can call the latest implementation without taking the
   // big WS-open closure as a dependency. Assigned once below.
   const openGridWsRef = useRef<() => Promise<void>>(async () => {})
-  // K2SO #682 — latest `onChildExit` callback in a ref so the big WS
+  // K2 #682 — latest `onChildExit` callback in a ref so the big WS
   // closure (deps: terminalId, perfLog, reconnectAttempt) fires the
   // CURRENT consumer without re-subscribing the socket on every render.
   const onChildExitRef = useRef<((exitCode: number | null) => void) | undefined>(
@@ -1159,7 +1159,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
             }
             phaseRef.current = next
             setPhase(next)
-            // K2SO #682 — surface the exit (with code/timing) so a
+            // K2 #682 — surface the exit (with code/timing) so a
             // consumer can run a spawn-loop circuit breaker. Fired via
             // the ref to avoid stale-closure / re-subscribe churn.
             onChildExitRef.current?.(parsed.payload.exit_code)
@@ -2028,7 +2028,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     [linkClickMode, hoveredLink, tabId, paneGroupId],
   )
 
-  // ── Drag + drop of files (from Finder or K2SO files tab) ──────
+  // ── Drag + drop of files (from Finder or K2 files tab) ──────
   //
   // V2 needs TWO drop entry points because Tauri intercepts external
   // (Finder → window) drops at the webview level — the React onDrop
@@ -2140,7 +2140,7 @@ export function TerminalPane(props: TerminalPaneProps): React.JSX.Element {
     }
   }, [sendInput, cwd])
 
-  // Internal drag-drop from K2SO's file tree. file-drag.ts dispatches
+  // Internal drag-drop from K2's file tree. file-drag.ts dispatches
   // this CustomEvent on the v2 container when mouseup lands here.
   useEffect(() => {
     const el = containerRef.current

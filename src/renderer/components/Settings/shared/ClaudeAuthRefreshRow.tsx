@@ -32,7 +32,7 @@ export function ClaudeAuthRefreshRow(): React.JSX.Element {
       const confirmed = await confirm({
         title: 'Install Background Token Refresh?',
         message:
-          'K2SO will install a background scheduler that refreshes your Claude authentication token every 20 minutes, preventing session expiry.\n\nThis runs independently of K2SO and can be disabled at any time from Settings.',
+          'K2 will install a background scheduler that refreshes your Claude authentication token every 20 minutes, preventing session expiry.\n\nThis runs independently of K2 and can be disabled at any time from Settings.',
         confirmLabel: 'Install',
       })
       if (!confirmed) return

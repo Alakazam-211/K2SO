@@ -144,13 +144,13 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
     const isCustom = context.agentType === 'custom'
     const isK2SO = context.agentType === 'k2so'
 
-    const typeLabel = isK2SO ? 'K2SO Agent' : isCustom ? 'Custom Agent' : context.isCoordinator ? 'Workspace Manager' : 'Agent Template'
+    const typeLabel = isK2SO ? 'K2 Agent' : isCustom ? 'Custom Agent' : context.isCoordinator ? 'Workspace Manager' : 'Agent Template'
 
     const typeGuidance = isK2SO
       ? [
-          `This is the K2SO Agent — the top-level planner and orchestrator for this workspace.`,
+          `This is the K2 Agent — the top-level planner and orchestrator for this workspace.`,
           ``,
-          `The default K2SO agent knowledge (CLI tools, workflow docs, work queue structure)`,
+          `The default K2 agent knowledge (CLI tools, workflow docs, work queue structure)`,
           `is auto-injected into the compiled SKILL at launch. AGENT.md should ADD project-specific`,
           `context on top of that — not replace the defaults.`,
           ``,
@@ -161,19 +161,19 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
         ].join('\n')
       : isCustom
         ? [
-            `This is a Custom Agent — it runs purely from AGENT.md with no K2SO infrastructure injected.`,
+            `This is a Custom Agent — it runs purely from AGENT.md with no K2 infrastructure injected.`,
             `The body of AGENT.md IS the agent's entire system prompt when it wakes up on the heartbeat.`,
             `Focus on: what software it operates, what it does on each wake, tools/APIs it uses, constraints.`,
           ].join('\n')
         : [
-            `This agent runs within K2SO. The following are auto-injected into the compiled SKILL`,
+            `This agent runs within K2. The following are auto-injected into the compiled SKILL`,
             `(don't duplicate them in AGENT.md):`,
-            `• K2SO CLI tools reference`,
+            `• K2 CLI tools reference`,
             `• Workflow docs (lead agent vs sub-agent patterns)`,
             `• Work queue structure (inbox/active/done folders)`,
             `• Other agents list (for delegation awareness)`,
             ``,
-            `Focus AGENT.md on what makes this agent unique beyond the standard K2SO setup.`,
+            `Focus AGENT.md on what makes this agent unique beyond the standard K2 setup.`,
           ].join('\n')
 
     return [
@@ -188,10 +188,10 @@ export function AgentPersonaEditor({ agentName, projectPath, onClose }: AgentPer
       `Path: \`${context.agentMdPath}\``,
       ``,
       `AGENT.md is the source of truth for this agent's identity. It has two parts:`,
-      `• Frontmatter (between --- delimiters): name, role, type — read by the K2SO system`,
+      `• Frontmatter (between --- delimiters): name, role, type — read by the K2 system`,
       `• Body (below frontmatter): persona, standing orders, tools, constraints, personality`,
       ``,
-      `K2SO compiles AGENT.md into the agent's SKILL.md and into every CLI harness file`,
+      `K2 compiles AGENT.md into the agent's SKILL.md and into every CLI harness file`,
       `(CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules/k2so.mdc, .goosehints, etc.) automatically`,
       `when this editor closes. **Do not edit those compiled files directly** — your changes`,
       `will be overwritten. If something is wrong with a compiled file, fix it in AGENT.md.`,

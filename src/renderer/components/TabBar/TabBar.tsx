@@ -327,7 +327,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
       // 0.37.11 — Copy the RAW terminal id (v2 session UUID or
       // canonical key). Pre-fix this constructed a
       // `<workspace>:<agent>` "qualified" string which was nice to
-      // read but did NOT work as input to any K2SO CLI verb. The
+      // read but did NOT work as input to any K2 CLI verb. The
       // daemon's `terminal read` / `terminal write` accept either
       // the bare v2 session UUID (in `active_terminal_id` shape)
       // or the v2 canonical key (`<project_id>` post-0.37.5).
@@ -416,7 +416,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
           // Pinned system agent tab — compact with just icon.
           // Post-0.36.0 the agent UI is split across two pinned tabs;
           // each gets its own icon based on the agent item's section.
-          // Legacy rows (section === undefined) keep the K2SO mascot.
+          // Legacy rows (section === undefined) keep the K2 mascot.
           if (tab.isSystemAgent) {
             const firstItem = Array.from(tab.paneGroups.values())[0]?.items[0]
             const section: 'inbox' | 'chat' | undefined =
@@ -463,7 +463,7 @@ export function TabBar({ cwd, groupIndex = 0 }: TabBarProps): React.JSX.Element 
                   </svg>
                 )
               }
-              // Legacy fallback — K2SO mascot for pre-split serialized rows
+              // Legacy fallback — K2 mascot for pre-split serialized rows
               return (
                 <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M2 8 C2 2.5 4 0.5 8 0.5 C12 0.5 14 2.5 14 8 L13 9.5 L3 9.5 Z" />

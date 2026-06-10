@@ -112,7 +112,7 @@ export default function IconRail(): React.JSX.Element {
   const paneStatuses = useActiveAgentsStore((s) => s.paneStatuses)
 
   // Zone 1: Pinned (manually pinned by the user). Pre-0.39.0 we
-  // auto-pinned every agent-mode workspace (Custom + K2SO Agent) to
+  // auto-pinned every agent-mode workspace (Custom + K2 Agent) to
   // the top regardless of user intent. 0.39.0 retires that — users
   // can still pin any workspace including agent-mode ones, but the
   // forced top placement is gone. Unpinned agent-mode workspaces
@@ -173,7 +173,7 @@ export default function IconRail(): React.JSX.Element {
       onConfirm: async () => {
         await addProject(folderPath)
         // Trigger the skill write immediately so the user sees the effect
-        // of the migration without having to restart K2SO.
+        // of the migration without having to restart K2.
         try {
           await daemonCliPost('agents/run-workspace-ingest', { project_path: folderPath })
         } catch (err) {

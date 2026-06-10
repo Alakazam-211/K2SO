@@ -1,7 +1,7 @@
 // Shape A driver (0.39.35 — unified remote update).
 //
 // When THIS machine is a "bundled-app" host (the daemon runs inside
-// K2SO.app), a remote Owner/Admin can trigger an update of it over K2
+// K2.app), a remote Owner/Admin can trigger an update of it over K2
 // Connect. The daemon receives `POST /cli/daemon/update/start`, sees it's a
 // bundled-app, and EMITS an `app:update-trigger` frame over its `/events`
 // WS. The co-located app's `daemon_events` subscriber re-emits that as a

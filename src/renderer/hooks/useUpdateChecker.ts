@@ -26,7 +26,7 @@ async function checkForUpdate(showToastIfNone = false): Promise<void> {
       if (version && version !== lastNotifiedVersion) {
         lastNotifiedVersion = version
         useToastStore.getState().addToast(
-          `K2SO v${version} is available`,
+          `K2 v${version} is available`,
           'info',
           8000,
           {
@@ -41,7 +41,7 @@ async function checkForUpdate(showToastIfNone = false): Promise<void> {
       return
     }
     if (showToastIfNone) {
-      useToastStore.getState().addToast('K2SO is up to date', 'success', 3000)
+      useToastStore.getState().addToast('K2 is up to date', 'success', 3000)
     }
     return
   } catch {
@@ -54,7 +54,7 @@ async function checkForUpdate(showToastIfNone = false): Promise<void> {
     if (info.has_update && info.latest_version !== lastNotifiedVersion) {
       lastNotifiedVersion = info.latest_version
       useToastStore.getState().addToast(
-        `K2SO v${info.latest_version} is available`,
+        `K2 v${info.latest_version} is available`,
         'info',
         8000,
         {
@@ -67,7 +67,7 @@ async function checkForUpdate(showToastIfNone = false): Promise<void> {
       )
     } else if (showToastIfNone && !info.has_update) {
       useToastStore.getState().addToast(
-        `K2SO v${info.current_version} is up to date`,
+        `K2 v${info.current_version} is up to date`,
         'success',
         3000
       )

@@ -80,7 +80,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     } catch (err) {
       // If relaunch fails, the update was still installed — tell the user
       console.error('[updater] Relaunch failed:', err)
-      set({ status: 'error', error: 'Update installed successfully. Please reopen K2SO to use the new version.' })
+      set({ status: 'error', error: 'Update installed successfully. Please reopen K2 to use the new version.' })
     }
   },
 }))

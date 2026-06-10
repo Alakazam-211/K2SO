@@ -594,7 +594,7 @@ function getHighlightExtension(themeId: string): Extension {
 }
 
 export const EDITOR_THEMES: { id: string; label: string }[] = [
-  { id: 'k2so-dark', label: 'K2SO Dark' },
+  { id: 'k2so-dark', label: 'K2 Dark' },
   { id: 'one-dark', label: 'One Dark' },
   { id: 'dracula', label: 'Dracula' },
   { id: 'nord', label: 'Nord' },

@@ -35,7 +35,7 @@ export interface CustomThemeJson {
   syntax: Record<string, string>
 }
 
-// ── Defaults (K2SO Dark) ──────────────────────────────────────────────
+// ── Defaults (K2 Dark) ──────────────────────────────────────────────
 
 const DEFAULT_COLORS: ThemeColors = {
   bg: '#0a0a0a', fg: '#e4e4e7', gutterBg: '#0a0a0a', gutterFg: '#555', gutterBorder: '#1a1a1a',
@@ -82,7 +82,7 @@ function buildHighlightStyle(syntax: Record<string, string>): HighlightStyle {
 /**
  * Parse a custom theme JSON string into ThemeColors + HighlightStyle.
  * Returns null if the JSON is invalid (e.g. file mid-edit).
- * Fills missing fields from K2SO Dark defaults.
+ * Fills missing fields from K2 Dark defaults.
  */
 export function parseCustomThemeJson(
   jsonString: string

@@ -4,11 +4,11 @@ import {
   type ResolvableProject,
 } from './resolveHost'
 
-// Two workspaces: K2SO (globally active, running heartbeats) and HK47.
-// Issue #7: opening HK47's history panel showed K2SO's chats because the
+// Two workspaces: K2 (globally active, running heartbeats) and HK47.
+// Issue #7: opening HK47's history panel showed K2's chats because the
 // component resolved from the GLOBAL active pointers (which pointed at
-// K2SO) instead of the host workspace the panel was mounted inside.
-const K2SO: ResolvableProject = {
+// K2) instead of the host workspace the panel was mounted inside.
+const K2: ResolvableProject = {
   id: 'proj-k2so',
   path: '/repos/k2so',
   workspaces: [
@@ -21,15 +21,15 @@ const HK47: ResolvableProject = {
   path: '/repos/hk47',
   workspaces: [{ id: 'ws-hk47-main', branch: 'main', worktreePath: null }],
 }
-const PROJECTS = [K2SO, HK47]
+const PROJECTS = [K2, HK47]
 
 describe('resolveChatHistoryHost', () => {
   it('binds to the HOST project by path even when another project is globally active (#7)', () => {
-    // Global pointers say K2SO is active, but the panel is mounted in HK47.
+    // Global pointers say K2 is active, but the panel is mounted in HK47.
     const r = resolveChatHistoryHost(PROJECTS, '/repos/hk47', 'proj-k2so', 'ws-k2so-main')
     expect(r.project?.id).toBe('proj-hk47')
     expect(r.projectPath).toBe('/repos/hk47')
-    // Crucially NOT K2SO.
+    // Crucially NOT K2.
     expect(r.project?.id).not.toBe('proj-k2so')
   })
 

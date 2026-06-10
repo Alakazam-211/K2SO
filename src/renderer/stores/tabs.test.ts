@@ -165,7 +165,7 @@ describe('ensureSystemAgentTabs', () => {
 
   it('heals a restored pinned tab carrying a stale workspace path', () => {
     // Repro: HK47's saved layout has a pinned Chat tab whose agent item
-    // still points at the K2SO workspace (projectPath baked in under the
+    // still points at the K2 workspace (projectPath baked in under the
     // wrong workspace and replayed verbatim by restoreLayout). Switching
     // into HK47 calls ensureSystemAgentTabs with HK47's authoritative
     // path — the existing tab must be reconciled, not reused as-is.
@@ -181,7 +181,7 @@ describe('ensureSystemAgentTabs', () => {
             type: 'agent',
             data: {
               agentName: 'k2so-manager',
-              projectPath: '/workspaces/K2SO',
+              projectPath: '/workspaces/K2',
               section: 'chat',
               sessionId: 'old-k2so-session',
             },
@@ -205,7 +205,7 @@ describe('ensureSystemAgentTabs', () => {
       return it.type === 'agent' ? (it.data as AgentItemData) : null
     })()
 
-    // Reconciled to HK47, not left pointing at K2SO.
+    // Reconciled to HK47, not left pointing at K2.
     expect(chatData?.projectPath).toBe('/workspaces/HK47')
     expect(chatData?.agentName).toBe('hk47-manager')
     // The Claude session belonged to the old workspace — dropped.

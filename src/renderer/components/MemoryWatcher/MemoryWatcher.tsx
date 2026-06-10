@@ -90,7 +90,7 @@ export default function MemoryWatcher(): React.JSX.Element | null {
             ? `RSS grew ${growthMB} MB above baseline`
             : `RSS hit ${mb} MB`
           addToast(
-            `K2SO memory: ${reason}. Consider restarting the app to avoid being reaped by macOS.`,
+            `K2 memory: ${reason}. Consider restarting the app to avoid being reaped by macOS.`,
             'error',
             10_000
           )

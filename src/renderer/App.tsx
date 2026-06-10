@@ -233,10 +233,10 @@ function applyK2SOZoom(): void {
   const z = window.__k2soZoom ?? 1
   if (z === 1) {
     document.documentElement.style.zoom = ''
-    document.title = 'K2SO'
+    document.title = 'K2'
   } else {
     document.documentElement.style.zoom = String(z)
-    document.title = `K2SO — ${Math.round(z * 100)}%`
+    document.title = `K2 — ${Math.round(z * 100)}%`
   }
 }
 
@@ -825,7 +825,7 @@ export default function App(): React.JSX.Element {
         ) : (
           <div className="flex-1 flex items-center justify-center h-full">
             <div className="text-center">
-              <h2 className="text-lg font-medium text-[var(--color-text-muted)]">K2SO</h2>
+              <h2 className="text-lg font-medium text-[var(--color-text-muted)]">K2</h2>
               <p className="text-xs text-[var(--color-text-muted)] mt-2 opacity-60">
                 Add a workspace to get started
               </p>

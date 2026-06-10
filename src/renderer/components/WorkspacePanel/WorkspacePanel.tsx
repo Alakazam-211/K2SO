@@ -49,7 +49,7 @@ interface K2soAgentInfo {
 const modeLabels: Record<string, string> = {
   off: 'None',
   custom: 'Custom Agent',
-  agent: 'K2SO Agent',
+  agent: 'K2 Agent',
   manager: 'Workspace Manager',
   coordinator: 'Workspace Manager', // legacy
   pod: 'Workspace Manager', // legacy

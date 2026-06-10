@@ -4,7 +4,7 @@ import { useAddWorkspaceDialogStore } from '../../stores/add-workspace-dialog'
 // The Skip / Start-Fresh / Adopt consent picker was removed with the
 // canonical-agents PRD (§7 Removal Catalog): harness fan-out is now off by
 // default, so adding a workspace no longer touches any harness file and
-// needs no consent gate. The value-pitch WHY copy ("Tell K2SO once, every
+// needs no consent gate. The value-pitch WHY copy ("Tell K2 once, every
 // AI tool listens…") moved verbatim into the K2 Canonical Agent skill
 // briefing + the canonical button subtitle in the Agent section — that is
 // where unification is actually opt-in. This dialog is now a plain confirm.
@@ -55,7 +55,7 @@ export default function AddWorkspaceDialog(): React.JSX.Element | null {
         {/* Header */}
         <div className="px-5 pt-5 pb-2">
           <h2 className="text-sm font-medium text-[var(--color-text-primary)]">
-            Add Workspace to K2SO
+            Add Workspace to K2
           </h2>
           <p className="text-[10px] text-[var(--color-text-muted)] mt-1 break-all font-mono">
             {path}
@@ -66,7 +66,7 @@ export default function AddWorkspaceDialog(): React.JSX.Element | null {
         <div className="px-5 pb-3">
           <div className="border border-[var(--color-border)] bg-[var(--color-bg)]/40 px-3 py-3 text-[11px] leading-relaxed text-[var(--color-text-secondary)] space-y-2">
             <p>
-              K2SO connects to this folder without touching any of your files. Your existing
+              K2 connects to this folder without touching any of your files. Your existing
               AI-tool notes (<span className="font-mono">CLAUDE.md</span>,{' '}
               <span className="font-mono">GEMINI.md</span>, …) stay exactly as they are.
             </p>

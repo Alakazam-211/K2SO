@@ -9,7 +9,7 @@ import { type HarnessProbe, anyHarnessUnified } from './canonicalState'
 // briefing (canonical-agents PRD §7). This is where harness unification is
 // actually opt-in, so the pitch belongs here.
 export const CANONICAL_PITCH_SUBTITLE =
-  'Tell K2SO once, every AI tool listens. Each AI coding tool reads its project notes from a different file; write your context once and every tool sees the same picture.'
+  'Tell K2 once, every AI tool listens. Each AI coding tool reads its project notes from a different file; write your context once and every tool sees the same picture.'
 
 /**
  * Role-skill button (Workspace Manager / K2 Agent). Opens the normal
@@ -136,7 +136,7 @@ export function CanonicalAgentButton({
           )}
         </span>
         <span className="text-[9px] text-[var(--color-text-muted)] leading-snug">
-          Allow programmatic harness fan-out (symlinks). When on, K2SO keeps the harness files
+          Allow programmatic harness fan-out (symlinks). When on, K2 keeps the harness files
           (<span className="font-mono">CLAUDE.md</span>, <span className="font-mono">GEMINI.md</span>, …)
           symlinked to <span className="font-mono">.k2so/agent/AGENT.md</span> automatically. Off by default — the
           skill route (button above) is the safe, copy-based alternative.

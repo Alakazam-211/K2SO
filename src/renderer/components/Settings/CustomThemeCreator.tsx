@@ -13,8 +13,8 @@ import type { HighlightStyle } from '@codemirror/language'
 // Same preview code used in the Code Editor settings
 const PREVIEW_CODE = `import { useState, useEffect, useCallback } from 'react'
 
-// K2SO Security Droid — Imperial Data Vault Access Module
-// "I find that answer vague and unconvincing." — K2SO
+// K2 Security Droid — Imperial Data Vault Access Module
+// "I find that answer vague and unconvincing." — K2
 
 interface SecurityProtocol {
   clearanceLevel: 'rebel' | 'imperial' | 'classified'
@@ -27,7 +27,7 @@ type MissionStatus = 'infiltrating' | 'compromised' | 'success' | 'told-you-so'
 
 /**
  * Calculates the survival odds for a given mission.
- * Spoiler: they're never good enough for K2SO's standards.
+ * Spoiler: they're never good enough for K2's standards.
  */
 export function calculateSurvivalOdds(
   crew: string[],
@@ -80,7 +80,7 @@ export function useImperialVault(protocol: SecurityProtocol) {
       if (detected && !alarmTriggered) {
         setAlarmTriggered(true)
         setStatus('compromised')
-        console.warn('[K2SO] Congratulations. You are being rescued.')
+        console.warn('[K2] Congratulations. You are being rescued.')
       }
     }, 5000)
 
@@ -226,7 +226,7 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
   // Build agent prompt and command args (must be before any conditional returns)
   const agentPrompt = useMemo(() => {
     const fileName = themePath?.split('/').pop() || 'custom-theme.json'
-    return `You are a theme designer for K2SO, a developer workspace app. Your ONLY job is to edit the file "${fileName}" in the current directory. This JSON file defines a code editor theme with two sections: "colors" (editor UI like background, gutter, cursor, selection) and "syntax" (code highlighting for keywords, strings, types, comments, etc). All values are hex color strings. You can also change the "name" field to give the theme a custom name, and set "type" to "dark" or "light". The user sees a live preview that updates each time you save. Ask what kind of theme they want, then iterate. Do NOT edit any other files.`
+    return `You are a theme designer for K2, a developer workspace app. Your ONLY job is to edit the file "${fileName}" in the current directory. This JSON file defines a code editor theme with two sections: "colors" (editor UI like background, gutter, cursor, selection) and "syntax" (code highlighting for keywords, strings, types, comments, etc). All values are hex color strings. You can also change the "name" field to give the theme a custom name, and set "type" to "dark" or "light". The user sees a live preview that updates each time you save. Ask what kind of theme they want, then iterate. Do NOT edit any other files.`
   }, [themePath])
 
   const terminalCommand = agentCommand?.command
@@ -239,7 +239,7 @@ export function CustomThemeCreator({ onClose, currentThemeId, existingThemePath 
       return [
         ...baseArgs,
         '--append-system-prompt', agentPrompt,
-        `Open and read the file ${fileName} in the current directory. This is a K2SO editor theme JSON file. The user can see a live preview on the right that updates each time you save. Start by asking them what they'd like to name their theme and what style they're going for (dark, light, warm, cool, vibrant, muted, etc.), then start editing the colors.`,
+        `Open and read the file ${fileName} in the current directory. This is a K2 editor theme JSON file. The user can see a live preview on the right that updates each time you save. Start by asking them what they'd like to name their theme and what style they're going for (dark, light, warm, cool, vibrant, muted, etc.), then start editing the colors.`,
       ]
     }
     return baseArgs

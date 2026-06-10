@@ -772,7 +772,7 @@ function FileViewerPaneInner({ filePath, paneId, paneGroupId, tabId, initialScro
         // dangerouslySetInnerHTML. `srcDoc` puts the document in a
         // null-origin sandbox: with `allow-scripts` (and crucially
         // WITHOUT `allow-same-origin`) the page's scripts can run so a
-        // dashboard stays interactive, but they cannot reach the K2SO
+        // dashboard stays interactive, but they cannot reach the K2
         // app, its cookies/localStorage, or the filesystem. White
         // background so dark-themed app chrome doesn't bleed into
         // light HTML documents.
