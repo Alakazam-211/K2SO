@@ -136,6 +136,25 @@ asset names; tauri.conf: productName K2, identifier per Q1, updater
 endpoint → `Alakazam-211/K2` manifest. Full test suite + a migration
 integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
 
+> **R2 STATUS: CODE-COMPLETE (2026-06-10, branch `rebrand-k2`, 7 commits
+> 557146a…b17110c).** Stages: (1+2) crates k2-core/k2-daemon + `k2` CLI
+> with deprecation shim; (3) K2_* env dual-emit/dual-read; (4) renderer
+> prose + "K2 by Alakazam Labs" anchors; (5a) ~/.k2 home migration module
+> (move + compat symlink, 4 tests); (5b) dev.k2.* launchd labels +
+> keychain services + `k2-daemon` binary + boot-time launchd sweep with
+> eager heartbeat/claude-auth re-ensure + keychain copy-on-read for all 3
+> connect services; (6) workspace dot-dir dual-compat
+> (`workspace_dot_dir()`: .k2/ preferred, .k2so/ default — Q2) across
+> ~50 Rust sites + CLI `_ws_dot_dir`/`K2_HOME` + CLI label fallback;
+> (7) productName K2 / dev.k2.app / brand icons / release.sh
+> RELEASE_REPO param (default Alakazam-211/K2; K2_RELEASE_REPO override
+> for bridge releases) — stage 8 folded into 7.
+> Tests: 857 k2-core + all k2-daemon targets green; renderer at known
+> baseline (#41); clone heartbeatEnabled failure is pre-existing → #44.
+> Remaining before R3: full `tauri build` verification of K2.app, and
+> the e2e convergence rig (0.39.x → 0.40.0 update → app+daemon+agents
+> reconnect unaided) before the bridge ships.
+
 **R3 — 0.39.48 bridge release (old repo, last K2SO-branded build):**
 - In-app rebrand announcement (WHATS_NEW): name change, new home, and the
   LICENSE CHANGE disclosure (0.40+ is Fair Source/FSL; 0.39.x stays MIT) —

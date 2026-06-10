@@ -617,7 +617,7 @@ fn app_not_running_msg() -> String {
         .ok()
         .or_else(|| hostname_best_effort())
         .unwrap_or_else(|| "this host".to_string());
-    format!("K2SO.app isn't running on {host} — open it there, or update on the machine.")
+    format!("K2.app isn't running on {host} — open it there, or update on the machine.")
 }
 
 /// Best-effort hostname for the app-not-running message. Falls back to
