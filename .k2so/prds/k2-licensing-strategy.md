@@ -42,7 +42,8 @@ Alakazam Labs" name/logo independently of (and beyond) the code license.
 |---|---|---|
 | 1. FSL-1.1-Apache-2.0 (app/daemon/CLI) | commercialization | nobody provides K2 to third parties as a paid product/service except via layer 3; everything else (internal/team/business use, modification, redistribution) is free |
 | 2. Proprietary K2 Connect/Toge | the economics | the only maintained remote-access path runs through the metered service ($3/tunnel); control plane never ships |
-| 3. Commercial Hosting Grant (standing, public) | the channel | hosting K2 for clients is PERMITTED iff all remote access uses the official tunnel service under current pricing; own-tunnel commercial hosting requires a negotiated license |
+| 3. Commercial Hosting Grant (standing, public) | the channel | hosting K2 for clients is PERMITTED iff all remote access uses the official tunnel service under current pricing; own-tunnel commercial hosting requires the Enterprise BYOT tier (layer 3b) |
+| 3b. Enterprise "Bring Your Own Tunnel" license | the big-company door | a NAMED, PRICED tier (not ad-hoc negotiation): larger companies commercially host/operate K2 with their own remote-access infrastructure under a paid license — annual, per-server or per-seat |
 | 4. Trademark policy ("K2", logo, "K2 by Alakazam Labs") | identity | no re-skin can trade on the brand — including after the Apache conversion matures |
 | 5. CLA/DCO on external contributions | future freedom | preserves the unilateral relicensing position we have today (1,352/1,352 commits are Rosson's) |
 
@@ -82,6 +83,24 @@ Alakazam Labs" name/logo independently of (and beyond) the code license.
   open source, until versions convert. README/PROJECT.md/marketing language
   must change with the relicense.
 
+## The commercial ladder (customer-facing shape)
+
+| Tier | Who | Remote access | Price |
+|---|---|---|---|
+| Free | individuals, teams, any company self-hosting for themselves | anything they like (official tunnel, own VPN, LAN) | $0 |
+| Hosted channel (Commercial Hosting Grant) | MSPs/agencies hosting K2 for clients | official K2 Connect/Toge ONLY | then-current tunnel pricing (today $3/tunnel) — self-serve |
+| **Enterprise BYOT** | larger companies wanting their own tunnel/remote-access infrastructure under a commercial offering | their own | negotiated annual license |
+
+Two flavors of Enterprise BYOT to offer (both on paper from day one):
+1. **Permission-only** — they build/operate their own remote-access layer;
+   the license simply lifts the competing-use restriction for their
+   deployment scope.
+2. **Licensed on-prem K2 Toge** — we license the actual control-plane
+   software for them to run inside their network. Strictly better for both
+   sides (they don't rebuild, we keep them on our stack), and it is the
+   ONLY workable answer for air-gapped/regulated customers who physically
+   cannot use a cloud tunnel — the segment the public grant can never serve.
+
 ## Wording cautions for the grant
 
 - Tie the hosting condition to "**a current K2 Connect (K2 Toge) service
@@ -105,3 +124,6 @@ Alakazam Labs" name/logo independently of (and beyond) the code license.
 5. [ ] Old repo: final MIT tag, then archive **private** (per Rosson).
 6. [ ] k2.dev: publish the hosting-grant page ("Host K2 for your clients —
        $3/tunnel") as the self-serve channel-partner funnel.
+7. [ ] k2.dev: "Enterprise — bring your own tunnel" page (contact-sales
+       form; names the two BYOT flavors incl. on-prem K2 Toge for
+       air-gapped/regulated buyers).
