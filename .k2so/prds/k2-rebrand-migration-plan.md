@@ -56,7 +56,7 @@ entirely (strands stragglers — decide with data, months out).
 
 | Class | Today | 0.40.0 | Compat |
 |---|---|---|---|
-| Public brand / UI strings | K2SO | **K2** ("K2 by Alakazam Labs" in About/marketing) | none needed |
+| Public brand / UI strings | K2SO | **"K2 by Alakazam Labs"** wherever it fits (Rosson 2026-06-10: "anywhere that it can exist as K2 by Alakazam Labs, we should"): Settings header, About, onboarding/connection screens, update dialogs, DMG, site. Plain "K2" only where space genuinely forbids the composite (menu bar, tab chrome, toasts mid-sentence) | none needed |
 | CLI binary | `k2so` | **`k2`** | `k2so` shim delegates + prints one-line deprecation warning (Rosson-specified) |
 | App bundle | K2SO.app / com.alakazamlabs.k2so | K2.app / **dev.k2.app** (pending Q1) | updater rename rig decides mechanics (§2) |
 | Daemon binary | k2so-daemon | k2-daemon | old name symlink for launchd transition window |
