@@ -47,9 +47,9 @@ pub struct DaemonPlist {
     pub run_at_load: bool,
     /// `KeepAlive: true` tells launchd to restart the daemon on crash.
     pub keep_alive: bool,
-    /// Where to redirect stderr (`~/.k2so/daemon.stderr.log`).
+    /// Where to redirect stderr (`~/.k2/daemon.stderr.log`).
     pub stderr_path: PathBuf,
-    /// Where to redirect stdout (`~/.k2so/daemon.stdout.log`).
+    /// Where to redirect stdout (`~/.k2/daemon.stdout.log`).
     pub stdout_path: PathBuf,
 }
 
@@ -57,7 +57,7 @@ impl DaemonPlist {
     /// Canonical config: k2so-daemon, always-on, logs under `~/.k2so/`.
     pub fn canonical(program: PathBuf) -> Self {
         let k2so_dir = dirs::home_dir()
-            .map(|h| h.join(".k2so"))
+            .map(|h| h.join(".k2"))
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
             label: "com.k2so.k2so-daemon".to_string(),
@@ -339,8 +339,8 @@ mod tests {
         assert_eq!(p.label, "com.k2so.k2so-daemon");
         assert!(p.run_at_load);
         assert!(p.keep_alive);
-        assert!(p.stderr_path.ends_with(".k2so/daemon.stderr.log"));
-        assert!(p.stdout_path.ends_with(".k2so/daemon.stdout.log"));
+        assert!(p.stderr_path.ends_with(".k2/daemon.stderr.log"));
+        assert!(p.stdout_path.ends_with(".k2/daemon.stdout.log"));
     }
 
     #[test]

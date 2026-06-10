@@ -60,6 +60,7 @@ pub mod connect_users;
 // label + plist shape.
 pub mod daemon_lifecycle;
 pub mod db;
+pub mod migration_home;
 pub mod db_ops;
 // Phase 2.5c: retired-but-preserved surface; modules here are
 // `#[deprecated]` and exist only for the deprecation window.

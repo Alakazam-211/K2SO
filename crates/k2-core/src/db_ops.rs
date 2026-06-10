@@ -920,7 +920,7 @@ pub fn window_state_set(state: &WindowState, only_maximized_flag: bool) -> Resul
 /// settings.json so the read side stops fighting the DB.
 pub fn migrate_workspace_layouts_to_db() {
     let Some(home) = dirs::home_dir() else { return };
-    let settings_path = home.join(".k2so").join("settings.json");
+    let settings_path = home.join(".k2").join("settings.json");
     if !settings_path.exists() {
         return;
     }

@@ -147,7 +147,7 @@ impl TunnelConfig {
 fn config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so")
+        .join(".k2")
 }
 
 /// Path to the tunnel config file.

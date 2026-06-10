@@ -119,7 +119,7 @@ fn is_executable(p: &Path) -> bool {
 fn frpc_config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so")
+        .join(".k2")
         .join("frpc.toml")
 }
 
@@ -127,7 +127,7 @@ fn frpc_config_path() -> PathBuf {
 pub fn frpc_log_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so")
+        .join(".k2")
         .join("frpc.log")
 }
 

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 pub fn themes_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".k2so")
+        .join(".k2")
         .join("themes")
 }
 

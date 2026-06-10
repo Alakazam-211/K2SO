@@ -35,7 +35,7 @@ fn isolated_home(tag: &str) -> PathBuf {
             .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(home.join(".k2so")).unwrap();
+    std::fs::create_dir_all(home.join(".k2")).unwrap();
     home
 }
 
@@ -46,7 +46,7 @@ fn daemon_binary() -> PathBuf {
 /// Spawn the daemon under the given HOME, wait for it to publish
 /// `daemon.port`, return the published port, then kill the child.
 fn boot_once_and_read_port(home: &PathBuf) -> u16 {
-    let k2so_dir = home.join(".k2so");
+    let k2so_dir = home.join(".k2");
     let daemon_port = k2so_dir.join("daemon.port");
 
     let mut child = Command::new(daemon_binary())

@@ -145,7 +145,7 @@ pub fn init_database() -> Result<Arc<ReentrantMutex<Connection>>> {
 
     let db_dir = dirs::home_dir()
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("Could not determine home directory".to_string()))?
-        .join(".k2so");
+        .join(".k2");
     std::fs::create_dir_all(&db_dir)
         .map_err(|e| rusqlite::Error::InvalidParameterName(format!("Could not create ~/.k2so directory: {}", e)))?;
 

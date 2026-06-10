@@ -263,7 +263,7 @@ fn unpack_removes_the_uploaded_bundle_file() {
     // Simulate the uploaded bundle living under the dest's clone-tmp dir so
     // we assert the EXACT delete-after-unpack behaviour.
     let remote_home = root.path().join("remote-home");
-    let clone_tmp = remote_home.join(".k2so").join("clone-tmp");
+    let clone_tmp = remote_home.join(".k2").join("clone-tmp");
     fs::create_dir_all(&clone_tmp).unwrap();
     let uploaded = clone_tmp.join("My Agent-20260605-000000.tar.gz");
     fs::copy(&bundle, &uploaded).unwrap();
@@ -290,7 +290,7 @@ fn unpack_removes_the_uploaded_bundle_file() {
 #[test]
 fn prune_stale_bundles_removes_only_old_tar_gz() {
     let root = TempDir::new("k2so-prune");
-    let tmp_dir = root.path().join(".k2so").join("clone-tmp");
+    let tmp_dir = root.path().join(".k2").join("clone-tmp");
     fs::create_dir_all(&tmp_dir).unwrap();
 
     let stale = tmp_dir.join("old-workspace-20200101-000000.tar.gz");

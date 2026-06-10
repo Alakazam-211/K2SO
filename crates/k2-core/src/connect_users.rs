@@ -300,7 +300,7 @@ fn verify_hash(password: &str, hash: &str) -> bool {
 fn config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so")
+        .join(".k2")
 }
 
 /// Path to `~/.k2so/connect-users.json`.

@@ -424,7 +424,7 @@ fn clear_jobs_for_test() {
 /// can't be resolved.
 fn job_stage_dir(job_id: &str) -> PathBuf {
     let base = dirs::home_dir()
-        .map(|h| h.join(".k2so").join("update"))
+        .map(|h| h.join(".k2").join("update"))
         .unwrap_or_else(|| std::env::temp_dir().join("k2so-update"));
     base.join(job_id)
 }
@@ -434,7 +434,7 @@ fn job_stage_dir(job_id: &str) -> PathBuf {
 /// if the new binary fails its health-check.
 fn backup_path(version: &str) -> PathBuf {
     let base = dirs::home_dir()
-        .map(|h| h.join(".k2so").join("update"))
+        .map(|h| h.join(".k2").join("update"))
         .unwrap_or_else(|| std::env::temp_dir().join("k2so-update"));
     base.join(format!("backup-{version}"))
 }
@@ -1028,7 +1028,7 @@ exit 0
 /// which is the safe direction).
 fn daemon_port_hint() -> String {
     dirs::home_dir()
-        .map(|h| h.join(".k2so").join("daemon.port"))
+        .map(|h| h.join(".k2").join("daemon.port"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())

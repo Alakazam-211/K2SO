@@ -33,7 +33,7 @@ fn isolated_home(tag: &str) -> PathBuf {
             .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(home.join(".k2so")).unwrap();
+    std::fs::create_dir_all(home.join(".k2")).unwrap();
     home
 }
 
@@ -47,7 +47,7 @@ fn daemon_binary() -> PathBuf {
 #[tokio::test(flavor = "current_thread")]
 async fn daemon_writes_heartbeat_port_eagerly_on_startup() {
     let home = isolated_home("eager");
-    let k2so_dir = home.join(".k2so");
+    let k2so_dir = home.join(".k2");
 
     // Spawn the daemon as a child process with $HOME redirected
     // so its writes land in our scratch dir, not the real

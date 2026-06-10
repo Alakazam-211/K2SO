@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 fn k2so_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".k2so")
+        .join(".k2")
 }
 
 /// Path to `~/.k2so/connect-hosts.json`.

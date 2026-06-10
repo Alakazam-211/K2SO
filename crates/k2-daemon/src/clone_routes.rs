@@ -79,7 +79,7 @@ pub fn handle_clone_bundle(body: &[u8]) -> CliResponse {
         Some(h) => h,
         None => return CliResponse::internal_error("cannot resolve home directory"),
     };
-    let tmp_dir = home.join(".k2so").join("clone-tmp");
+    let tmp_dir = home.join(".k2").join("clone-tmp");
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
         return CliResponse::internal_error(format!("create clone-tmp dir: {e}"));
     }

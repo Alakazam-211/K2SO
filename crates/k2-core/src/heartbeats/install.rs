@@ -38,7 +38,7 @@ pub const DEFAULT_INTERVAL_SECS: u32 = 60;
 /// logging but the caller is free to ignore them — a partially
 /// installed cron is better than blocking the heartbeat add.
 pub fn ensure_cron_installed() -> Result<bool, String> {
-    let k2so_home = home_dir().join(".k2so");
+    let k2so_home = home_dir().join(".k2");
     fs::create_dir_all(&k2so_home).map_err(|e| format!("create ~/.k2so: {e}"))?;
 
     let script_path = k2so_home.join("heartbeat.sh");
@@ -337,7 +337,7 @@ fn home_dir() -> PathBuf {
 /// Returns the script path so the caller can hand it to the platform
 /// installer.
 pub fn write_heartbeat_script() -> Result<PathBuf, String> {
-    let k2so_home = home_dir().join(".k2so");
+    let k2so_home = home_dir().join(".k2");
     fs::create_dir_all(&k2so_home).map_err(|e| format!("create ~/.k2so: {e}"))?;
 
     // Clean up the retired heartbeat-projects.txt artifact (pre-P5.6).
@@ -590,7 +590,7 @@ pub fn uninstall_heartbeat_scheduler() -> Result<(), String> {
     uninstall_heartbeat_launchd()?;
     #[cfg(target_os = "linux")]
     uninstall_heartbeat_cron()?;
-    let k2so_home = home_dir().join(".k2so");
+    let k2so_home = home_dir().join(".k2");
     let _ = fs::remove_file(k2so_home.join("heartbeat.sh"));
     let _ = fs::remove_file(k2so_home.join("heartbeat-projects.txt"));
     Ok(())

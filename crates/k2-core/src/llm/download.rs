@@ -21,7 +21,7 @@ pub struct DownloadProgress {
 /// Returns the default models directory: ~/.k2so/models/
 pub fn models_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
-    Ok(home.join(".k2so").join("models"))
+    Ok(home.join(".k2").join("models"))
 }
 
 /// Returns the full path to the default model file.

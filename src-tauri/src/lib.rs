@@ -604,6 +604,14 @@ pub fn run() {
         .menu(|handle| menu::create_menu(handle))
         .on_menu_event(menu::handle_menu_event)
         .setup(|app| {
+            // 0.40.0 rebrand — one-time ~/.k2so → ~/.k2 home migration.
+            // Must precede the daemon plist install/heal + handshake so
+            // both sides agree on the home layout (daemon boot runs the
+            // same idempotent call).
+            match k2_core::migration_home::migrate_home_dir() {
+                Ok(o) => eprintln!("[boot] home migration: {o:?}"),
+                Err(e) => eprintln!("[boot] home migration failed: {e} — continuing on legacy layout"),
+            }
             let __setup_start = std::time::Instant::now();
             struct SetupGuard(std::time::Instant);
             impl Drop for SetupGuard {
@@ -1107,7 +1115,7 @@ pub fn run() {
                                     );
                                     if let Ok(home) = std::env::var("HOME") {
                                         let log_path = std::path::Path::new(&home)
-                                            .join(".k2so")
+                                            .join(".k2")
                                             .join("webview-watchdog.log");
                                         if let Ok(mut f) = std::fs::OpenOptions::new()
                                             .create(true)

@@ -158,6 +158,16 @@ async fn async_main() {
     // at build-time until we actually use it for real work.
     k2_core::__scaffolding_marker();
 
+    // 0.40.0 rebrand — one-time ~/.k2so → ~/.k2 home migration. MUST
+    // run before db::shared(), the port claim, or anything else that
+    // touches the home dir; the app's boot path runs the same call, so
+    // whichever process boots first performs the move and the other
+    // finds the migrated layout (+ compat symlink for old tooling).
+    match k2_core::migration_home::migrate_home_dir() {
+        Ok(outcome) => k2_core::log_debug!("[daemon/boot] home migration: {outcome:?}"),
+        Err(e) => eprintln!("[daemon/boot] home migration FAILED: {e} — continuing on legacy layout"),
+    }
+
     // 0.37.9 — raise RLIMIT_NOFILE so the daemon can hold enough fds
     // for many concurrent PTYs / WS sockets / file watchers. launchd
     // gives the daemon a 256/1024 soft limit by default, which gets
@@ -186,7 +196,7 @@ async fn async_main() {
     log_debug!("[daemon] {}", BANNER);
 
     let k2so_dir = match dirs::home_dir() {
-        Some(h) => h.join(".k2so"),
+        Some(h) => h.join(".k2"),
         None => {
             log_debug!("[daemon] FATAL: cannot determine home directory");
             std::process::exit(2);

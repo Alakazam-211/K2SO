@@ -130,7 +130,7 @@ pub fn daemon_uninstall() -> Result<(), String> {
 
     // Best-effort cleanup of the port/token/log files. Missing files
     // are fine.
-    if let Some(dir) = dirs::home_dir().map(|h| h.join(".k2so")) {
+    if let Some(dir) = dirs::home_dir().map(|h| h.join(".k2")) {
         for f in &["daemon.port", "daemon.token"] {
             let _ = std::fs::remove_file(dir.join(f));
         }
@@ -188,7 +188,7 @@ pub fn daemon_restart() -> Result<(), String> {
 pub fn daemon_log_path() -> Result<String, String> {
     let dir = dirs::home_dir()
         .ok_or_else(|| "home dir unavailable".to_string())?
-        .join(".k2so");
+        .join(".k2");
     Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
 }
 
@@ -376,7 +376,7 @@ mod tests {
         // there (common in dev — nobody's installed the plist), the
         // command should quietly return NotInstalled instead of
         // panicking or returning an Err.
-        let k2so_dir = dirs::home_dir().unwrap().join(".k2so");
+        let k2so_dir = dirs::home_dir().unwrap().join(".k2");
         let port_file = k2so_dir.join("daemon.port");
         let token_file = k2so_dir.join("daemon.token");
         // Only run if neither file happens to exist in the dev env.

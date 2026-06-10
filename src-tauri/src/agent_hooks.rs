@@ -271,7 +271,7 @@ exit 0
 /// Write the hook script to ~/.k2so/hooks/notify.sh
 pub fn write_hook_script(port: u16) -> Result<String, String> {
     let home = dirs::home_dir().ok_or("No home directory")?;
-    let hooks_dir = home.join(".k2so").join("hooks");
+    let hooks_dir = home.join(".k2").join("hooks");
     std::fs::create_dir_all(&hooks_dir).map_err(|e| e.to_string())?;
 
     let script_path = hooks_dir.join("notify.sh");

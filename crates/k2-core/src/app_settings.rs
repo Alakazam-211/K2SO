@@ -404,7 +404,7 @@ fn settings_dir() -> PathBuf {
             log_debug!("[app_settings] WARNING: no home dir, using current dir");
             PathBuf::from(".")
         })
-        .join(".k2so")
+        .join(".k2")
 }
 
 fn settings_file() -> PathBuf {
