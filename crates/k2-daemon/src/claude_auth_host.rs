@@ -10,7 +10,7 @@
 //!      `platform.claude.com` and write the new tokens back to the
 //!      same two stores.
 //!   4. Install / uninstall the launchd plist
-//!      (`~/Library/LaunchAgents/com.k2so.claude-auth-refresh.plist`)
+//!      (`~/Library/LaunchAgents/dev.k2.claude-auth.plist`)
 //!      that runs `~/.k2so/claude-auth-refresh.sh` every 20 minutes.
 //!
 //! Post-Unit-5, all four responsibilities live here so the refresh
@@ -58,7 +58,7 @@ const CLIENT_ID: &str = "https://claude.ai/oauth/claude-code-client-metadata";
 const EXPIRY_BUFFER_SECS: i64 = 300; // 5 minutes
 
 #[cfg(target_os = "macos")]
-const PLIST_LABEL: &str = "com.k2so.claude-auth-refresh";
+const PLIST_LABEL: &str = "dev.k2.claude-auth";
 
 // ── Credential helpers ──────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ fn refresh_script_path() -> PathBuf {
 fn plist_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/LaunchAgents/com.k2so.claude-auth-refresh.plist")
+        .join("Library/LaunchAgents/dev.k2.claude-auth.plist")
 }
 
 /// Generates the bash refresh script. Identical content to the
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn generated_plist_contains_label_and_script_path() {
         let plist = generate_plist();
-        assert!(plist.contains("com.k2so.claude-auth-refresh"));
+        assert!(plist.contains("dev.k2.claude-auth"));
         assert!(plist.contains("claude-auth-refresh.sh"));
         assert!(plist.contains("<integer>1200</integer>"));
     }

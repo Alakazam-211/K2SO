@@ -3,7 +3,7 @@
 # Builds, signs, notarizes, and releases K2SO with both DMG and update bundle.
 #
 # Prerequisites:
-#   - TAURI_SIGNING_PRIVATE_KEY env var (or ~/.tauri/k2so-updater.key)
+#   - TAURI_SIGNING_PRIVATE_KEY env var (or ~/.tauri/k2-updater.key)
 #   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD env var
 #   - Apple signing identity in keychain
 #   - gh CLI authenticated
@@ -71,9 +71,12 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     echo "Loaded .env"
 fi
 
-# Load signing key from file if env var not set
+# Load signing key from file if env var not set. SAME key under either
+# name — k2-updater.key is the post-rebrand name, k2so-updater.key the
+# original; never rotate the key itself (updates would stop verifying).
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-    KEY_FILE="$HOME/.tauri/k2so-updater.key"
+    KEY_FILE="$HOME/.tauri/k2-updater.key"
+    [ -f "$KEY_FILE" ] || KEY_FILE="$HOME/.tauri/k2so-updater.key"
     if [ -f "$KEY_FILE" ]; then
         export TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
         echo "Loaded signing key from $KEY_FILE"
@@ -97,8 +100,8 @@ echo "Step 1: Bumping version to ${VERSION}..."
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" package.json src-tauri/tauri.conf.json
 sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" \
     src-tauri/Cargo.toml \
-    crates/k2so-core/Cargo.toml \
-    crates/k2so-daemon/Cargo.toml
+    crates/k2-core/Cargo.toml \
+    crates/k2-daemon/Cargo.toml
 sed -i '' "s/K2_CLI_VERSION=\"[^\"]*\"/K2_CLI_VERSION=\"${VERSION}\"/" cli/k2
 echo "  Done."
 
@@ -146,7 +149,7 @@ export APPLE_TEAM_ID="36B8R93HXV"
 bun run tauri build
 echo "  Build complete."
 
-# ── Step 2.5: Build + bundle k2so-daemon sidecar ──
+# ── Step 2.5: Build + bundle k2-daemon sidecar ──
 #
 # k2so-daemon is a peer binary to the main Tauri app that owns the
 # persistent-agent runtime (launched by launchd, outlives the Tauri
@@ -160,19 +163,19 @@ echo "  Build complete."
 # primary bin into the bundle) then `cp` it in. Hardened-runtime
 # signing in Step 3 covers this binary too.
 echo ""
-echo "Step 2.5: Bundling k2so-daemon sidecar..."
+echo "Step 2.5: Bundling k2-daemon sidecar..."
 # cargo workspace root is the repo root — both `k2so` (Tauri) and
 # `k2so-daemon` build into `target/release/`. Tauri's bundler writes
 # only its own primary bin into the .app, so we copy k2so-daemon in
 # explicitly.
 cargo build --release -p k2-daemon
-DAEMON_SRC="target/release/k2so-daemon"
+DAEMON_SRC="target/release/k2-daemon"
 if [ ! -x "$DAEMON_SRC" ]; then
-    echo "  FATAL: k2so-daemon not at $DAEMON_SRC after cargo build" >&2
+    echo "  FATAL: k2-daemon not at $DAEMON_SRC after cargo build" >&2
     exit 1
 fi
 cp "$DAEMON_SRC" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2-daemon"
 echo "  k2so-daemon copied into K2SO.app/Contents/MacOS/"
 
 # ── Step 3: Sign with hardened runtime ──
@@ -197,7 +200,7 @@ codesign --force --options runtime --timestamp \
 codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$SIGNING_IDENTITY" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2-daemon"
 # frpc tunnel sidecar (Tauri externalBin → Contents/MacOS/frpc). Re-sign
 # with hardened runtime so the binary the app stages to ~/.k2so/bin/frpc
 # is notarization-covered and runs without a Gatekeeper quarantine block.
@@ -304,7 +307,7 @@ echo "  latest.json generated."
 # workflow builds + signs the linux-x86_64 / linux-aarch64 artifacts on
 # native ubuntu runners and uploads them to this same release. If those CI
 # artifacts have already been fetched into target/release/daemon-dist/ (by
-# name: k2so-daemon-linux-x86_64{,.sig}, k2so-daemon-linux-aarch64{,.sig}),
+# name: k2-daemon-linux-x86_64{,.sig}, k2-daemon-linux-aarch64{,.sig}),
 # this step merges them into the manifest; otherwise it emits a macos-only
 # manifest (documented — P2/P3 treat a missing artifact key as "no build
 # for that platform yet").
@@ -329,9 +332,9 @@ DIST_DIR="$PROJECT_DIR/target/release/daemon-dist"
 mkdir -p "$DIST_DIR"
 
 # The native standalone daemon is the SAME binary already built in Step 2.5
-# (target/release/k2so-daemon). Publish it under its platform-stamped name.
-MAC_ASSET="k2so-daemon-macos-aarch64"
-cp "$PROJECT_DIR/target/release/k2so-daemon" "$DIST_DIR/$MAC_ASSET"
+# (target/release/k2-daemon). Publish it under its platform-stamped name.
+MAC_ASSET="k2-daemon-macos-aarch64"
+cp "$PROJECT_DIR/target/release/k2-daemon" "$DIST_DIR/$MAC_ASSET"
 
 # Sign with the Tauri updater key (minisign-format .sig, identical
 # mechanism to Step 5's K2SO.app.tar.gz.sig).

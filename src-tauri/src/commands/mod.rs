@@ -19,7 +19,7 @@ pub mod updater;
 // Phase 2 Unit 5 — `claude_auth` command shims deleted. The renderer
 // hits `/cli/claude-auth/*` on k2so-daemon directly; no Tauri-side
 // command surface for it remains. Scheduler ownership (the launchd
-// plist `com.k2so.claude-auth-refresh.plist`) now lives in the
+// plist `dev.k2.claude-auth.plist`) now lives in the
 // daemon's `claude_auth_host` module so refresh keeps working when
 // the Tauri app is closed.
 pub mod k2so_agents;

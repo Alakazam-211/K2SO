@@ -612,6 +612,13 @@ pub fn run() {
                 Ok(o) => eprintln!("[boot] home migration: {o:?}"),
                 Err(e) => eprintln!("[boot] home migration failed: {e} — continuing on legacy layout"),
             }
+            // 0.40.0 — retire com.k2so.* LaunchAgents (the daemon plist
+            // re-installs below under dev.k2.daemon; heartbeat +
+            // claude-auth re-ensure from the daemon's own boot).
+            let swept = k2_core::migration_launchd::migrate_launchd_labels();
+            if !swept.is_empty() {
+                eprintln!("[boot] launchd labels migrated: {swept:?}");
+            }
             let __setup_start = std::time::Instant::now();
             struct SetupGuard(std::time::Instant);
             impl Drop for SetupGuard {
@@ -775,7 +782,7 @@ pub fn run() {
                                     // Input/output error" which usually
                                     // means a stale plist is already
                                     // loaded. User can resolve via
-                                    // `launchctl unload ~/Library/LaunchAgents/com.k2so.k2so-daemon.plist`.
+                                    // `launchctl unload ~/Library/LaunchAgents/dev.k2.daemon.plist`.
                                     log_debug!("[k2so] daemon plist install failed: {e}");
                                 }
                             }

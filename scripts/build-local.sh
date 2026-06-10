@@ -10,7 +10,7 @@
 # version string — each run overwrites the previous DMG.
 #
 # Prerequisites (same as release.sh):
-#   - TAURI_SIGNING_PRIVATE_KEY env var (or ~/.tauri/k2so-updater.key)
+#   - TAURI_SIGNING_PRIVATE_KEY env var (or ~/.tauri/k2-updater.key)
 #   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD env var (or will prompt)
 #   - Apple signing identity in keychain ("K2SO-notarize" profile)
 #
@@ -63,9 +63,12 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     echo "Loaded .env"
 fi
 
-# Load signing key from file if env var not set
+# Load signing key from file if env var not set. SAME key under either
+# name — k2-updater.key is the post-rebrand name, k2so-updater.key the
+# original; never rotate the key itself (updates would stop verifying).
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-    KEY_FILE="$HOME/.tauri/k2so-updater.key"
+    KEY_FILE="$HOME/.tauri/k2-updater.key"
+    [ -f "$KEY_FILE" ] || KEY_FILE="$HOME/.tauri/k2so-updater.key"
     if [ -f "$KEY_FILE" ]; then
         export TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_FILE")"
         echo "Loaded signing key from $KEY_FILE"
@@ -87,16 +90,16 @@ cd "$PROJECT_DIR"
 #
 # Bumps all THREE Cargo packages so they report a consistent version.
 # - src-tauri/Cargo.toml:       the main Tauri `k2so` bin
-# - crates/k2so-daemon/Cargo.toml: the daemon bin (otherwise /status
+# - crates/k2-daemon/Cargo.toml: the daemon bin (otherwise /status
 #                                  reports the crate's literal version
 #                                  e.g. "0.33.0-dev", not the release)
-# - crates/k2so-core/Cargo.toml: the shared library both binaries link
+# - crates/k2-core/Cargo.toml: the shared library both binaries link
 echo ""
 echo "Step 1: Bumping version to ${VERSION}..."
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" package.json src-tauri/tauri.conf.json
 sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
-sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" crates/k2so-daemon/Cargo.toml
-sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" crates/k2so-core/Cargo.toml
+sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" crates/k2-daemon/Cargo.toml
+sed -i '' "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" crates/k2-core/Cargo.toml
 sed -i '' "s/K2SO_CLI_VERSION=\"[^\"]*\"/K2SO_CLI_VERSION=\"${VERSION}\"/" cli/k2so
 echo "  Done."
 
@@ -136,17 +139,17 @@ fi
 echo "  Version check: built binary contains '${VERSION}' ✓"
 echo "  Build complete."
 
-# ── Step 2.5: Build + bundle k2so-daemon sidecar ──
+# ── Step 2.5: Build + bundle k2-daemon sidecar ──
 echo ""
-echo "Step 2.5: Bundling k2so-daemon sidecar..."
+echo "Step 2.5: Bundling k2-daemon sidecar..."
 cargo build --release -p k2-daemon
-DAEMON_SRC="target/release/k2so-daemon"
+DAEMON_SRC="target/release/k2-daemon"
 if [ ! -x "$DAEMON_SRC" ]; then
-    echo "  FATAL: k2so-daemon not at $DAEMON_SRC after cargo build" >&2
+    echo "  FATAL: k2-daemon not at $DAEMON_SRC after cargo build" >&2
     exit 1
 fi
 cp "$DAEMON_SRC" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2-daemon"
 echo "  k2so-daemon copied into K2SO.app/Contents/MacOS/"
 
 # ── Step 3: Sign with hardened runtime ──
@@ -157,7 +160,7 @@ codesign --force --options runtime --timestamp \
     "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so"
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
-    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2so-daemon"
+    "target/release/bundle/macos/K2SO.app/Contents/MacOS/k2-daemon"
 codesign --force --options runtime --timestamp \
     --sign "$SIGNING_IDENTITY" \
     "target/release/bundle/macos/K2SO.app"

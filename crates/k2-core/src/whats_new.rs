@@ -569,10 +569,10 @@ older minor body
     // ── State file I/O ───────────────────────────────────────────────
 
     #[test]
-    fn state_path_lives_in_dot_k2so() {
+    fn state_path_lives_in_dot_k2() {
         let p = state_path();
         let s = p.to_string_lossy();
-        assert!(s.ends_with(".k2so/whats-new.state"), "got {s}");
+        assert!(s.ends_with(".k2/whats-new.state"), "got {s}");
     }
 
     #[test]

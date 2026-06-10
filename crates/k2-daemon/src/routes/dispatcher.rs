@@ -1831,7 +1831,7 @@ async fn handle_one_request(
             super::http::send_response(&mut *stream, r.status, r.content_type, &r.body).await;
         }
         // Phase 2 Unit 7c — heartbeat-launchd installer routes.
-        // Daemon owns its own `com.k2so.agent-heartbeat.plist` so
+        // Daemon owns its own `dev.k2.heartbeat.plist` so
         // K2SO Connect (remote daemon without Tauri) can install +
         // remove the scheduler under its own GUI session. Method
         // gates are inline so a stray GET can't trigger a

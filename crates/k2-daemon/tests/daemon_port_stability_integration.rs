@@ -40,7 +40,7 @@ fn isolated_home(tag: &str) -> PathBuf {
 }
 
 fn daemon_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_k2so-daemon"))
+    PathBuf::from(env!("CARGO_BIN_EXE_k2-daemon"))
 }
 
 /// Spawn the daemon under the given HOME, wait for it to publish

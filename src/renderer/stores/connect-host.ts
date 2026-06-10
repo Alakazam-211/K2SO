@@ -42,7 +42,9 @@ import { invoke } from '@tauri-apps/api/core'
  * `k2_secret_*` Tauri commands. Exported so the Settings → Connections UI
  * can store/forget tokens with the SAME key the store reads on boot.
  */
-export const K2_CONNECT_KEYCHAIN_SERVICE = 'com.k2so.connect.host-token'
+export const K2_CONNECT_KEYCHAIN_SERVICE = 'dev.k2.connect.host-token'
+/** Pre-0.40 service name — read fallback only, copied forward on first read. */
+const LEGACY_K2_CONNECT_KEYCHAIN_SERVICE = 'com.k2so.connect.host-token'
 
 /**
  * Keychain service name for a remembered remote-host PASSWORD. Distinct
@@ -54,7 +56,9 @@ export const K2_CONNECT_KEYCHAIN_SERVICE = 'com.k2so.connect.host-token'
  * {@link K2_CONNECT_KEYCHAIN_SERVICE}. Neither ever touches
  * connect-hosts.json.
  */
-export const K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE = 'com.k2so.connect.host-password'
+export const K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE = 'dev.k2.connect.host-password'
+/** Pre-0.40 service name — read fallback only, copied forward on first read. */
+const LEGACY_K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE = 'com.k2so.connect.host-password'
 
 /**
  * A saved K2 server the client can connect to. Mirrors the Phase 3 PRD
@@ -374,7 +378,14 @@ export async function resolveToken(hostId: string): Promise<string | null> {
       service: K2_CONNECT_KEYCHAIN_SERVICE,
       account: hostId,
     })
-    return secret ?? null
+    if (secret) return secret
+    // 0.40.0 rebrand: migrate a pre-rename entry forward on first read.
+    const legacy = await invoke<string | null>('k2_secret_get', {
+      service: LEGACY_K2_CONNECT_KEYCHAIN_SERVICE,
+      account: hostId,
+    })
+    if (legacy) await rememberToken(hostId, legacy)
+    return legacy ?? null
   } catch {
     return null
   }
@@ -382,13 +393,12 @@ export async function resolveToken(hostId: string): Promise<string | null> {
 
 /** Forget a host's remembered token (toggle-off / host removal). */
 export async function forgetToken(hostId: string): Promise<void> {
-  try {
-    await invoke('k2_secret_delete', {
-      service: K2_CONNECT_KEYCHAIN_SERVICE,
-      account: hostId,
-    })
-  } catch {
-    /* idempotent — a missing entry is fine */
+  for (const service of [K2_CONNECT_KEYCHAIN_SERVICE, LEGACY_K2_CONNECT_KEYCHAIN_SERVICE]) {
+    try {
+      await invoke('k2_secret_delete', { service, account: hostId })
+    } catch {
+      /* idempotent — a missing entry is fine */
+    }
   }
 }
 
@@ -419,7 +429,14 @@ export async function resolvePassword(hostId: string): Promise<string | null> {
       service: K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE,
       account: hostId,
     })
-    return secret ?? null
+    if (secret) return secret
+    // 0.40.0 rebrand: migrate a pre-rename entry forward on first read.
+    const legacy = await invoke<string | null>('k2_secret_get', {
+      service: LEGACY_K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE,
+      account: hostId,
+    })
+    if (legacy) await rememberPassword(hostId, legacy)
+    return legacy ?? null
   } catch {
     return null
   }
@@ -427,13 +444,12 @@ export async function resolvePassword(hostId: string): Promise<string | null> {
 
 /** Forget a host's remembered login password (toggle-off / host removal). */
 export async function forgetPassword(hostId: string): Promise<void> {
-  try {
-    await invoke('k2_secret_delete', {
-      service: K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE,
-      account: hostId,
-    })
-  } catch {
-    /* idempotent — a missing entry is fine */
+  for (const service of [K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE, LEGACY_K2_CONNECT_PASSWORD_KEYCHAIN_SERVICE]) {
+    try {
+      await invoke('k2_secret_delete', { service, account: hostId })
+    } catch {
+      /* idempotent — a missing entry is fine */
+    }
   }
 }
 

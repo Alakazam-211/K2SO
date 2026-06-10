@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn handle_publish_returns_delivery_report_fields() {
         // Test-util DB makes activity_feed insert safe under
-        // k2so-daemon unit-test context (dev-dep enables
+        // k2-daemon unit-test context (dev-dep enables
         // `test-util` on k2so-core).
         k2_core::db::init_for_tests();
         let signal = minimal_signal();

@@ -1,6 +1,6 @@
 //! K2SO daemon entry point.
 //!
-//! Launched by launchd (`~/Library/LaunchAgents/com.k2so.k2so-daemon.plist`,
+//! Launched by launchd (`~/Library/LaunchAgents/dev.k2.daemon.plist`,
 //! `KeepAlive: true`), this process owns the persistent-agent runtime —
 //! SQLite, the heartbeat scheduler, the companion WebSocket + ngrok tunnel,
 //! the agent_hooks HTTP server — so that agents keep running while the
@@ -166,6 +166,27 @@ async fn async_main() {
     match k2_core::migration_home::migrate_home_dir() {
         Ok(outcome) => k2_core::log_debug!("[daemon/boot] home migration: {outcome:?}"),
         Err(e) => eprintln!("[daemon/boot] home migration FAILED: {e} — continuing on legacy layout"),
+    }
+    // 0.40.0 — retire com.k2so.* LaunchAgents (idempotent; the app's
+    // boot runs the same sweep — whichever boots first wins). A swept
+    // plist means that agent WAS enabled, so eagerly re-ensure its
+    // dev.k2.* successor here instead of waiting for the next settings
+    // interaction.
+    let swept = k2_core::migration_launchd::migrate_launchd_labels();
+    if swept.contains(&"com.k2so.agent-heartbeat") {
+        let ws = k2_core::app_settings::load().wake_scheduler;
+        match k2_core::heartbeats::install::apply_wake_scheduler(
+            &ws.mode,
+            ws.interval_minutes,
+            ws.wake_system,
+        ) {
+            Ok(msg) => k2_core::log_debug!("[daemon/boot] wake scheduler re-ensured under dev.k2.heartbeat: {msg}"),
+            Err(e) => eprintln!("[daemon/boot] wake scheduler re-ensure failed: {e}"),
+        }
+    }
+    if swept.contains(&"com.k2so.claude-auth-refresh") {
+        let r = crate::claude_auth_host::handle_install_scheduler();
+        k2_core::log_debug!("[daemon/boot] claude-auth scheduler re-ensured under dev.k2.claude-auth: {}", r.status);
     }
 
     // 0.37.9 — raise RLIMIT_NOFILE so the daemon can hold enough fds

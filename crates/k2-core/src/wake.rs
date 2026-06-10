@@ -8,10 +8,10 @@
 //!
 //! This module owns two launchd agents:
 //!
-//! 1. **Daemon agent** (`com.k2so.k2so-daemon`): always-on. `RunAtLoad:
+//! 1. **Daemon agent** (`dev.k2.daemon`): always-on. `RunAtLoad:
 //!    true` + `KeepAlive: true`. launchd starts it on user login and
 //!    restarts it on crash.
-//! 2. **Heartbeat agent** (`com.k2so.agent-heartbeat`, already in the
+//! 2. **Heartbeat agent** (`dev.k2.heartbeat`, already in the
 //!    codebase): fires every N minutes (user-configurable). When the
 //!    wake-to-run setting is on, `Wake: true` makes launchd actually
 //!    wake a sleeping machine to run it. This is how Time Machine
@@ -60,7 +60,7 @@ impl DaemonPlist {
             .map(|h| h.join(".k2"))
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
-            label: "com.k2so.k2so-daemon".to_string(),
+            label: "dev.k2.daemon".to_string(),
             program,
             args: vec![],
             run_at_load: true,
@@ -281,7 +281,7 @@ mod tests {
 
     fn sample() -> DaemonPlist {
         DaemonPlist {
-            label: "com.k2so.test-daemon".to_string(),
+            label: "dev.k2.test-daemon".to_string(),
             program: PathBuf::from("/Applications/K2SO.app/Contents/MacOS/k2so-daemon"),
             args: vec![],
             run_at_load: true,
@@ -305,7 +305,7 @@ mod tests {
         ] {
             assert!(xml.contains(key), "plist missing required {key}\n{xml}");
         }
-        assert!(xml.contains("<string>com.k2so.test-daemon</string>"));
+        assert!(xml.contains("<string>dev.k2.test-daemon</string>"));
         assert!(xml.contains("<true/>"));
         // ProcessType Interactive gives the daemon's child processes
         // (spawned PTY shells + Claude) the same priority Tauri's
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn canonical_uses_expected_label_and_log_paths() {
         let p = DaemonPlist::canonical(PathBuf::from("/opt/k2so-daemon"));
-        assert_eq!(p.label, "com.k2so.k2so-daemon");
+        assert_eq!(p.label, "dev.k2.daemon");
         assert!(p.run_at_load);
         assert!(p.keep_alive);
         assert!(p.stderr_path.ends_with(".k2/daemon.stderr.log"));

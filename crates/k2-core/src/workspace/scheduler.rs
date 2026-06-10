@@ -1,6 +1,6 @@
 //! Scheduler tick — decides which agents are ready to wake.
 //!
-//! Called by launchd's `com.k2so.agent-heartbeat` plist (via
+//! Called by launchd's `dev.k2.heartbeat` plist (via
 //! `/cli/scheduler-tick` → the daemon's route → this fn). Returns the
 //! ordered list of agent names the caller should launch; the caller is
 //! responsible for the actual PTY spawn + `--resume`/`--append-system-

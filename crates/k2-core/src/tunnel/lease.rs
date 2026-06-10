@@ -24,7 +24,7 @@
 //! schedules* the periodic call moved. To call the RPC the daemon needs a
 //! Supabase **access token**, which it derives from the account **refresh
 //! token** the renderer persisted to the OS keychain at sign-in
-//! (`com.k2so.connect.account` / `session-refresh-token`).
+//! (`dev.k2.connect.account` / `session-refresh-token`).
 //!
 //! Cadence: [`RENEW_INTERVAL`] (60 s) — matches the old renderer cadence
 //! and is well inside the 3-minute server TTL ([`LEASE_TTL`]).
@@ -48,7 +48,9 @@ const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOi
 /// renderer's `ACCOUNT_KEYCHAIN_SERVICE` / `SESSION_ACCOUNT_KEY` in
 /// `K2ConnectSection.tsx` so the daemon reads the very token the client
 /// stored at sign-in.
-const ACCOUNT_KEYCHAIN_SERVICE: &str = "com.k2so.connect.account";
+const ACCOUNT_KEYCHAIN_SERVICE: &str = "dev.k2.connect.account";
+/// Pre-0.40 service name — read-only fallback, migrated on first read.
+const LEGACY_ACCOUNT_KEYCHAIN_SERVICE: &str = "com.k2so.connect.account";
 const ACCOUNT_REFRESH_KEY: &str = "session-refresh-token";
 
 /// Server-side claim TTL: a claim with no heartbeat for this long expires
@@ -136,11 +138,27 @@ impl LeaseTarget {
 /// skip renewal cleanly rather than erroring.
 #[cfg(target_os = "macos")]
 pub fn read_account_refresh_token() -> Option<String> {
+    if let Some(token) = read_keychain_token(ACCOUNT_KEYCHAIN_SERVICE) {
+        return Some(token);
+    }
+    // 0.40.0 rebrand: pre-rename sign-ins stored the item under
+    // `com.k2so.connect.account`. Copy-on-read so an existing K2 Connect
+    // session survives the update without re-authenticating.
+    let legacy = read_keychain_token(LEGACY_ACCOUNT_KEYCHAIN_SERVICE)?;
+    crate::log_debug!(
+        "[tunnel/lease] migrating account refresh token {LEGACY_ACCOUNT_KEYCHAIN_SERVICE} → {ACCOUNT_KEYCHAIN_SERVICE}"
+    );
+    write_account_refresh_token(&legacy);
+    Some(legacy)
+}
+
+#[cfg(target_os = "macos")]
+fn read_keychain_token(service: &str) -> Option<String> {
     let output = std::process::Command::new("security")
         .args([
             "find-generic-password",
             "-s",
-            ACCOUNT_KEYCHAIN_SERVICE,
+            service,
             "-a",
             ACCOUNT_REFRESH_KEY,
             "-w",

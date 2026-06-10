@@ -176,7 +176,7 @@ fn install_macos_if_missing(
     wake_system: bool,
 ) -> Result<bool, String> {
     let home = home_dir();
-    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
+    let plist_path = home.join("Library/LaunchAgents/dev.k2.heartbeat.plist");
 
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create LaunchAgents dir: {e}"))?;
@@ -194,7 +194,7 @@ fn install_macos_if_missing(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.k2so.agent-heartbeat</string>
+    <string>dev.k2.heartbeat</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
@@ -221,7 +221,7 @@ fn install_macos_if_missing(
 
     // Check if launchd already has the agent loaded — `launchctl
     // print` returns 0 if loaded, non-zero otherwise.
-    let uid_target = format!("gui/{}/com.k2so.agent-heartbeat", unsafe {
+    let uid_target = format!("gui/{}/dev.k2.heartbeat", unsafe {
         libc::getuid()
     });
     let already_loaded = std::process::Command::new("launchctl")
@@ -379,7 +379,7 @@ pub fn install_heartbeat_launchd(
     wake_system: bool,
 ) -> Result<PathBuf, String> {
     let home = home_dir();
-    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
+    let plist_path = home.join("Library/LaunchAgents/dev.k2.heartbeat.plist");
 
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create LaunchAgents dir: {e}"))?;
@@ -403,7 +403,7 @@ pub fn install_heartbeat_launchd(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.k2so.agent-heartbeat</string>
+    <string>dev.k2.heartbeat</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
@@ -453,7 +453,7 @@ pub fn install_heartbeat_launchd(
 #[cfg(target_os = "macos")]
 pub fn uninstall_heartbeat_launchd() -> Result<(), String> {
     let home = home_dir();
-    let plist_path = home.join("Library/LaunchAgents/com.k2so.agent-heartbeat.plist");
+    let plist_path = home.join("Library/LaunchAgents/dev.k2.heartbeat.plist");
     if plist_path.exists() {
         let _ = std::process::Command::new("launchctl")
             .args(["unload", &plist_path.to_string_lossy()])

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// here so callers building `launchctl` arg vectors (kickstart target,
 /// `list <label>` probes) don't have to import `wake::DaemonPlist`
 /// just for the string.
-pub const DAEMON_LAUNCH_AGENT_LABEL: &str = "com.k2so.k2so-daemon";
+pub const DAEMON_LAUNCH_AGENT_LABEL: &str = "dev.k2.daemon";
 
 /// Filename of the daemon binary as bundled inside `K2SO.app`.
 ///
@@ -40,7 +40,7 @@ pub const DAEMON_LAUNCH_AGENT_LABEL: &str = "com.k2so.k2so-daemon";
 /// from the current Tauri binary path. Centralized so the build script,
 /// the Tauri "Install daemon" command, and K2 Connect's "where's the
 /// daemon binary?" probe all agree.
-pub const DAEMON_BINARY_NAME: &str = "k2so-daemon";
+pub const DAEMON_BINARY_NAME: &str = "k2-daemon";
 
 /// Pure-logic resolution: given the path of a Tauri executable
 /// (typically `K2SO.app/Contents/MacOS/k2so`), return the expected
@@ -265,7 +265,7 @@ mod tests {
             vec![
                 "kickstart".to_string(),
                 "-k".to_string(),
-                "gui/501/com.k2so.k2so-daemon".to_string(),
+                "gui/501/dev.k2.daemon".to_string(),
             ],
             "kickstart args shape changed; bumping launchctl is wire-incompatible"
         );
@@ -276,18 +276,18 @@ mod tests {
         let args = launchctl_list_args();
         assert_eq!(
             args,
-            vec!["list".to_string(), "com.k2so.k2so-daemon".to_string()],
+            vec!["list".to_string(), "dev.k2.daemon".to_string()],
         );
     }
 
     #[test]
     fn bundled_daemon_path_resolves_next_to_tauri_exe() {
         let path = bundled_daemon_path(Path::new(
-            "/Applications/K2SO.app/Contents/MacOS/k2so",
+            "/Applications/K2.app/Contents/MacOS/k2",
         ));
         assert_eq!(
             path,
-            Some(PathBuf::from("/Applications/K2SO.app/Contents/MacOS/k2so-daemon")),
+            Some(PathBuf::from("/Applications/K2.app/Contents/MacOS/k2-daemon")),
         );
     }
 

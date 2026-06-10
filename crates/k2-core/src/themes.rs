@@ -223,10 +223,10 @@ mod tests {
         // tempdir prefix. `whats_new::tests` mutates HOME without
         // sharing our lock, so an absolute-path equality check would
         // be brittle. The contract we're pinning down is "themes dir
-        // sits at <HOME>/.k2so/themes and is created on demand" —
+        // sits at <HOME>/.k2/themes and is created on demand" —
         // both of those are observable in the returned string alone.
         let dir = ensure_dir().expect("ensure_dir");
-        assert!(dir.ends_with("/.k2so/themes"), "got: {dir}");
+        assert!(dir.ends_with("/.k2/themes"), "got: {dir}");
         assert!(std::path::Path::new(&dir).exists());
     }
 

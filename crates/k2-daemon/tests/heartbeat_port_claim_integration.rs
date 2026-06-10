@@ -38,10 +38,10 @@ fn isolated_home(tag: &str) -> PathBuf {
 }
 
 /// Locate the daemon binary cargo compiled for this test run.
-/// `$CARGO_BIN_EXE_k2so-daemon` is set automatically when a test
-/// is compiled in the k2so-daemon crate.
+/// `$CARGO_BIN_EXE_k2-daemon` is set automatically when a test
+/// is compiled in the k2-daemon crate.
 fn daemon_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_k2so-daemon"))
+    PathBuf::from(env!("CARGO_BIN_EXE_k2-daemon"))
 }
 
 #[tokio::test(flavor = "current_thread")]

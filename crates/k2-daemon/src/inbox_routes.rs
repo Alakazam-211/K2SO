@@ -264,7 +264,7 @@ const GLOSSARY: &[GlossaryEntry] = &[
     GlossaryEntry {
         term: "heartbeat",
         summary: "Workspace-scoped scheduled wake (cron-like)",
-        definition: "A workspace-scoped scheduled wake (cron-like) that fires the workspace's agent at defined intervals. Used for: periodic triage, scheduled syncs, \"wake me at 9am every weekday and check the inbox\" patterns.\n\nA workspace can have multiple heartbeats with different names + schedules. Manage via `k2so heartbeat schedule add|list|remove|edit|enable|disable`. Fire one immediately via `k2so heartbeat signal fire <name>`.\n\nStorage: `.k2so/heartbeats/<name>/` per heartbeat. The daemon owns the launchd plist that fires them (`com.k2so.agent-heartbeat.<workspace>.plist`).",
+        definition: "A workspace-scoped scheduled wake (cron-like) that fires the workspace's agent at defined intervals. Used for: periodic triage, scheduled syncs, \"wake me at 9am every weekday and check the inbox\" patterns.\n\nA workspace can have multiple heartbeats with different names + schedules. Manage via `k2so heartbeat schedule add|list|remove|edit|enable|disable`. Fire one immediately via `k2so heartbeat signal fire <name>`.\n\nStorage: `.k2so/heartbeats/<name>/` per heartbeat. The daemon owns the launchd plist that fires them (`dev.k2.heartbeat.<workspace>.plist`).",
     },
     GlossaryEntry {
         term: "hooks",

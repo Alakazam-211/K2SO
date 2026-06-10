@@ -51,7 +51,10 @@ const DEFAULT_SERVER_PORT = 7000
 // the host-token service (`com.k2so.connect.host-token`) so the two never
 // collide. Only the refresh token + email are persisted; the access token
 // is memory-only.
-const ACCOUNT_KEYCHAIN_SERVICE = 'com.k2so.connect.account'
+const ACCOUNT_KEYCHAIN_SERVICE = 'dev.k2.connect.account'
+// Pre-0.40 service name — read fallback only; copied forward on first
+// read, never deleted (an un-updated daemon may still read it).
+const LEGACY_ACCOUNT_KEYCHAIN_SERVICE = 'com.k2so.connect.account'
 const SESSION_ACCOUNT_KEY = 'session-refresh-token'
 const EMAIL_ACCOUNT_KEY = 'session-email'
 
@@ -238,19 +241,31 @@ async function saveAccountSession(refreshToken: string, email: string): Promise<
 async function readAccountRefreshToken(): Promise<string | null> {
   try {
     const secret = await invoke<string | null>('k2_secret_get', { service: ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY })
-    return secret ?? null
+    if (secret) return secret
+    // 0.40.0 rebrand: migrate a pre-rename session forward on first read.
+    const legacy = await invoke<string | null>('k2_secret_get', { service: LEGACY_ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY })
+    if (legacy) {
+      await invoke('k2_secret_set', { service: ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY, secret: legacy })
+      const legacyEmail = await invoke<string | null>('k2_secret_get', { service: LEGACY_ACCOUNT_KEYCHAIN_SERVICE, account: EMAIL_ACCOUNT_KEY })
+      if (legacyEmail) await invoke('k2_secret_set', { service: ACCOUNT_KEYCHAIN_SERVICE, account: EMAIL_ACCOUNT_KEY, secret: legacyEmail })
+    }
+    return legacy ?? null
   } catch {
     return null
   }
 }
 
 async function clearAccountSession(): Promise<void> {
-  try {
-    await invoke('k2_secret_delete', { service: ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY })
-  } catch { /* idempotent */ }
-  try {
-    await invoke('k2_secret_delete', { service: ACCOUNT_KEYCHAIN_SERVICE, account: EMAIL_ACCOUNT_KEY })
-  } catch { /* idempotent */ }
+  // Sign-out clears BOTH service names — leaving the legacy copy behind
+  // would silently re-sign-in via the migration fallback.
+  for (const service of [ACCOUNT_KEYCHAIN_SERVICE, LEGACY_ACCOUNT_KEYCHAIN_SERVICE]) {
+    try {
+      await invoke('k2_secret_delete', { service, account: SESSION_ACCOUNT_KEY })
+    } catch { /* idempotent */ }
+    try {
+      await invoke('k2_secret_delete', { service, account: EMAIL_ACCOUNT_KEY })
+    } catch { /* idempotent */ }
+  }
 }
 
 export function K2ConnectSection(): React.JSX.Element {
