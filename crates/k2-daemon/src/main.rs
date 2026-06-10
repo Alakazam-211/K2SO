@@ -103,9 +103,9 @@ use k2_core::log_debug;
 use crate::events::{DaemonBroadcastSink, WireEvent, EVENT_CHANNEL_CAP};
 
 pub(crate) const BANNER: &str = concat!(
-    "k2so-daemon ",
+    "k2-daemon ",
     env!("CARGO_PKG_VERSION"),
-    " — scaffolding build (tokio)",
+    " (tokio)",
 );
 
 /// Shared per-process state pulled into every connection task. Cheap to
