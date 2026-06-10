@@ -115,11 +115,17 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
 - Any updater shim R1 demands.
 
 **R4 — code lands in the new repo:**
-- Push FULL git history of main to `Alakazam-211/K2` (blame/archaeology
-  preserved; old MIT LICENSE in history is normal and accurate).
+- **FRESH-HISTORY import** (corrected 2026-06-10): the public K2 repo
+  starts from a single squashed commit ("Imported from K2SO at 0.39.x")
+  under FSL. Pushing full history would RE-PUBLISH the entire MIT-era
+  source (any old commit is checkout-able and MIT-licensed at that
+  commit) — defeating the shell maneuver. Full history is preserved in a
+  PRIVATE mirror (`Alakazam-211/K2-history` or local) for blame and
+  archaeology; this also disposes of the PRD-privacy question entirely
+  (no history → no PRDs ever public on the new repo).
 - Internal-docs policy (Q5): public repo `.gitignore`s `.k2so/` agent
-  dirs + PRDs; PRDs migrate to a private home; only user-facing docs/
-  ship publicly.
+  dirs + PRDs; PRDs migrate to the private mirror; only user-facing
+  docs/ ship publicly.
 - CONTRIBUTING.md with DCO sign-off (layer 5 of licensing strategy).
 - **Lawyer-pass gate** on LICENSE/GRANT/TRADEMARKS before the first
   release is published here.
