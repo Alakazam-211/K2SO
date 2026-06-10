@@ -151,9 +151,20 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
 > for bridge releases) — stage 8 folded into 7.
 > Tests: 857 k2-core + all k2-daemon targets green; renderer at known
 > baseline (#41); clone heartbeatEnabled failure is pre-existing → #44.
-> Remaining before R3: full `tauri build` verification of K2.app, and
-> the e2e convergence rig (0.39.x → 0.40.0 update → app+daemon+agents
-> reconnect unaided) before the bridge ships.
+> `tauri build` verification: PASSED (K2.app bundles with dev.k2.app /
+> "K2" / `k2` executable / brand icon / both CLIs incl. shim).
+> **CONVERGENCE RIG: PASSED after 3 fixes (commit 95f60a1)** — fixture
+> 0.39.x home + old plist booted under the 0.40 app/daemon. Caught and
+> fixed: (a) db::init_database() ran before the home migration, creating
+> an empty ~/.k2 and forcing Conflict; (b) plist install resolved the
+> bundled daemon by the stale "k2so-daemon" name; (c) the autostart
+> NotInstalled arm deferred to install_daemon_plist_v1 (already applied
+> on every updated machine) so the swept plist never reinstalled —
+> machine left daemonless. Now self-heals every boot.
+> Rig caveat for repeats: launchd does NOT inherit a fake $HOME — a
+> heal-bootstrapped dev.k2.daemon runs against the REAL home (it swept
+> the real com.k2so plist on the dev box; restored). Headless-daemon rig
+> covers the post-migration daemon half safely.
 
 **R3 — 0.39.48 bridge release (old repo, last K2SO-branded build):**
 - In-app rebrand announcement (WHATS_NEW): name change, new home, and the
