@@ -23,15 +23,34 @@ with the SAME updater key. Old apps follow it automatically. 0.39.48 is
 therefore NOT strictly required for the redirect — but it IS required for
 other reasons (§3).
 
-### B. The old repo must be archived PUBLIC, not private
-If `Alakazam-211/K2SO` goes private: every installed app's baked-in
-manifest URL 404s (stragglers stranded forever), every old DMG link dies,
-and the redirect in (A) becomes impossible. **Archive public (read-only)**
-instead: releases stay downloadable, the bridge manifest serves forever,
-README points to the new home. Note the MIT-era source is irreversibly
-public anyway — privating the repo now gains nothing legally and costs the
-entire migration mechanism. (Original "make it private" idea explicitly
-superseded by this plan — flagged for Rosson sign-off.)
+### B. The old repo becomes a PUBLIC SHELL — binaries + bridge, no source
+(Decision updated 2026-06-10 after Rosson: "I don't want the code under
+MIT anymore.") The baked-in manifest URL forces the repo to stay PUBLIC in
+some form — private = stragglers stranded + dead DMG links. But it need
+not contain source. **The shell maneuver:**
+1. publish the final bridge release;
+2. create an orphan stub commit (pointer README only);
+3. FORCE-MOVE every release tag onto the stub + force-push main to it,
+   delete other branches → releases keep serving assets (bound to tag
+   NAMES) and auto source-zips regenerate FROM THE STUB; the old history
+   becomes unreachable (no forks pin it) and falls to GitHub GC (support
+   ticket hastens);
+4. retro-edit every old release's NOTES with a "K2SO is now K2 →" banner
+   (gh release edit --notes);
+5. archive the shell read-only.
+
+**HARD GATE:** deleting a tag drafts its release (bridge-fatal); MOVING a
+tag is the safe variant — verify the full sequence on a SACRIFICIAL repo
+(tag move → release still published → latest/download alias serves →
+source-zip = stub) before running it on K2SO.
+
+Legal honesty, stated once: this stops Alakazam DISTRIBUTING the MIT
+source; it cannot revoke MIT on copies already out there (560 unique
+cloners in the last 14 days alone; third-party archives like Software
+Heritage mirror public repos). The forward-looking protection is FSL +
+trademark + the never-published control plane. Optional later stage: once
+update telemetry shows the fleet has crossed, the shell can be privated
+entirely (strands stragglers — decide with data, months out).
 
 ## 1. Rename surface inventory (compat policy per class)
 
@@ -113,10 +132,9 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
    `daemon-latest.json` equivalents for the P3 headless self-update.
 3. Verify an existing 0.39.x install auto-updates across repos cleanly
    (and a headless daemon self-updates).
-4. Old repo: final README ("K2SO is now K2 → link"), optional tip-commit
-   scrub of `.k2so/prds/` (history keeps them; nothing credential-bearing
-   is in them by policy), then **Archive (public, read-only)** in repo
-   settings.
+4. Old repo: run the SHELL MANEUVER (§0.B — stub commit, tag force-move,
+   branch deletion, retro-edited release notes), then **Archive (public,
+   read-only)**. PRD scrub is subsumed — the stub removes the whole tree.
 5. k2.dev: copy + download links + Fair Source page + hosting-grant page.
 
 **R6 — aftermath:** close #613; claim @alakazamlabs/k2 (Q4); update
@@ -151,6 +169,6 @@ traffic for stragglers; bridge manifest stays frozen forever.
    signing is "LZTEK, LLC". Lawyer should confirm which entity holds the
    IP (and the © line should match it).
 4. **npm:** claim `@alakazamlabs/k2` now? (taxonomy memory expects it)
-5. **PRD privacy + old-repo scrub:** confirm policy — new repo never
-   carries internal PRDs; old repo gets a tip-commit scrub before public
-   archive (accepting that deep history retains them).
+5. **PRD privacy:** confirmed direction — new repo never carries internal
+   PRDs (public repo gitignores agent/PRD dirs; internal docs move to a
+   private home). Old-repo exposure is resolved by the shell maneuver.
