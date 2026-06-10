@@ -137,7 +137,9 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
    history (main SHA verified identical). Release ASSETS intentionally
    stay on the shell repo (that's its job); the backup protects the git
    side before anything destructive. NEVER make it public (MIT-era
-   source + internal PRDs).
+   source + internal PRDs). RE-SYNC the mirror immediately before
+   executing the shell maneuver — commits keep landing on K2SO until
+   then (one-liner: git clone --mirror … && git push --all/--tags).
 1. 0.40.0 live + verified on new repo (fresh-install DMG path tested).
 2. Publish on the OLD repo the final bridge release: `latest.json`
    (version 0.40.0, url → new-repo asset, same signing key) +
