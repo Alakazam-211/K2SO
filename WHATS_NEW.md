@@ -3,6 +3,19 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.40.1 — `k2so` alias fixed for installed CLIs
+
+- **The `k2so` compatibility alias works again from `/usr/local/bin`.**
+  On machines that had the CLI installed, the 0.40.0 alias resolved its
+  new `k2` sibling next to the symlink instead of next to the real
+  script, and failed. It now finds the bundled CLI no matter how it's
+  invoked. (Tip: open Settings → Install CLI once to also get the `k2`
+  command itself on your PATH.)
+- **`k2 daemon status` stops saying "Running: no" while the daemon is
+  running** — a long-standing parse bug on macOS, now fixed (it shows
+  the PID and port again).
+- Last few "K2SO" mentions in CLI messages updated to K2.
+
 ## 0.40.0 — Welcome to K2 by Alakazam Labs
 
 K2SO is now **K2**. New name, new icon, new home — same product, and
