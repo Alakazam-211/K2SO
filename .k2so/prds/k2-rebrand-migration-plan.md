@@ -189,7 +189,15 @@ integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
    read-only)**. PRD scrub is subsumed — the stub removes the whole tree.
 5. k2.dev: copy + download links + Fair Source page + hosting-grant page.
 
-**R5.5 — trademark filing (lawyer task, time with the 0.40.0 launch):**
+**R5.5 — trademark filing — DEFERRED (Rosson, 2026-06-10):** no USPTO
+filing for now; registration costs money and the software has no revenue
+yet. We roll on COMMON-LAW rights: TRADEMARKS.md asserts the composite
+"K2 by Alakazam Labs" mark (™ posture, never ®), and the composite-only
+usage discipline is the protection. Revisit when revenue starts — use in
+commerce since 2026 strengthens a later application. Original plan kept
+below for that day:
+
+**R5.5 (original) — trademark filing (lawyer task, time with the 0.40.0 launch):**
 file USPTO application(s) for the composite mark "K2 by Alakazam Labs"
 (word mark + the logo). Intent-to-use filing is possible BEFORE launch;
 use-based once 0.40.0 ships under the brand. Until registration: rely on

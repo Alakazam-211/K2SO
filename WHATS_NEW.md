@@ -3,6 +3,40 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.39.48 — K2SO is becoming K2
+
+This is the last release under the K2SO name. The next update is **K2 by
+Alakazam Labs, version 0.40.0** — same product, same workspaces, same
+daemon, new name and new home.
+
+**What happens when you update to 0.40.0:**
+
+- The app becomes **K2** (you'll see the new icon and name). Your
+  workspaces, sessions, agents, settings, and K2 Connect sign-in all carry
+  over automatically — the update migrates everything on first launch and
+  reconnects on its own. Nothing for you to do.
+- The CLI becomes **`k2`**. Your existing `k2so` commands and scripts keep
+  working — `k2so` remains as an alias through the 0.x series.
+- Development moves to a new repository:
+  **github.com/Alakazam-211/K2**. Updates continue to arrive in-app
+  exactly as before.
+
+**A note on licensing — please read:**
+
+Versions through 0.39.x are MIT-licensed, and that doesn't change
+retroactively. Starting with 0.40.0, K2 is released under the
+**Functional Source License (FSL-1.1-Apache-2.0)** — a Fair Source
+license. For you, nothing changes: K2 stays free to use, for individuals
+and businesses, source visible as always, and each version automatically
+converts to Apache 2.0 after two years. The license restricts one thing:
+selling K2 itself (or a hosted version of it) as a competing product.
+Hosting K2 for clients stays permitted under a standing grant when remote
+access runs through the official K2 Connect tunnel. Full details ship
+with 0.40.0 (LICENSE.md, COMMERCIAL_HOSTING_GRANT.md, TRADEMARKS.md) and
+at the new repository.
+
+If you have questions about the change, open an issue — we read them all.
+
 ## 0.39.47 — Active-bar switches land on the right pinned chat
 
 - **Switching workspaces from the Active section no longer flashes the wrong
