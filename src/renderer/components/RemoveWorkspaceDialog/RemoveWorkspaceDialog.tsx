@@ -18,19 +18,19 @@ const MODE_OPTIONS: ModeOption[] = [
     id: 'deregister_only',
     title: 'Deregister only (default)',
     description:
-      'Remove from K2SO\'s project list. Leave every file and symlink exactly where it is. Re-adding later picks up right where you left off.',
+      'Remove from K2\'s project list. Leave every file and symlink exactly where it is. Re-adding later picks up right where you left off.',
   },
   {
     id: 'keep_current',
     title: 'Keep current context',
     description:
-      'Freeze the current canonical SKILL.md body into each harness file as a real file. Every CLI LLM keeps working with your K2SO-evolved context — frozen at this moment in time.',
+      'Freeze the current canonical SKILL.md body into each harness file as a real file. Every CLI LLM keeps working with your K2-evolved context — frozen at this moment in time.',
   },
   {
     id: 'restore_original',
-    title: 'Restore pre-K2SO state',
+    title: 'Restore pre-K2 state',
     description:
-      'Replace each file K2SO took over with its archive from .k2so/migration/. Files K2SO created fresh are removed. Your PROJECT.md / AGENT.md / archives in .k2so/ stay — reconnect later and K2SO picks up where it left off.',
+      'Replace each file K2 took over with its archive from .k2so/migration/. Files K2 created fresh are removed. Your PROJECT.md / AGENT.md / archives in .k2so/ stay — reconnect later and K2 picks up where it left off.',
   },
 ]
 
@@ -126,7 +126,7 @@ export default function RemoveWorkspaceDialog(): React.JSX.Element | null {
         {!showingResults ? (
           <div className="flex-1 overflow-y-auto px-5 pb-3">
             <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-2">
-              What should K2SO do with the files?
+              What should K2 do with the files?
             </div>
             <div className="flex flex-col gap-2">
               {MODE_OPTIONS.map((opt) => (
@@ -168,7 +168,7 @@ export default function RemoveWorkspaceDialog(): React.JSX.Element | null {
         ) : (
           <div className="flex-1 overflow-y-auto px-5 pb-3">
             <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] mb-1.5">
-              What K2SO did
+              What K2 did
             </div>
             <div className="flex flex-col gap-1">
               {results.map((r) => (

@@ -1,6 +1,6 @@
 // Renderer-side wrappers for the daemon's `/cli/terminal/*` lifecycle
 // routes. Phase 2 Unit 3 moved PTY ownership from Tauri to the daemon
-// so PTYs survive Tauri quit (K2SO Connect + Mobile Companion both
+// so PTYs survive Tauri quit (K2 Connect + Mobile Companion both
 // require this). The renderer's old `invoke('terminal_*')` calls
 // translate to `daemonCli{Get,Post}` against these new routes.
 //

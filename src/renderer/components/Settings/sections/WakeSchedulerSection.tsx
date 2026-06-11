@@ -51,9 +51,9 @@ const DEFAULT_SETTINGS: WakeSchedulerSettings = {
 
 const MODE_DESCRIPTIONS: Record<WakeMode, string> = {
   off:
-    'No launchd plist. Heartbeats only fire while K2SO is open. Agents sit idle when you quit.',
+    'No launchd plist. Heartbeats only fire while K2 is open. Agents sit idle when you quit.',
   on_demand:
-    'Heartbeats fire while K2SO is open. The daemon stays running in the background after you quit, but the system will not wake itself.',
+    'Heartbeats fire while K2 is open. The daemon stays running in the background after you quit, but the system will not wake itself.',
   heartbeat:
     'launchd fires scheduled heartbeats every N minutes. With "Wake System From Sleep" on, the laptop wakes from sleep (lid closed, on battery) to run agents — the configuration that makes overnight agent work possible.',
 }

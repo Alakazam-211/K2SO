@@ -7,7 +7,7 @@
 //! authenticated. Wraps `crate::daemon_client::DaemonClient`.
 //!
 //! **Lifecycle commands** (`daemon_install` / `daemon_uninstall` /
-//! `daemon_restart`) wrap `k2so_core::wake` so the Settings pane can
+//! `daemon_restart`) wrap `k2_core::wake` so the Settings pane can
 //! install or remove the launch agent without the frontend knowing
 //! `launchctl` exists. They all delegate to the same `DaemonPlist`
 //! shape used by the first-launch migration in `lib.rs::setup()`, so
@@ -77,13 +77,13 @@ pub fn daemon_status() -> DaemonStatusResponse {
 /// bundled (common in dev) or if we can't read the current exe path.
 ///
 /// Pure path resolution + the `exists()` check live in
-/// `k2so_core::daemon_lifecycle::bundled_daemon_path`; this wrapper
+/// `k2_core::daemon_lifecycle::bundled_daemon_path`; this wrapper
 /// adds the actual filesystem touch (Tauri context only) so a K2
 /// Connect host can compute the same hypothetical path without
 /// performing the FS probe.
 fn locate_bundled_daemon() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("locate Tauri binary: {e}"))?;
-    let candidate = k2so_core::daemon_lifecycle::bundled_daemon_path(&exe)
+    let candidate = k2_core::daemon_lifecycle::bundled_daemon_path(&exe)
         .ok_or_else(|| "Tauri binary has no parent dir".to_string())?;
     if !candidate.exists() {
         return Err(format!(
@@ -104,8 +104,8 @@ fn locate_bundled_daemon() -> Result<PathBuf, String> {
 #[tauri::command]
 pub fn daemon_install() -> Result<String, String> {
     let daemon_bin = locate_bundled_daemon()?;
-    let plist = k2so_core::wake::DaemonPlist::canonical(daemon_bin);
-    k2so_core::wake::install(&plist)
+    let plist = k2_core::wake::DaemonPlist::canonical(daemon_bin);
+    k2_core::wake::install(&plist)
         .map(|p| p.to_string_lossy().to_string())
 }
 
@@ -125,12 +125,12 @@ pub fn daemon_uninstall() -> Result<(), String> {
     // canonical plist builder only uses `program` for `write()`,
     // and `uninstall()` only cares about `label` + `plist_path()`.
     // Pass a placeholder so we don't fail on missing binary in dev.
-    let plist = k2so_core::wake::DaemonPlist::canonical(PathBuf::from("/nonexistent-uninstall"));
-    k2so_core::wake::uninstall(&plist)?;
+    let plist = k2_core::wake::DaemonPlist::canonical(PathBuf::from("/nonexistent-uninstall"));
+    k2_core::wake::uninstall(&plist)?;
 
     // Best-effort cleanup of the port/token/log files. Missing files
     // are fine.
-    if let Some(dir) = dirs::home_dir().map(|h| h.join(".k2so")) {
+    if let Some(dir) = dirs::home_dir().map(|h| h.join(".k2")) {
         for f in &["daemon.port", "daemon.token"] {
             let _ = std::fs::remove_file(dir.join(f));
         }
@@ -149,12 +149,12 @@ pub fn daemon_uninstall() -> Result<(), String> {
 /// `#[tauri::command]` wrapper just delegates to this.
 ///
 /// Arg vector construction lives in
-/// `k2so_core::daemon_lifecycle::launchctl_kickstart_args` so K2
+/// `k2_core::daemon_lifecycle::launchctl_kickstart_args` so K2
 /// Connect (which runs the same kickstart via SSH on a remote host)
 /// produces the same exact arg shape.
 pub fn kickstart_daemon() -> Result<(), String> {
     let uid = unsafe { libc::getuid() };
-    let args = k2so_core::daemon_lifecycle::launchctl_kickstart_args(uid);
+    let args = k2_core::daemon_lifecycle::launchctl_kickstart_args(uid);
     let out = Command::new("launchctl")
         .args(&args)
         .output()
@@ -188,7 +188,7 @@ pub fn daemon_restart() -> Result<(), String> {
 pub fn daemon_log_path() -> Result<String, String> {
     let dir = dirs::home_dir()
         .ok_or_else(|| "home dir unavailable".to_string())?
-        .join(".k2so");
+        .join(".k2");
     Ok(dir.join("daemon.stdout.log").to_string_lossy().to_string())
 }
 
@@ -376,7 +376,7 @@ mod tests {
         // there (common in dev — nobody's installed the plist), the
         // command should quietly return NotInstalled instead of
         // panicking or returning an Err.
-        let k2so_dir = dirs::home_dir().unwrap().join(".k2so");
+        let k2so_dir = dirs::home_dir().unwrap().join(".k2");
         let port_file = k2so_dir.join("daemon.port");
         let token_file = k2so_dir.join("daemon.token");
         // Only run if neither file happens to exist in the dev env.

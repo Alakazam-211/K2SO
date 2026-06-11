@@ -11,7 +11,7 @@
 //
 // 1. The Tauri proxy shim (still present for back-compat) can be
 //    dropped in Unit 7c without renderer churn.
-// 2. The same code path works in K2SO Connect mode where Tauri is
+// 2. The same code path works in K2 Connect mode where Tauri is
 //    on Machine A and the daemon is on Machine B — there is no
 //    `invoke('settings_*')` to call there.
 //

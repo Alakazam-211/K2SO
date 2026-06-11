@@ -1,4 +1,4 @@
-// K2SO #682 — pinned-chat spawn circuit breaker.
+// K2 #682 — pinned-chat spawn circuit breaker.
 //
 // The pinned Chat tab resolves a launch config and spawns `claude`. If the
 // child exits almost immediately (e.g. `claude --session-id <uuid>` where the

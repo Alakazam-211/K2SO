@@ -889,7 +889,7 @@ export function ensurePinnedAgentTabForMode(
     } else if (agentMode === 'custom') {
       title = 'Agent'
     } else if (agentMode === 'agent') {
-      title = 'K2SO'
+      title = 'K2'
     } else if (!agentMode || agentMode === 'off') {
       title = 'Workspace'  // agent-mode-off: workspace is its own agent
     }
@@ -938,8 +938,8 @@ export function ensurePinnedAgentTabForMode(
     // ensureSystemAgentTabs mutates the GLOBALLY-active tab set, so a
     // stale callback would stamp THIS workspace's agent/projectPath
     // into whichever workspace is now active — e.g. switching from a
-    // K2SO worktree (agent `cli-eng`, path `…/K2SO`) into HK47 mid-
-    // resolution writes `cli-eng`/`…/K2SO` into HK47's pinned tabs.
+    // K2 worktree (agent `cli-eng`, path `…/K2`) into HK47 mid-
+    // resolution writes `cli-eng`/`…/K2` into HK47's pinned tabs.
     // Bail if the active workspace changed since we were scheduled.
     if (useTabsStore.getState().activeWorkspaceKey !== expectedWorkspaceKey) return
     tabsStore.ensureSystemAgentTabs(agentName, projectPath, title)

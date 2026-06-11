@@ -9,7 +9,7 @@ fn main() {
     // No-op if already at the hard limit. Must run before anything
     // else opens fds.
     #[cfg(unix)]
-    k2so_core::raise_nofile_limit();
+    k2_core::raise_nofile_limit();
 
     // Phase 2 Unit 2 — `--llm-worker` arm moved to k2so-daemon. The
     // daemon now spawns itself as `k2so-daemon --llm-worker <payload>`
@@ -24,7 +24,7 @@ fn main() {
     // head start on daemon startup + window hydration. Restored
     // terminals that spawn during React rehydration then hit an
     // already-warm pool instead of paying 600ms of first-call cost.
-    k2so_lib::warm_http_pool_async();
+    k2_lib::warm_http_pool_async();
 
-    k2so_lib::run()
+    k2_lib::run()
 }

@@ -10,7 +10,7 @@ import ReactMarkdown, { type Options } from 'react-markdown'
  * `http`, `https`, `mailto`, `tel`, `irc`, `xmpp`. Anything else gets
  * stripped — the rendered link has an empty href, so clicking it
  * silently navigates the webview to the current page (= the whole
- * K2SO window appears to "reload"). The capture-phase click handler
+ * K2 window appears to "reload"). The capture-phase click handler
  * in `lib/external-link-handler.ts` only sees the empty href and has
  * nothing to forward to LaunchServices.
  *

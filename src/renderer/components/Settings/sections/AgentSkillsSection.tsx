@@ -105,7 +105,7 @@ export function AgentSkillsSection(): React.JSX.Element {
     <div className="max-w-3xl">
       <h2 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">Canonical Agent Flow</h2>
       <p className="text-xs text-[var(--color-text-muted)] mb-4">
-        Each AI coding tool reads its project notes from a different file. K2SO keeps{' '}
+        Each AI coding tool reads its project notes from a different file. K2 keeps{' '}
         <span className="font-mono text-[var(--color-text-secondary)]">.k2so/agent/AGENT.md</span> as
         THE canonical source — the per-harness files (
         <span className="font-mono">CLAUDE.md</span>, <span className="font-mono">GEMINI.md</span>,
@@ -157,7 +157,7 @@ export function AgentSkillsSection(): React.JSX.Element {
               Enable harness fan-out (programmatic symlinks)
             </div>
             <p className="text-[10px] text-[var(--color-text-muted)] leading-snug mt-0.5">
-              When checked, K2SO continuously fans the canonical{' '}
+              When checked, K2 continuously fans the canonical{' '}
               <span className="font-mono">.k2so/agent/AGENT.md</span> out into this workspace’s harness
               files as symlinks (on boot, agent-create, agent-launch, and regen). Off by default —
               prefer the K2 Canonical Agent skill for safe copies. Scoped to{' '}

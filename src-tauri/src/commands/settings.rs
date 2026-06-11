@@ -9,7 +9,7 @@
 //!
 //! Phase 2 Unit 7c — the residual `read_settings`/`write_settings`
 //! compat wrappers (last hold-outs from Unit 7a) are gone. Every
-//! Tauri-side reader now calls `k2so_core::app_settings::load()`
+//! Tauri-side reader now calls `k2_core::app_settings::load()`
 //! directly; writers go through the daemon's `/cli/settings/{update,
 //! reset}` route so the daemon's process-wide settings lock is the
 //! sole serializer.
@@ -26,7 +26,7 @@
 //! re-export) were deleted — the renderer reaches settings data
 //! host-aware via `/cli/settings/*` on the active daemon. Any Rust
 //! caller that still needs the type imports it from
-//! `k2so_core::app_settings::AppSettings` directly.
+//! `k2_core::app_settings::AppSettings` directly.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,25 +34,26 @@ use tauri::{AppHandle, Manager};
 
 // ── CLI Install (HOST: writes /usr/local/bin/k2so symlink) ──────────────
 
-/// Find the bundled cli/k2so script (production or development).
-fn find_cli_script() -> Option<PathBuf> {
+/// Find a bundled cli/<name> script (production or development).
+/// 0.40.0: the CLI is `k2`; `k2so` remains as a deprecation shim that
+/// delegates to `k2` — both ship in cli/ and both get symlinked.
+fn find_cli_script_named(name: &str) -> Option<PathBuf> {
     let exe_path = std::env::current_exe().ok()?;
     let macos_dir = exe_path.parent()?;
 
-    // Production: K2SO.app/Contents/MacOS/k2so → Contents/Resources/_up_/cli/k2so
+    // Production: K2.app/Contents/MacOS/<bin> → Contents/Resources/_up_/cli/<name>
     // Tauri puts "../cli/*" resources under Resources/_up_/cli/
     let resources_cli = macos_dir.parent()
-        .map(|contents| contents.join("Resources").join("_up_").join("cli").join("k2so"));
+        .map(|contents| contents.join("Resources").join("_up_").join("cli").join(name));
     if let Some(ref p) = resources_cli {
         if p.exists() { return resources_cli; }
     }
 
-    // Development: src-tauri/target/debug/k2so → ../../../cli/k2so
-    // Binary is at src-tauri/target/debug/, repo root is 3 levels up
+    // Development: target/debug/<bin> → ../../cli/<name> from repo root
     let dev_cli = macos_dir.parent()       // target/
-        .and_then(|p| p.parent())          // src-tauri/
+        .and_then(|p| p.parent())          // src-tauri/ (or repo root for workspace target)
         .and_then(|p| p.parent())          // repo root
-        .map(|repo| repo.join("cli").join("k2so"));
+        .map(|repo| repo.join("cli").join(name));
     if let Some(ref p) = dev_cli {
         if p.exists() { return dev_cli; }
     }
@@ -60,14 +61,24 @@ fn find_cli_script() -> Option<PathBuf> {
     None
 }
 
-const CLI_SYMLINK_PATH: &str = "/usr/local/bin/k2so";
+fn find_cli_script() -> Option<PathBuf> {
+    find_cli_script_named("k2")
+}
 
-/// Extract the K2SO_CLI_VERSION from a k2so CLI script.
+const CLI_SYMLINK_PATH: &str = "/usr/local/bin/k2";
+/// Legacy alias — points at the cli/k2so deprecation shim.
+const CLI_LEGACY_SYMLINK_PATH: &str = "/usr/local/bin/k2so";
+
+/// Extract the CLI version from a k2/k2so CLI script. Accepts both the
+/// 0.40.0 `K2_CLI_VERSION` and the legacy `K2SO_CLI_VERSION` prefixes so
+/// the installed-version probe works across the rename boundary.
 fn read_cli_version(script_path: &Path) -> Option<String> {
     let content = fs::read_to_string(script_path).ok()?;
     for line in content.lines().take(20) {
-        if let Some(rest) = line.strip_prefix("K2SO_CLI_VERSION=") {
-            return Some(rest.trim_matches('"').to_string());
+        for prefix in ["K2_CLI_VERSION=", "K2SO_CLI_VERSION="] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                return Some(rest.trim_matches('"').to_string());
+            }
         }
     }
     None
@@ -122,12 +133,18 @@ pub fn cli_install_status() -> Result<serde_json::Value, String> {
 pub fn cli_install() -> Result<String, String> {
     let cli_script = find_cli_script()
         .ok_or_else(|| "CLI script not found in app bundle".to_string())?;
+    // The k2so deprecation shim ships alongside; best-effort (an old
+    // bundle without it just skips the legacy alias).
+    let legacy_shim = find_cli_script_named("k2so");
 
-    // Ensure the script is executable
+    // Ensure the scripts are executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&cli_script, fs::Permissions::from_mode(0o755));
+        if let Some(ref shim) = legacy_shim {
+            let _ = fs::set_permissions(shim, fs::Permissions::from_mode(0o755));
+        }
     }
 
     let symlink_path = Path::new(CLI_SYMLINK_PATH);
@@ -149,20 +166,32 @@ pub fn cli_install() -> Result<String, String> {
         }
     }
 
-    // Try direct symlink first (works if user owns /usr/local/bin)
+    // Try direct symlinks first (works if user owns /usr/local/bin).
+    // 0.40.0: install BOTH `k2` (the CLI) and `k2so` (deprecation shim).
     let _ = fs::remove_file(symlink_path);
+    let legacy_path = Path::new(CLI_LEGACY_SYMLINK_PATH);
     #[cfg(unix)]
     {
         if std::os::unix::fs::symlink(&cli_script, symlink_path).is_ok() {
+            if let Some(ref shim) = legacy_shim {
+                let _ = fs::remove_file(legacy_path);
+                let _ = std::os::unix::fs::symlink(shim, legacy_path);
+            }
             return Ok(CLI_SYMLINK_PATH.to_string());
         }
     }
 
-    // Fall back to osascript with admin privileges
+    // Fall back to osascript with admin privileges — both links in ONE
+    // prompt.
+    let legacy_ln = legacy_shim
+        .as_ref()
+        .map(|shim| format!(" && ln -sf '{}' '{}'", shim.display(), CLI_LEGACY_SYMLINK_PATH))
+        .unwrap_or_default();
     let script = format!(
-        "do shell script \"ln -sf '{}' '{}'\" with administrator privileges",
+        "do shell script \"ln -sf '{}' '{}'{}\" with administrator privileges",
         cli_script.display(),
-        CLI_SYMLINK_PATH
+        CLI_SYMLINK_PATH,
+        legacy_ln
     );
     let output = std::process::Command::new("osascript")
         .args(["-e", &script])

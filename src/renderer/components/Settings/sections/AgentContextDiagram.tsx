@@ -1,7 +1,7 @@
 import React from 'react'
 
 // Reworked for the canonical-agents PRD (§4 / §7 / §11). The OLD diagram
-// showed the composed SKILL.md as the canonical artifact and claimed K2SO
+// showed the composed SKILL.md as the canonical artifact and claimed K2
 // "fans it out to every harness — 12 harnesses" unconditionally. Both are
 // corrected here:
 //   • THE canonical artifact is .k2so/agent/AGENT.md (Model A). The
@@ -10,7 +10,7 @@ import React from 'react'
 //     fan-out. Two routes: the K2 Canonical Agent skill (safe copies) or
 //     the harness-fan-out checkbox (programmatic symlinks).
 
-// The harness mirror targets K2SO actually supports (from core —
+// The harness mirror targets K2 actually supports (from core —
 // HARNESS_WORKSPACE_FILES + the extended probe list). Per-harness + opt-in,
 // not a blanket "12 harnesses".
 const HARNESS_MIRRORS: { label: string; path: string }[] = [

@@ -2,8 +2,8 @@
 resolver = "2"
 members = [
     "src-tauri",
-    "crates/k2so-core",
-    "crates/k2so-daemon",
+    "crates/k2-core",
+    "crates/k2-daemon",
 ]
 
 # Dev profile: lightly optimized so PTY reads + LLM inference don't crawl.

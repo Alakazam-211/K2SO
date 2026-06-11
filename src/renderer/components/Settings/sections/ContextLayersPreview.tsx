@@ -86,7 +86,7 @@ function tierForMode(mode: string | null): SkillTier | null {
   const m = mode || 'off'
   if (m === 'manager' || m === 'coordinator' || m === 'pod') return 'manager'
   if (m === 'custom') return 'custom_agent'
-  // 'agent' (K2SO Agent) doesn't have a tab in AgentSkillsSection today — no preview
+  // 'agent' (K2 Agent) doesn't have a tab in AgentSkillsSection today — no preview
   return null
 }
 

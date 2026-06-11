@@ -51,7 +51,10 @@ const DEFAULT_SERVER_PORT = 7000
 // the host-token service (`com.k2so.connect.host-token`) so the two never
 // collide. Only the refresh token + email are persisted; the access token
 // is memory-only.
-const ACCOUNT_KEYCHAIN_SERVICE = 'com.k2so.connect.account'
+const ACCOUNT_KEYCHAIN_SERVICE = 'dev.k2.connect.account'
+// Pre-0.40 service name — read fallback only; copied forward on first
+// read, never deleted (an un-updated daemon may still read it).
+const LEGACY_ACCOUNT_KEYCHAIN_SERVICE = 'com.k2so.connect.account'
 const SESSION_ACCOUNT_KEY = 'session-refresh-token'
 const EMAIL_ACCOUNT_KEY = 'session-email'
 
@@ -75,7 +78,7 @@ function getDeviceId(): string {
   }
 }
 
-// K2SO #674: the lease-renewal cadence (re-claim well inside the 3-minute
+// K2 #674: the lease-renewal cadence (re-claim well inside the 3-minute
 // server TTL) now lives in the DAEMON
 // (`crates/k2so-core/src/tunnel/lease.rs::RENEW_INTERVAL`) so it survives
 // this panel closing and works headless. The renderer no longer schedules
@@ -98,14 +101,14 @@ interface TunnelStatus {
   frpc_installed: boolean
 }
 
-// K2SO #629 — connect-user permission tier.
+// K2 #629 — connect-user permission tier.
 type K2Role = 'owner' | 'admin' | 'member'
 
 interface K2User {
   username: string
   createdAt?: string | null
   disabled: boolean
-  // K2SO #629. Pre-#629 daemons omit it → treat as 'member'.
+  // K2 #629. Pre-#629 daemons omit it → treat as 'member'.
   role?: K2Role
 }
 
@@ -199,7 +202,7 @@ async function userPost(suffix: string, body?: unknown): Promise<Response> {
 }
 
 // GET /cli/auth/whoami — resolve the LOCAL viewer's identity + role
-// (K2SO #629). With the local daemon owner token this returns
+// (K2 #629). With the local daemon owner token this returns
 // {owner:true, role:'owner'}; the role gates the management UI below.
 async function whoamiGet(): Promise<Response> {
   const send = async (): Promise<Response> => {
@@ -238,19 +241,31 @@ async function saveAccountSession(refreshToken: string, email: string): Promise<
 async function readAccountRefreshToken(): Promise<string | null> {
   try {
     const secret = await invoke<string | null>('k2_secret_get', { service: ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY })
-    return secret ?? null
+    if (secret) return secret
+    // 0.40.0 rebrand: migrate a pre-rename session forward on first read.
+    const legacy = await invoke<string | null>('k2_secret_get', { service: LEGACY_ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY })
+    if (legacy) {
+      await invoke('k2_secret_set', { service: ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY, secret: legacy })
+      const legacyEmail = await invoke<string | null>('k2_secret_get', { service: LEGACY_ACCOUNT_KEYCHAIN_SERVICE, account: EMAIL_ACCOUNT_KEY })
+      if (legacyEmail) await invoke('k2_secret_set', { service: ACCOUNT_KEYCHAIN_SERVICE, account: EMAIL_ACCOUNT_KEY, secret: legacyEmail })
+    }
+    return legacy ?? null
   } catch {
     return null
   }
 }
 
 async function clearAccountSession(): Promise<void> {
-  try {
-    await invoke('k2_secret_delete', { service: ACCOUNT_KEYCHAIN_SERVICE, account: SESSION_ACCOUNT_KEY })
-  } catch { /* idempotent */ }
-  try {
-    await invoke('k2_secret_delete', { service: ACCOUNT_KEYCHAIN_SERVICE, account: EMAIL_ACCOUNT_KEY })
-  } catch { /* idempotent */ }
+  // Sign-out clears BOTH service names — leaving the legacy copy behind
+  // would silently re-sign-in via the migration fallback.
+  for (const service of [ACCOUNT_KEYCHAIN_SERVICE, LEGACY_ACCOUNT_KEYCHAIN_SERVICE]) {
+    try {
+      await invoke('k2_secret_delete', { service, account: SESSION_ACCOUNT_KEY })
+    } catch { /* idempotent */ }
+    try {
+      await invoke('k2_secret_delete', { service, account: EMAIL_ACCOUNT_KEY })
+    } catch { /* idempotent */ }
+  }
 }
 
 export function K2ConnectSection(): React.JSX.Element {
@@ -284,7 +299,7 @@ export function K2ConnectSection(): React.JSX.Element {
   // it's purely cosmetic ("MacIntel" etc.) — the holder UI falls back to
   // "another device" when absent.
   const deviceLabel = typeof navigator !== 'undefined' ? navigator.platform || undefined : undefined
-  // K2SO #674: the PERIODIC lease renewal now lives in the DAEMON
+  // K2 #674: the PERIODIC lease renewal now lives in the DAEMON
   // (`crates/k2so-core/src/tunnel/lease.rs`), tied to the tunnel's
   // lifecycle, so the lease survives this panel being closed and works
   // headless. The renderer keeps only the ONE-SHOT claims on explicit user
@@ -295,7 +310,7 @@ export function K2ConnectSection(): React.JSX.Element {
   const accessTokenRef = useRef<string | null>(null)
   const confirm = useConfirmDialogStore((s) => s.confirm)
 
-  // K2SO #628: the tunnel EXPOSE controls only make sense for THIS Mac's
+  // K2 #628: the tunnel EXPOSE controls only make sense for THIS Mac's
   // own daemon — you can't expose someone else's daemon through your local
   // tunnel. When the active host is a remote K2 Connect host, hide the
   // account-login / tunnel-config / start-stop sub-panels and show a short
@@ -311,7 +326,7 @@ export function K2ConnectSection(): React.JSX.Element {
   const oldHostNoRoles = isRemote && serverVersion !== null && !supportsRoles
 
   // ── Users / Access state ──────────────────────────────────────────────
-  // K2SO #629: the LOCAL viewer's role (from whoami). The desktop app talks
+  // K2 #629: the LOCAL viewer's role (from whoami). The desktop app talks
   // to its OWN daemon with the owner token, so this is normally 'owner';
   // null until resolved. It gates the whole management panel + the role
   // selector below.
@@ -334,7 +349,7 @@ export function K2ConnectSection(): React.JSX.Element {
   // username currently pending a remove confirm
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null)
 
-  // ── Password policy state (K2SO #620) ─────────────────────────────────
+  // ── Password policy state (K2 #620) ─────────────────────────────────
   const [policyMinLength, setPolicyMinLength] = useState('8')
   const [policyRequireSpecial, setPolicyRequireSpecial] = useState(false)
   const [policyRequireNumber, setPolicyRequireNumber] = useState(false)
@@ -357,7 +372,7 @@ export function K2ConnectSection(): React.JSX.Element {
         }
       } catch { /* ignore */ }
       void refreshStatus()
-      // K2SO #629: resolve the viewer's role FIRST so the management UI
+      // K2 #629: resolve the viewer's role FIRST so the management UI
       // gates correctly; only load the user list + policy when the viewer
       // can actually manage users (else those routes 403).
       void (async () => {
@@ -405,7 +420,7 @@ export function K2ConnectSection(): React.JSX.Element {
   }, [session])
 
   // Push this device's claim identity to the daemon so its lease-renewal
-  // loop (K2SO #674) renews under the SAME device the renderer claimed
+  // loop (K2 #674) renews under the SAME device the renderer claimed
   // with. Best-effort — a failure just means the daemon falls back to
   // whatever identity it already had stored; the one-shot claim still
   // happened. POSTs only the device fields so the token/subdomain are
@@ -429,7 +444,7 @@ export function K2ConnectSection(): React.JSX.Element {
     } catch { /* ignore — keep the current list */ }
   }
 
-  // K2SO #674: the renderer no longer drives the periodic lease renewal —
+  // K2 #674: the renderer no longer drives the periodic lease renewal —
   // the daemon owns it now (see `crates/k2so-core/src/tunnel/lease.rs`), so
   // the lease survives this panel unmounting and a headless daemon. When a
   // tunnel is already running with an account session + bound subdomain
@@ -444,7 +459,7 @@ export function K2ConnectSection(): React.JSX.Element {
   }, [status?.running, session, subdomain])
 
   // ── Users / Access actions ────────────────────────────────────────────
-  // K2SO #629: resolve the local viewer's role. Returns the role (also
+  // K2 #629: resolve the local viewer's role. Returns the role (also
   // stored in state) so the mount effect can decide whether to load the
   // user list. Defaults to null on any failure (UI then shows the
   // "handled by an administrator" note rather than a raw token error).
@@ -489,7 +504,7 @@ export function K2ConnectSection(): React.JSX.Element {
     }
   }
 
-  // ── Password policy (K2SO #620) ───────────────────────────────────────
+  // ── Password policy (K2 #620) ───────────────────────────────────────
   const refreshPolicy = async (): Promise<void> => {
     try {
       const res = await userGet('/policy')
@@ -612,7 +627,7 @@ export function K2ConnectSection(): React.JSX.Element {
     }
   }
 
-  // K2SO #629: change a user's role (Owner-only; POST /cli/users/set-role).
+  // K2 #629: change a user's role (Owner-only; POST /cli/users/set-role).
   // Optimistic with revert-on-failure, mirroring toggleDisabled.
   const changeRole = async (username: string, role: K2Role): Promise<void> => {
     const prevRole = users.find((u) => u.username === username)?.role
@@ -689,7 +704,7 @@ export function K2ConnectSection(): React.JSX.Element {
           return
         }
       }
-      // Make sure the daemon renews under THIS device (K2SO #674) before we
+      // Make sure the daemon renews under THIS device (K2 #674) before we
       // start — its renewal loop spins up on tunnel start and reads the
       // stored identity.
       await pushDeviceIdentity()
@@ -715,7 +730,7 @@ export function K2ConnectSection(): React.JSX.Element {
     setError(null)
     // Release the lease (best-effort) regardless of the stop call's
     // outcome. The DAEMON stops its own renewal loop when the tunnel is
-    // torn down (K2SO #674) — `/cli/tunnel/stop` flips the lifecycle flag
+    // torn down (K2 #674) — `/cli/tunnel/stop` flips the lifecycle flag
     // the renewal thread watches.
     const accessToken = session?.accessToken ?? accessTokenRef.current
     const bound = subdomain.trim()
@@ -805,7 +820,7 @@ export function K2ConnectSection(): React.JSX.Element {
         subdomain: sub.label,
         token: sub.tunnel_token,
         // Persist this device's claim identity now so a later auto-start /
-        // headless boot can renew the lease without the renderer (K2SO #674).
+        // headless boot can renew the lease without the renderer (K2 #674).
         deviceId,
         deviceLabel: deviceLabel ?? '',
       })
@@ -878,7 +893,7 @@ export function K2ConnectSection(): React.JSX.Element {
     setBoundMsg(null)
     try {
       // 1. Stop the current tunnel (the daemon stops its lease renewal for
-      // the old subdomain here — K2SO #674).
+      // the old subdomain here — K2 #674).
       const stopRes = await tunnelPost('stop')
       if (!stopRes.ok) {
         setError(await errText(stopRes))
@@ -898,7 +913,7 @@ export function K2ConnectSection(): React.JSX.Element {
         subdomain: row.label,
         token: row.tunnel_token,
         // Persist this device's claim identity so the daemon renews the new
-        // subdomain's lease under the same device (K2SO #674).
+        // subdomain's lease under the same device (K2 #674).
         deviceId,
         deviceLabel: deviceLabel ?? '',
       })
@@ -930,7 +945,7 @@ export function K2ConnectSection(): React.JSX.Element {
         return
       }
       await refreshStatus()
-      // Daemon now owns the renewal for the new subdomain (K2SO #674).
+      // Daemon now owns the renewal for the new subdomain (K2 #674).
       setBoundMsg(`Swapped to ${row.label}.k2.dev.`)
       void refreshSubdomains()
     } catch (e) {
@@ -954,7 +969,7 @@ export function K2ConnectSection(): React.JSX.Element {
       </p>
 
       <div className="space-y-5">
-        {/* K2SO #628: the EXPOSE controls (account login, tunnel config,
+        {/* K2 #628: the EXPOSE controls (account login, tunnel config,
             start/stop) only apply to THIS Mac's own daemon. On a remote
             host show a short note instead and let the user switch back. */}
         {isRemote ? (
@@ -1225,7 +1240,7 @@ export function K2ConnectSection(): React.JSX.Element {
         {/* ── Users / Access — role-gated multi-user list (#617 / #629) ─── */}
         <SettingsGroup title="Users / Access">
           <div data-settings-id="k2-connect.users" className="space-y-3">
-            {/* K2SO #629: only viewers who can manage users (Owner|Admin)
+            {/* K2 #629: only viewers who can manage users (Owner|Admin)
                 see the management surface. A Member viewer (or an
                 unresolved/forbidden whoami) gets a clean note — never the
                 raw token/403 error. */}
@@ -1246,7 +1261,7 @@ export function K2ConnectSection(): React.JSX.Element {
               You can&apos;t view a password after setting it — only reset it.
             </p>
 
-            {/* Password requirements (K2SO #620) — server-enforced policy */}
+            {/* Password requirements (K2 #620) — server-enforced policy */}
             <div className="border border-[var(--color-border)] p-2.5 space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-[11px] text-[var(--color-text-secondary)] font-medium">
@@ -1387,7 +1402,7 @@ export function K2ConnectSection(): React.JSX.Element {
                         )}
                       </span>
                       <div className="flex items-center gap-3 flex-shrink-0">
-                        {/* K2SO #629 — role selector. Editable only for an
+                        {/* K2 #629 — role selector. Editable only for an
                             Owner viewer; Admins see the role read-only. */}
                         {canChangeRoles(viewerRole) ? (
                           <SettingDropdown

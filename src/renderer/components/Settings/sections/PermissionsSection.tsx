@@ -177,7 +177,7 @@ export function PermissionsSection(): React.JSX.Element {
           Permissions
         </h3>
         <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
-          OS-level access K2SO needs to function. Grants are managed by
+          OS-level access K2 needs to function. Grants are managed by
           macOS in <span className="text-[var(--color-text-secondary)]">System Settings → Privacy &amp; Security</span>.
         </p>
       </div>
@@ -235,7 +235,7 @@ export function PermissionsSection(): React.JSX.Element {
 
       <p className="mt-3 text-[10px] text-[var(--color-text-muted)]">
         Granting a permission opens System Settings — flip the toggle next to
-        K2SO and the status here updates automatically.
+        K2 and the status here updates automatically.
       </p>
     </div>
   )

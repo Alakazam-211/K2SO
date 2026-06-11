@@ -190,7 +190,7 @@ fn pct_encode(s: &str) -> String {
 fn k2so_dir() -> Result<PathBuf, String> {
     Ok(dirs::home_dir()
         .ok_or_else(|| "home dir unavailable".to_string())?
-        .join(".k2so"))
+        .join(".k2"))
 }
 
 fn read_port(path: &PathBuf) -> Result<u16, String> {

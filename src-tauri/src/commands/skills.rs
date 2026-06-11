@@ -1,6 +1,6 @@
 //! Phase 2.5b follow-up: Tauri command surface for the workspace
 //! settings "Skills" panel. Each verb is a one-line forward to the
-//! matching `k2so_core::skills::crud::*` function — the renderer talks
+//! matching `k2_core::skills::crud::*` function — the renderer talks
 //! to these instead of going through HTTP so the in-process daemon
 //! doesn't have to round-trip for a synchronous list/read.
 //!
@@ -9,7 +9,7 @@
 //! `tests/cli/skills_tauri_list_parity.sh` confirms that both surfaces
 //! agree on which skills exist for a given workspace.
 
-use k2so_core::skills::{self, crud::SkillSummary};
+use k2_core::skills::{self, crud::SkillSummary};
 
 #[tauri::command]
 pub fn k2so_skills_list(project_path: String) -> Result<Vec<SkillSummary>, String> {

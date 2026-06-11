@@ -4,7 +4,7 @@
 // fetch against the k2so-daemon's `/cli/llm/*` endpoints. The daemon
 // owns the LLM worker subprocess + supervisor (timeout / RSS watchdog
 // / max-concurrency gate / crash isolation) so the renderer talks to
-// it the same way K2SO Connect / Mobile Companion will:
+// it the same way K2 Connect / Mobile Companion will:
 //
 //   await llmStatus()          → { loaded, modelPath, downloading, ... }
 //   await llmCheck()           → { ok: true } | { ok: false, reason }

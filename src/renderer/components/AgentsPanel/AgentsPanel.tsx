@@ -225,9 +225,9 @@ export default function AgentsPanel(): React.JSX.Element {
 
   if (agentMode === 'custom' || agentMode === 'agent') {
     const targetType = agentMode === 'custom' ? 'custom' : 'k2so'
-    const label = agentMode === 'custom' ? 'Custom Agent' : 'K2SO Agent'
+    const label = agentMode === 'custom' ? 'Custom Agent' : 'K2 Agent'
     const typeDesc = agentMode === 'custom'
-      ? 'A single agent that runs from its persona on the heartbeat. No K2SO infrastructure is injected.'
+      ? 'A single agent that runs from its persona on the heartbeat. No K2 infrastructure is injected.'
       : 'A planner agent that builds PRDs, milestones, and technical plans for this workspace.'
     const singleAgent = agents.find((a) => a.agentType === targetType)
 

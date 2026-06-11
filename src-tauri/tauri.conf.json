@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicolo-ribaudo/tauri-v2-schema/main/schemas/desktop-schema.json",
-  "productName": "K2SO",
+  "productName": "K2",
   "version": "0.39.48",
-  "identifier": "com.alakazamlabs.k2so",
+  "identifier": "dev.k2.app",
   "build": {
     "frontendDist": "../out/renderer",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "K2SO",
+        "title": "K2",
         "width": 1400,
         "height": 900,
         "minWidth": 800,
@@ -54,7 +54,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/Alakazam-211/K2SO/releases/latest/download/latest.json"
+        "https://github.com/Alakazam-211/K2/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU5MTExNDQ2RjY1RUJCMDUKUldRRnUxNzJSaFFSNlFCcXptaWoyRTlidERHaERXbXBkSCthaDEvTTRQbXVIUElOVVd2S0xmNm8K"
     }

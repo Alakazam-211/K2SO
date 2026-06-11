@@ -10,7 +10,7 @@
 //! `sync:projects` events stay on the Tauri shim so existing renderer
 //! `listen('sync:projects', ...)` subscribers keep firing.
 
-use k2so_core::db::schema::Project;
+use k2_core::db::schema::Project;
 use serde_json::json;
 use tauri::{Emitter, Manager};
 
@@ -19,7 +19,7 @@ use crate::editors::EditorInfo;
 
 // ── Re-exported types ──────────────────────────────────────────────────
 
-pub use k2so_core::projects_ops::IconResult;
+pub use k2_core::projects_ops::IconResult;
 
 fn daemon() -> Result<DaemonClient, String> {
     DaemonClient::try_connect()
@@ -62,7 +62,7 @@ pub fn projects_open_in_finder(path: String) -> Result<(), String> {
 }
 
 /// HOST: file picker dialog. After the user selects an image we
-/// decode it into a data-URL locally (using `k2so_core::projects_ops::read_icon_as_data_url`)
+/// decode it into a data-URL locally (using `k2_core::projects_ops::read_icon_as_data_url`)
 /// then ask the daemon to persist it.
 #[tauri::command]
 pub async fn projects_upload_icon(
@@ -92,7 +92,7 @@ pub async fn projects_upload_icon(
         }),
         Some(file_path) => {
             let data_url =
-                k2so_core::projects_ops::read_icon_as_data_url(std::path::Path::new(&file_path))
+                k2_core::projects_ops::read_icon_as_data_url(std::path::Path::new(&file_path))
                     .ok_or("Could not read the selected image")?;
             let r: IconResult = daemon()?.cli_post_json_decode(
                 "/cli/projects/set-icon",

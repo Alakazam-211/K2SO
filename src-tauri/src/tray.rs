@@ -177,7 +177,7 @@ pub fn install(app: &AppHandle<Wry>) -> Result<(), String> {
 /// `set_text` on each cached handle. Full menu rebuild fires only
 /// when the parties count has changed since the last refresh.
 fn refresh_in_place(app: &AppHandle<Wry>) {
-    let companion = k2so_core::companion::companion_status();
+    let companion = k2_core::companion::companion_status();
     let party_count = companion
         .get("connectedClients")
         .and_then(|v| v.as_u64())
@@ -266,7 +266,7 @@ fn build_menu(app: &AppHandle<Wry>) -> Result<Menu<Wry>, String> {
     // 2. Ngrok URL — clickable, click copies to clipboard. Label reads
     // "Ngrok URL: <url>" if tunnel is up, otherwise "Ngrok URL: Offline"
     // (disabled). The URL lives in companion_status's `tunnelUrl`.
-    let companion_status = k2so_core::companion::companion_status();
+    let companion_status = k2_core::companion::companion_status();
     let tunnel_url = companion_status
         .get("tunnelUrl")
         .and_then(|v| v.as_str())
@@ -378,7 +378,7 @@ fn compose_status_label() -> (String, StatusState) {
 
     // 2. Fallback: Tauri's in-process companion. No uptime reliably
     // available here — just report running.
-    let companion = k2so_core::companion::companion_status();
+    let companion = k2_core::companion::companion_status();
     let in_app_running = companion
         .get("running")
         .and_then(|v| v.as_bool())
@@ -408,7 +408,7 @@ fn compose_status_label() -> (String, StatusState) {
 /// is a valid status the user wants to see. Items only render when
 /// sessions exist.
 ///
-/// Reads from `k2so_core::companion::companion_status()` which
+/// Reads from `k2_core::companion::companion_status()` which
 /// returns the same `connectedClients` count the Settings pane's
 /// companion row displays. Per-session detail (device name, last
 /// activity) is surfaced from `sessions` in that response when the

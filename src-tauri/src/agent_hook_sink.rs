@@ -1,5 +1,5 @@
 //! Tauri-side implementation of
-//! `k2so_core::agent_hooks::AgentHookEventSink`.
+//! `k2_core::agent_hooks::AgentHookEventSink`.
 //!
 //! Registers at startup in `lib.rs::setup()`. Routes
 //! `HookEvent::AgentLifecycle`, `::AgentReply`, `::SyncProjects`,
@@ -8,7 +8,7 @@
 //! event bus under the same wire-format event names the React frontend
 //! already listens for.
 
-use k2so_core::agent_hooks::{AgentHookEventSink, HookEvent};
+use k2_core::agent_hooks::{AgentHookEventSink, HookEvent};
 use tauri::{AppHandle, Emitter};
 
 pub struct TauriAgentHookEventSink {

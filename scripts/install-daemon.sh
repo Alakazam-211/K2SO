@@ -1,9 +1,9 @@
 #!/bin/sh
-# K2SO standalone-daemon headless installer (P2 / #614).
+# K2 standalone-daemon headless installer (P2 / #614).
 #
 # One-liner for a fresh, GUI-less box:
 #
-#   curl -fsSL https://github.com/Alakazam-211/K2SO/releases/latest/download/install-daemon.sh | sh
+#   curl -fsSL https://github.com/Alakazam-211/K2/releases/latest/download/install-daemon.sh | sh
 #
 # Fetches the per-OS standalone daemon binary from a signed GitHub
 # release, MANDATORY-minisign-verifies it against the SAME pubkey the
@@ -11,7 +11,7 @@
 # it into a bin dir, and writes a supervisor unit (systemd on Linux,
 # launchd on macOS) so a crash respawns the daemon.
 #
-# This is the self-contained twin of `k2so daemon install`. Keep the
+# This is the self-contained twin of `k2 daemon install`. Keep the
 # two in sync (pubkey, platform detect, verify, service templates).
 #
 # POSIX sh. No bash-isms.
@@ -23,29 +23,31 @@ set -eu
 
 # ── Config (overridable via env) ─────────────────────────────────────
 # Minisign verify pubkey — literal from plugins.updater.pubkey in
-# src-tauri/tauri.conf.json. Rotate here AND in cli/k2so if the updater
+# src-tauri/tauri.conf.json. Rotate here AND in cli/k2 if the updater
 # key ever rotates.
-K2SO_DAEMON_PUBKEY="dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU5MTExNDQ2RjY1RUJCMDUKUldRRnUxNzJSaFFSNlFCcXptaWoyRTlidERHaERXbXBkSCthaDEvTTRQbXVIUElOVVd2S0xmNm8K"
+K2_DAEMON_PUBKEY="dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU5MTExNDQ2RjY1RUJCMDUKUldRRnUxNzJSaFFSNlFCcXptaWoyRTlidERHaERXbXBkSCthaDEvTTRQbXVIUElOVVd2S0xmNm8K"
 
-K2SO_VERSION="${K2SO_VERSION:-}"
-K2SO_BIN_DIR="${K2SO_BIN_DIR:-$HOME/.local/bin}"
-K2SO_MANIFEST_URL="${K2SO_MANIFEST_URL:-}"
-K2SO_NO_SERVICE="${K2SO_NO_SERVICE:-0}"
-K2SO_DRY_RUN="${K2SO_DRY_RUN:-0}"
-K2SO_DAEMON_LABEL="com.k2so.k2so-daemon"
+# K2_* is canonical; K2SO_* still honored through the 0.x transition.
+K2_VERSION="${K2_VERSION:-${K2SO_VERSION:-}}"
+K2_BIN_DIR="${K2_BIN_DIR:-${K2SO_BIN_DIR:-$HOME/.local/bin}}"
+K2_MANIFEST_URL="${K2_MANIFEST_URL:-${K2SO_MANIFEST_URL:-}}"
+K2_NO_SERVICE="${K2_NO_SERVICE:-${K2SO_NO_SERVICE:-0}}"
+K2_DRY_RUN="${K2_DRY_RUN:-${K2SO_DRY_RUN:-0}}"
+K2_DAEMON_LABEL="dev.k2.daemon"
 
-DEFAULT_LATEST_URL="https://github.com/Alakazam-211/K2SO/releases/latest/download/daemon-latest.json"
+DEFAULT_LATEST_URL="https://github.com/Alakazam-211/K2/releases/latest/download/daemon-latest.json"
 
 usage() {
     cat >&2 <<'EOF'
 Usage: install-daemon.sh [--version x.y.z] [--bin-dir DIR]
                          [--manifest-url URL] [--no-service] [--dry-run]
 
-Install the STANDALONE (headless, no-GUI) K2SO daemon from a signed
+Install the STANDALONE (headless, no-GUI) K2 daemon from a signed
 GitHub release, minisign-verified against the embedded updater pubkey.
 
-Flags (or matching env vars K2SO_VERSION / K2SO_BIN_DIR /
-K2SO_MANIFEST_URL / K2SO_NO_SERVICE=1 / K2SO_DRY_RUN=1):
+Flags (or matching env vars K2_VERSION / K2_BIN_DIR /
+K2_MANIFEST_URL / K2_NO_SERVICE=1 / K2_DRY_RUN=1; legacy K2SO_*
+twins still honored):
   --version       install a specific release tag (default: latest)
   --bin-dir       install dir (default: ~/.local/bin)
   --manifest-url  override daemon-latest.json URL (supports file://)
@@ -56,11 +58,11 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version)      K2SO_VERSION="${2:-}"; shift 2 ;;
-        --bin-dir)      K2SO_BIN_DIR="${2:-}"; shift 2 ;;
-        --manifest-url) K2SO_MANIFEST_URL="${2:-}"; shift 2 ;;
-        --no-service)   K2SO_NO_SERVICE=1; shift ;;
-        --dry-run)      K2SO_DRY_RUN=1; shift ;;
+        --version)      K2_VERSION="${2:-}"; shift 2 ;;
+        --bin-dir)      K2_BIN_DIR="${2:-}"; shift 2 ;;
+        --manifest-url) K2_MANIFEST_URL="${2:-}"; shift 2 ;;
+        --no-service)   K2_NO_SERVICE=1; shift ;;
+        --dry-run)      K2_DRY_RUN=1; shift ;;
         -h|--help)      usage; exit 0 ;;
         *) echo "install-daemon.sh: unknown argument: $1" >&2; usage; exit 2 ;;
     esac
@@ -133,10 +135,10 @@ fetch() {
 }
 
 # ── Resolve manifest URL ─────────────────────────────────────────────
-if [ -n "$K2SO_MANIFEST_URL" ]; then
-    MANIFEST_URL="$K2SO_MANIFEST_URL"
-elif [ -n "$K2SO_VERSION" ]; then
-    MANIFEST_URL="https://github.com/Alakazam-211/K2SO/releases/download/v${K2SO_VERSION}/daemon-latest.json"
+if [ -n "$K2_MANIFEST_URL" ]; then
+    MANIFEST_URL="$K2_MANIFEST_URL"
+elif [ -n "$K2_VERSION" ]; then
+    MANIFEST_URL="https://github.com/Alakazam-211/K2/releases/download/v${K2_VERSION}/daemon-latest.json"
 else
     MANIFEST_URL="$DEFAULT_LATEST_URL"
 fi
@@ -155,34 +157,34 @@ if [ -z "$URL" ] || [ -z "$SIG" ] || [ -z "$SHA256" ]; then
     exit 1
 fi
 
-BIN_PATH="$K2SO_BIN_DIR/k2so-daemon"
+BIN_PATH="$K2_BIN_DIR/k2-daemon"
 
 if [ "$(uname -s)" = "Darwin" ]; then
     SVC_KIND="launchd"
-    SVC_PATH="$HOME/Library/LaunchAgents/${K2SO_DAEMON_LABEL}.plist"
+    SVC_PATH="$HOME/Library/LaunchAgents/${K2_DAEMON_LABEL}.plist"
 else
     SVC_KIND="systemd"
-    SVC_PATH="$HOME/.config/systemd/user/k2so-daemon.service"
+    SVC_PATH="$HOME/.config/systemd/user/k2-daemon.service"
 fi
 
 # ── Dry run ──────────────────────────────────────────────────────────
-if [ "$K2SO_DRY_RUN" = "1" ]; then
+if [ "$K2_DRY_RUN" = "1" ]; then
     echo "install-daemon.sh — DRY RUN (nothing downloaded or written)"
     echo "  platform key:   $PLATFORM"
     echo "  manifest url:   $MANIFEST_URL"
     echo "  manifest ver:   ${MVER:-<unknown>}"
-    echo "  requested ver:  ${K2SO_VERSION:-<latest>}"
+    echo "  requested ver:  ${K2_VERSION:-<latest>}"
     echo "  binary url:     $URL"
     echo "  sha256:         $SHA256"
     echo "  sig (minisign): $(printf '%s' "$SIG" | cut -c1-24)..."
     echo "  install path:   $BIN_PATH"
     echo "  minisign verify: minisign -Vm <downloaded-bin> -P <embedded-pubkey>"
-    if [ "$K2SO_NO_SERVICE" = "1" ]; then
+    if [ "$K2_NO_SERVICE" = "1" ]; then
         echo "  service:        (skipped — --no-service)"
     else
         echo "  service unit:   $SVC_KIND → $SVC_PATH"
         if [ "$SVC_KIND" = "systemd" ]; then
-            echo "  enable cmds:    systemctl --user daemon-reload && systemctl --user enable --now k2so-daemon"
+            echo "  enable cmds:    systemctl --user daemon-reload && systemctl --user enable --now k2-daemon"
         else
             echo "  enable cmds:    launchctl bootstrap gui/\$(id -u) $SVC_PATH"
         fi
@@ -200,11 +202,11 @@ if ! command -v minisign >/dev/null 2>&1; then
     die "Refusing to install an unverified binary."
 fi
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/k2so-daemon-install.XXXXXX") || die "Failed to create temp dir."
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/k2-daemon-install.XXXXXX") || die "Failed to create temp dir."
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-DL_BIN="$TMP/k2so-daemon"
-DL_SIG="$TMP/k2so-daemon.minisig"
+DL_BIN="$TMP/k2-daemon"
+DL_SIG="$TMP/k2-daemon.minisig"
 
 echo "Downloading daemon binary ($PLATFORM, manifest ver ${MVER:-?})..."
 fetch "$URL" "$DL_BIN"
@@ -212,7 +214,7 @@ fetch "$URL" "$DL_BIN"
 printf '%s\n' "$SIG" > "$DL_SIG"
 
 echo "Verifying minisign signature..."
-if ! minisign -Vm "$DL_BIN" -P "$K2SO_DAEMON_PUBKEY" -x "$DL_SIG" >/dev/null 2>&1; then
+if ! minisign -Vm "$DL_BIN" -P "$K2_DAEMON_PUBKEY" -x "$DL_SIG" >/dev/null 2>&1; then
     echo "MINISIGN VERIFICATION FAILED for $URL" >&2
     die "Refusing to install. The binary may be corrupt or tampered with."
 fi
@@ -227,16 +229,16 @@ if [ "$GOT_SHA" != "$SHA256" ]; then
 fi
 
 echo "Verified. Installing to $BIN_PATH ..."
-mkdir -p "$K2SO_BIN_DIR"
+mkdir -p "$K2_BIN_DIR"
 cp "$DL_BIN" "$BIN_PATH"
 chmod +x "$BIN_PATH"
 
-if [ "$K2SO_NO_SERVICE" != "1" ]; then
+if [ "$K2_NO_SERVICE" != "1" ]; then
     if [ "$SVC_KIND" = "systemd" ]; then
         mkdir -p "$(dirname "$SVC_PATH")"
         cat > "$SVC_PATH" <<EOF
 [Unit]
-Description=K2SO standalone daemon
+Description=K2 standalone daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -251,7 +253,7 @@ WantedBy=default.target
 EOF
         echo "Wrote systemd user unit: $SVC_PATH"
         echo "Enable + start it with:"
-        echo "  systemctl --user daemon-reload && systemctl --user enable --now k2so-daemon"
+        echo "  systemctl --user daemon-reload && systemctl --user enable --now k2-daemon"
     else
         mkdir -p "$(dirname "$SVC_PATH")"
         cat > "$SVC_PATH" <<EOF
@@ -260,7 +262,7 @@ EOF
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${K2SO_DAEMON_LABEL}</string>
+    <string>${K2_DAEMON_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
         <string>$BIN_PATH</string>
@@ -270,9 +272,9 @@ EOF
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/.k2so/daemon.stdout.log</string>
+    <string>$HOME/.k2/daemon.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.k2so/daemon.stderr.log</string>
+    <string>$HOME/.k2/daemon.stderr.log</string>
 </dict>
 </plist>
 EOF
@@ -283,7 +285,7 @@ EOF
 fi
 
 echo ""
-echo "Standalone K2SO daemon installed: $BIN_PATH"
+echo "Standalone K2 daemon installed: $BIN_PATH"
 echo "NOTE: pairing this headless box to a K2 Connect account from the CLI"
 echo "      is a follow-up — token bootstrap is still an open PRD question,"
 echo "      so this installer does NOT pair the daemon. Pair it via the"

@@ -1,6 +1,7 @@
 # Phase 2.6: Tunnel-provider decision (DEFERRED from Phase 2.5)
 
 **Status**: Deferred from Phase 2.5 Workstream E. Re-opened with **expanded scope** — K2SO is no longer just tunneling the Companion API; it's a tunnel-as-a-service product that lets users expose any localhost port. Phase 2.6 picks up the decision later with a focused re-spike.
+**Cycle placement (2026-05-30, Rosson)**: this decision + Phase 3 (K2 Connect) land in the **0.39.X** cycle (NOT 0.40.x — that's the rename/Brain/TTS/Kessel feature set). 0.39.X ships the BYO tier (ngrok + LocalXpose + Cloudflare) and K2 Connect on the pluggable `TunnelProvider` seam; the two pieces explicitly held back are (1) the operated Hosted-backbone service choice and (2) the bifurcated-repo monetization split.
 **Date drafted**: 2026-05-23
 **Owner**: Rosson + pod-leader
 **Blocks**: Phase 3 Workstream B (TLS + auth architecture)

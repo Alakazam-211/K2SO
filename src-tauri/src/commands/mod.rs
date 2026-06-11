@@ -19,7 +19,7 @@ pub mod updater;
 // Phase 2 Unit 5 — `claude_auth` command shims deleted. The renderer
 // hits `/cli/claude-auth/*` on k2so-daemon directly; no Tauri-side
 // command surface for it remains. Scheduler ownership (the launchd
-// plist `com.k2so.claude-auth-refresh.plist`) now lives in the
+// plist `dev.k2.claude-auth.plist`) now lives in the
 // daemon's `claude_auth_host` module so refresh keeps working when
 // the Tauri app is closed.
 pub mod k2so_agents;
@@ -38,7 +38,7 @@ pub mod daemon;
 pub mod permissions;
 pub mod memory_watcher;
 // Phase 2.1c Item 2 — workspace inbox primitive Tauri shims. Thin
-// wrappers around `k2so_core::inbox::*` that mirror the daemon-side
+// wrappers around `k2_core::inbox::*` that mirror the daemon-side
 // `/cli/inbox/*` HTTP routes so the renderer + CLI see the same data.
 pub mod inbox;
 // Phase 2.1 wrap-up — generic worktree filesystem readers. Powers the
@@ -46,7 +46,7 @@ pub mod inbox;
 // reusable for any future "show a file from inside a worktree" surface.
 pub mod worktree;
 // Phase 2.5b follow-up — Tauri verbs for the workspace settings
-// "Skills" panel. Thin forwards to `k2so_core::skills::crud::*`.
+// "Skills" panel. Thin forwards to `k2_core::skills::crud::*`.
 pub mod skills;
 // K2 Connect — cross-platform OS keychain bridge for remembered
 // remote-host tokens (`k2_secret_{set,get,delete}`). macOS Keychain /

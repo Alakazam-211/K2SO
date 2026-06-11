@@ -102,11 +102,11 @@ export function CodeEditorSettingsSection(): React.JSX.Element {
     </div>
   )
 
-  // Sample code for the live preview — K2SO coding in a galaxy far, far away
+  // Sample code for the live preview — K2 coding in a galaxy far, far away
   const previewCode = `import { useState, useEffect, useCallback } from 'react'
 
-// K2SO Security Droid — Imperial Data Vault Access Module
-// "I find that answer vague and unconvincing." — K2SO
+// K2 Security Droid — Imperial Data Vault Access Module
+// "I find that answer vague and unconvincing." — K2
 
 interface SecurityProtocol {
   clearanceLevel: 'rebel' | 'imperial' | 'classified'
@@ -119,7 +119,7 @@ type MissionStatus = 'infiltrating' | 'compromised' | 'success' | 'told-you-so'
 
 /**
  * Calculates the survival odds for a given mission.
- * Spoiler: they're never good enough for K2SO's standards.
+ * Spoiler: they're never good enough for K2's standards.
  */
 export function calculateSurvivalOdds(
   crew: string[],
@@ -135,7 +135,7 @@ export function calculateSurvivalOdds(
     Math.max(0, (baseOdds + crewBonus) * forceMultiplier)
   )
 
-  // K2SO always has something to say about the odds
+  // K2 always has something to say about the odds
   const commentary =
     finalOdds > 80 ? "Acceptable. I still don't like it." :
     finalOdds > 50 ? "I have a bad feeling about this." :
@@ -178,7 +178,7 @@ export function useImperialVault(protocol: SecurityProtocol) {
       if (detected && !alarmTriggered) {
         setAlarmTriggered(true)
         setStatus('compromised')
-        console.warn('[K2SO] Congratulations. You are being rescued.')
+        console.warn('[K2] Congratulations. You are being rescued.')
       }
     }, 5000)
 
@@ -196,7 +196,7 @@ async function fetchClassifiedData(id: string): Promise<string[]> {
 }
 `
 
-  // Demo diff data: K2SO's latest code review changes
+  // Demo diff data: K2's latest code review changes
   const demoChanges = useMemo(() => {
     const m = new Map<number, 'added' | 'modified' | 'deleted'>()
     m.set(11, 'added')

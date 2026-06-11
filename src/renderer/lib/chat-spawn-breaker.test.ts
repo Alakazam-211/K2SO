@@ -1,4 +1,4 @@
-// K2SO #682 — pinned-chat spawn circuit breaker unit tests.
+// K2 #682 — pinned-chat spawn circuit breaker unit tests.
 //
 // The breaker converts an unbounded spawn→exit→respawn loop (the ~334
 // `claude` procs bug) into a bounded N attempts + a manual-retry error
@@ -142,7 +142,7 @@ describe('chat-spawn-breaker', () => {
   })
 })
 
-describe('isSelfRetrigger — the resolve self-loop guard (K2SO #682)', () => {
+describe('isSelfRetrigger — the resolve self-loop guard (K2 #682)', () => {
   const memo = (over: Partial<ResolveMemo> = {}): ResolveMemo => ({
     refreshNonce: 0,
     projectPath: '/work/proj',

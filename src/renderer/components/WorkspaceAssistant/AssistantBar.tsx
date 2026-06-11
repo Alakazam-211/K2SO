@@ -898,7 +898,7 @@ export default function AssistantBar(): React.JSX.Element | null {
       >
         <div className="flex items-center gap-3 px-4 w-full">
           <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
-            K2SO
+            K2
           </span>
           <div className="flex-1 h-[4px] bg-[#1a1a1a] relative overflow-hidden">
             <div
@@ -931,7 +931,7 @@ export default function AssistantBar(): React.JSX.Element | null {
       >
         <div className="flex items-center gap-3 px-4 w-full">
           <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
-            K2SO
+            K2
           </span>
           <span className="text-[11px] text-[var(--color-text-muted)] flex-1">
             AI model not configured
@@ -1077,7 +1077,7 @@ export default function AssistantBar(): React.JSX.Element | null {
       {/* ── Input bar ─────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 px-4 w-full" style={{ height: '42px' }}>
         <span className="text-[11px] text-[var(--color-text-muted)] flex-shrink-0 tracking-wide">
-          K2SO
+          K2
         </span>
 
         {isLoading ? (

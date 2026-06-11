@@ -13,7 +13,7 @@ import { useToastStore } from '@/stores/toast'
  * Layout (single line):
  *   [indicator]  <name>   <Daily 9 AM>           [Launch]
  *
- * Indicators (squares, not circles, per K2SO status convention):
+ * Indicators (squares, not circles, per K2 status convention):
  *   - 'live'       : braille spinner (animated)
  *   - 'resumable'  : filled square
  *   - 'scheduled'  : hollow square

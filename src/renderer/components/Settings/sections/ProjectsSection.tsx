@@ -54,7 +54,7 @@ export const PROJECTS_MANIFEST: SettingEntry[] = [
   { id: 'projects.agents', section: 'projects', label: 'Project Agents', description: 'Custom agent personas + wake-up files per workspace', keywords: ['agent', 'persona', 'wakeup', 'create'] },
   { id: 'projects.worktrees', section: 'projects', label: 'Worktree Folders', description: 'Enable/disable per-agent git worktrees', keywords: ['worktree', 'git', 'branch'] },
   { id: 'projects.relations', section: 'projects', label: 'Connected Workspaces', description: 'Workspace relations for cross-project messaging', keywords: ['relations', 'connected', 'cross-workspace', 'links'] },
-  { id: 'projects.cursor-migrate', section: 'projects', label: 'Cursor Session Migration', description: 'Port Cursor IDE sessions into K2SO', keywords: ['cursor', 'migrate', 'session', 'import'] },
+  { id: 'projects.cursor-migrate', section: 'projects', label: 'Cursor Session Migration', description: 'Port Cursor IDE sessions into K2', keywords: ['cursor', 'migrate', 'session', 'import'] },
 ]
 
 export function ProjectsSection(): React.JSX.Element {
@@ -1369,7 +1369,7 @@ function ProjectDetail({
           <div className="flex gap-1">
             {(['off', 'agent', 'manager', 'custom'] as const).map((mode) => {
               const isActive = (project.agentMode || 'off') === mode || (mode === 'manager' && (project.agentMode === 'coordinator' || project.agentMode === 'pod'))
-              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2SO Agent', manager: 'Workspace Manager' }
+              const labels = { off: 'Off', custom: 'Custom Agent', agent: 'K2 Agent', manager: 'Workspace Manager' }
               return (
                 <button
                   key={mode}
@@ -1414,10 +1414,10 @@ function ProjectDetail({
                       if (!confirmed) return
                     } else if (mode === 'agent') {
                       const lines = [
-                        'A K2SO planner agent that helps you build PRDs, milestones, and technical plans.',
+                        'A K2 planner agent that helps you build PRDs, milestones, and technical plans.',
                         '',
                         'What happens:',
-                        '• Generates a CLAUDE.md with K2SO planner instructions',
+                        '• Generates a CLAUDE.md with K2 planner instructions',
                         '• If a user-written CLAUDE.md exists, it won\'t be overwritten',
                         '  (the generated version is saved to .k2so/CLAUDE.md.generated)',
                       ]
@@ -1488,7 +1488,7 @@ function ProjectDetail({
           <p className="text-[10px] text-[var(--color-text-muted)]">
             {(project.agentMode || 'off') === 'off' && 'No agent features enabled for this workspace.'}
             {(project.agentMode || 'off') === 'custom' && 'Custom Agent — train agents to operate any software via the heartbeat. Customize each agent\'s behavior with the AI persona editor.'}
-            {(project.agentMode || 'off') === 'agent' && 'K2SO Agent — a planner that helps you build PRDs, milestones, and technical plans for this workspace.'}
+            {(project.agentMode || 'off') === 'agent' && 'K2 Agent — a planner that helps you build PRDs, milestones, and technical plans for this workspace.'}
             {((project.agentMode || 'off') === 'manager' || project.agentMode === 'coordinator' || project.agentMode === 'pod') && 'Workspace Manager — delegates work to agent templates that execute in parallel worktrees.'}
           </p>
 
@@ -1754,7 +1754,7 @@ function ShowHeartbeatSessionsToggle({ projectPath }: { projectPath: string }): 
   )
 }
 
-// ── K2SO Agents Panel ───────────────────────────────────────────────
+// ── K2 Agents Panel ───────────────────────────────────────────────
 
 interface K2soAgentInfo {
   name: string
@@ -2044,7 +2044,7 @@ function StateSelector({ projectId, currentStateId }: { projectId: string; curre
 // per-row `triage` heartbeat's WAKEUP.md (see Heartbeats panel).
 
 // ── Workspace Knowledge editor (PROJECT.md — the source) ─────────────
-// PROJECT.md is the single source for workspace knowledge. K2SO's
+// PROJECT.md is the single source for workspace knowledge. K2's
 // regen pipeline compiles it (plus each agent's AGENT.md) into the
 // per-agent SKILL.md files, then symlinks/marker-injects those into
 // every CLI harness file (Claude/OpenCode/Pi/Codex/Gemini/Cursor/etc.).
@@ -2094,7 +2094,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
     `File: .k2so/PROJECT.md (source)`,
     `Path: ${filePath}`,
     ``,
-    `This is the SOURCE. K2SO compiles it (plus the agent's AGENT.md) into the`,
+    `This is the SOURCE. K2 compiles it (plus the agent's AGENT.md) into the`,
     `canonical .k2so/skills/<name>/SKILL.md on save. Mirroring this content out`,
     `into the CLI harness files (CLAUDE.md, GEMINI.md, .cursor/rules, AGENTS.md,`,
     `etc.) is OPT-IN per workspace — it only happens if harness fan-out is`,
@@ -2138,7 +2138,7 @@ function ClaudeMdEditor({ projectPath, projectName, onClose }: { projectPath: st
       command={terminalCommand}
       args={terminalArgs}
       title={`Workspace Knowledge: ${projectName}`}
-      instructions="Editing .k2so/PROJECT.md — the source for workspace knowledge. K2SO compiles this into the canonical SKILL.md. When harness fan-out is enabled (opt-in), it also mirrors out to CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .goosehints, etc. Regen runs automatically when you close this editor."
+      instructions="Editing .k2so/PROJECT.md — the source for workspace knowledge. K2 compiles this into the canonical SKILL.md. When harness fan-out is enabled (opt-in), it also mirrors out to CLAUDE.md, AGENTS.md, GEMINI.md, .cursor/rules, .goosehints, etc. Regen runs automatically when you close this editor."
       warningText="This is the source file for the workspace's shared knowledge. When harness fan-out is enabled, edits mirror into every chosen CLI LLM harness on save."
       onFileChange={handleFileChange}
       onClose={handleClose}
@@ -2431,7 +2431,7 @@ function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { pr
   const [ready, setReady] = useState(false)
   const [agentName, setAgentName] = useState('k2so-agent')
 
-  // Ensure the K2SO agent exists for this workspace
+  // Ensure the K2 agent exists for this workspace
   useEffect(() => {
     const ensure = async () => {
       try {
@@ -2443,7 +2443,7 @@ function K2SOAgentPersonaButton({ projectPath, projectName, onOpenEditor }: { pr
           await daemonCliGet('agents/create', {
             project: projectPath,
             name: 'k2so-agent',
-            role: 'K2SO planner — builds PRDs, milestones, and technical plans',
+            role: 'K2 planner — builds PRDs, milestones, and technical plans',
             agent_type: 'k2so',
           })
         }
@@ -2613,7 +2613,7 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
                   <span className="text-xs text-[var(--color-text-primary)] truncate">{p.name}</span>
                   {p.agentMode && p.agentMode !== 'off' && (
                     <span className="text-[9px] text-[var(--color-text-muted)] ml-auto flex-shrink-0">
-                      {p.agentMode === 'custom' ? 'Custom' : p.agentMode === 'agent' ? 'K2SO' : 'Manager'}
+                      {p.agentMode === 'custom' ? 'Custom' : p.agentMode === 'agent' ? 'K2' : 'Manager'}
                     </span>
                   )}
                 </button>
@@ -2648,7 +2648,7 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
                 </span>
                 {target?.agentMode && target.agentMode !== 'off' && (
                   <span className="text-[9px] text-[var(--color-text-muted)]">
-                    {target.agentMode === 'custom' ? 'Custom' : target.agentMode === 'agent' ? 'K2SO' : 'Manager'}
+                    {target.agentMode === 'custom' ? 'Custom' : target.agentMode === 'agent' ? 'K2' : 'Manager'}
                   </span>
                 )}
                 <button
@@ -2693,7 +2693,7 @@ function ConnectedWorkspacesPanel({ projectId }: { projectId: string }): React.J
                   </span>
                   {source?.agentMode && source.agentMode !== 'off' && (
                     <span className="text-[9px] text-[var(--color-text-muted)]">
-                      {source.agentMode === 'custom' ? 'Custom' : source.agentMode === 'agent' ? 'K2SO' : 'Manager'}
+                      {source.agentMode === 'custom' ? 'Custom' : source.agentMode === 'agent' ? 'K2' : 'Manager'}
                     </span>
                   )}
                 </div>
@@ -2846,7 +2846,7 @@ function ProjectSkillsPanel({ projectPath, onOpenEditor }: { projectPath: string
   const fetchSkills = useCallback(async () => {
     // Phase 2.5b followup: dedicated `.k2so/skills/` enumerator. Returns
     // every skill folder regardless of workspace mode, so the Skills
-    // section works under every mode (Off / K2SO Agent / Manager /
+    // section works under every mode (Off / K2 Agent / Manager /
     // Custom).
     try {
       const result = await invoke<SkillSummary[]>('k2so_skills_list', { projectPath })
@@ -2919,7 +2919,7 @@ function ProjectSkillsPanel({ projectPath, onOpenEditor }: { projectPath: string
   const manager = agents.find((a) => a.isCoordinator)
   // Filter the manager out of the per-row skill list so it isn't
   // rendered twice (once in the Workspace Manager block inside Agent
-  // Settings, once here). Other skills — including the K2SO planner
+  // Settings, once here). Other skills — including the K2 planner
   // agent + every sub-agent template — render in the list.
   const skillRows = skills.filter((s) => !manager || s.name !== manager.name)
 
@@ -3120,7 +3120,7 @@ function CursorMigrationPanel({ projectPath }: { projectPath: string }): React.J
       </h3>
 
       <p className="text-[10px] text-[var(--color-text-muted)]">
-        Migrate conversations from the Cursor IDE to CLI format so they can be resumed in K2SO terminals.
+        Migrate conversations from the Cursor IDE to CLI format so they can be resumed in K2 terminals.
       </p>
 
       {/* Session list */}

@@ -2996,7 +2996,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "k2so"
+name = "k2"
 version = "0.39.48"
 dependencies = [
  "ahash",
@@ -3015,7 +3015,7 @@ dependencies = [
  "glob",
  "ignore",
  "image",
- "k2so-core",
+ "k2-core",
  "keyring",
  "libc",
  "mio",
@@ -3057,7 +3057,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "k2so-core"
+name = "k2-core"
 version = "0.39.48"
 dependencies = [
  "alacritty_terminal",
@@ -3073,7 +3073,7 @@ dependencies = [
  "git2",
  "ignore",
  "image",
- "k2so-core",
+ "k2-core",
  "libc",
  "llama-cpp-2",
  "mio",
@@ -3102,7 +3102,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "k2so-daemon"
+name = "k2-daemon"
 version = "0.39.48"
 dependencies = [
  "base64 0.22.1",
@@ -3110,7 +3110,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "getrandom 0.2.17",
- "k2so-core",
+ "k2-core",
  "libc",
  "minisign-verify",
  "parking_lot",

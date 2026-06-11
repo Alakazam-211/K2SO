@@ -6,7 +6,7 @@
 // resolve the project + workspace FROM that path rather than from the
 // global `activeProjectId`/`activeWorkspaceId` pointers, which track the
 // globally-active workspace and can diverge from the workspace the panel
-// is actually rendering inside (e.g. K2SO is globally active with running
+// is actually rendering inside (e.g. K2 is globally active with running
 // heartbeats while the user opens HK47's history panel). See issue #7.
 //
 // This lives in its own module (no React / Tauri imports) so it's

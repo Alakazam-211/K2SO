@@ -697,7 +697,7 @@ function ConnectingOverlay({ decision, attempts }: ConnectingOverlayProps): Reac
 
   // Heading + sub-line. While the (correct) daemon is migrating we tell
   // the user updates are being applied; otherwise it's a plain connect.
-  const heading = migrating ? 'Setting up K2SO…' : 'Connecting…'
+  const heading = migrating ? 'Setting up K2…' : 'Connecting…'
   const subline = migrating
     ? (decision.detail && decision.detail.length > 0 ? decision.detail : 'Applying updates…')
     : null
@@ -735,8 +735,8 @@ function ConnectingOverlay({ decision, attempts }: ConnectingOverlayProps): Reac
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem' }}>
           <div style={{ fontSize: '0.85rem', opacity: 0.75, maxWidth: '440px', textAlign: 'center', lineHeight: 1.5 }}>
             {migrating
-              ? 'K2SO is still applying updates. This can take a minute on a large upgrade — you can keep waiting, or reload below.'
-              : "Your K2SO daemon may still be loading. If you're unsure, quit and relaunch the app, or try reloading with the button below."}
+              ? 'K2 is still applying updates. This can take a minute on a large upgrade — you can keep waiting, or reload below.'
+              : "Your K2 daemon may still be loading. If you're unsure, quit and relaunch the app, or try reloading with the button below."}
           </div>
           <button
             onClick={() => { window.location.reload() }}

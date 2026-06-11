@@ -136,6 +136,36 @@ asset names; tauri.conf: productName K2, identifier per Q1, updater
 endpoint → `Alakazam-211/K2` manifest. Full test suite + a migration
 integration test (fake ~/.k2so fixture → boot → assert moved+symlinked).
 
+> **R2 STATUS: CODE-COMPLETE (2026-06-10, branch `rebrand-k2`, 7 commits
+> 557146a…b17110c).** Stages: (1+2) crates k2-core/k2-daemon + `k2` CLI
+> with deprecation shim; (3) K2_* env dual-emit/dual-read; (4) renderer
+> prose + "K2 by Alakazam Labs" anchors; (5a) ~/.k2 home migration module
+> (move + compat symlink, 4 tests); (5b) dev.k2.* launchd labels +
+> keychain services + `k2-daemon` binary + boot-time launchd sweep with
+> eager heartbeat/claude-auth re-ensure + keychain copy-on-read for all 3
+> connect services; (6) workspace dot-dir dual-compat
+> (`workspace_dot_dir()`: .k2/ preferred, .k2so/ default — Q2) across
+> ~50 Rust sites + CLI `_ws_dot_dir`/`K2_HOME` + CLI label fallback;
+> (7) productName K2 / dev.k2.app / brand icons / release.sh
+> RELEASE_REPO param (default Alakazam-211/K2; K2_RELEASE_REPO override
+> for bridge releases) — stage 8 folded into 7.
+> Tests: 857 k2-core + all k2-daemon targets green; renderer at known
+> baseline (#41); clone heartbeatEnabled failure is pre-existing → #44.
+> `tauri build` verification: PASSED (K2.app bundles with dev.k2.app /
+> "K2" / `k2` executable / brand icon / both CLIs incl. shim).
+> **CONVERGENCE RIG: PASSED after 3 fixes (commit 95f60a1)** — fixture
+> 0.39.x home + old plist booted under the 0.40 app/daemon. Caught and
+> fixed: (a) db::init_database() ran before the home migration, creating
+> an empty ~/.k2 and forcing Conflict; (b) plist install resolved the
+> bundled daemon by the stale "k2so-daemon" name; (c) the autostart
+> NotInstalled arm deferred to install_daemon_plist_v1 (already applied
+> on every updated machine) so the swept plist never reinstalled —
+> machine left daemonless. Now self-heals every boot.
+> Rig caveat for repeats: launchd does NOT inherit a fake $HOME — a
+> heal-bootstrapped dev.k2.daemon runs against the REAL home (it swept
+> the real com.k2so plist on the dev box; restored). Headless-daemon rig
+> covers the post-migration daemon half safely.
+
 **R3 — 0.39.48 bridge release (old repo, last K2SO-branded build):**
 - In-app rebrand announcement (WHATS_NEW): name change, new home, and the
   LICENSE CHANGE disclosure (0.40+ is Fair Source/FSL; 0.39.x stays MIT) —

@@ -5,7 +5,9 @@
 **Owner**: Rosson + pod-leader
 **Strategic goal**: launch the K2SO Hosted middle-tier ($2-?/mo `<sub>.k2.dev`) — the secure tunnel monetization product.
 **Intermediate milestone**: Public 0.39.0 release (sign+notarize+DMG ship) — unblocks the audience that will subscribe.
-**Release strategy update (2026-05-25)**: ship **0.39.0 EARLY** — right after Phase 2.5d closes + one more smoke pass. Phase 2.6 (tunnel decision) and Phase 3 (contract hardening) become the **0.40.x cycle**, deferred to the workweek. Rationale: weekend over; Phase 2.6+ work is additive (doesn't change existing-user behavior); current users can start validating the new infrastructure during the workweek; workweek focus shifts to creature comforts users have been requesting.
+**Release strategy update (2026-05-25)**: ship **0.39.0 EARLY** — right after Phase 2.5d closes + one more smoke pass. Rationale: weekend over; Phase 2.6+ work is additive (doesn't change existing-user behavior); current users can start validating the new infrastructure during the workweek; workweek focus shifts to creature comforts users have been requesting.
+
+**Re-sequencing correction (2026-05-30, Rosson)**: Phase 2.6 (tunnel decision) and Phase 3 (contract hardening / K2 Connect) **land during the 0.39.X cycle**, NOT 0.40.x. 0.40.X is a *different* feature set (K2SO → K2 rename, Brain/Documentation, TTS + Kessel v2 — see `0.40.x-to-1.0-weekend-roadmap.md`). The tunnel + K2 Connect work is "everything we were building up to" and ships in 0.39.X **minus two deliberately-deferred pieces**: (1) the final Hosted-backbone **service choice** (Pangolin/FRP/CF/custom), and (2) the **bifurcated-repo monetization** details (open/closed split for selling the Hosted tier). So 0.39.X ships the BYO tier (ngrok + LocalXpose affiliate + Cloudflare) and the K2 Connect desktop-to-desktop path on the pluggable `TunnelProvider` seam; only the *operated* Hosted backbone waits on the service decision.
 
 **4-cycle weekend roadmap (2026-05-25)**: the post-0.39.0 path is now a 4-weekend plan from 0.40.0 → 1.0.0. See **`.k2so/prds/0.40.x-to-1.0-weekend-roadmap.md`** for the cycle-by-cycle scope. Headline: K2SO → K2 rename at 0.40.0, Brain/Documentation at 0.41.0, TTS + Kessel v2 at 0.42.0, K2 graduates at 1.0.0.
 
@@ -40,9 +42,10 @@ This document tracks remaining decisions, blocks, and sequencing. Each phase has
 🔄 Phase 2.5 main — build+smoke validation (IN FLIGHT — dev launch testing user-driven)
 🚀 PUBLIC 0.39.0 RELEASE — ships after Phase 2.5d + final smoke pass (EARLY RELEASE, 2026-05-25 decision)
 ⏳ Workweek polish — creature comforts users have been requesting (0.39.x)
-⏳ Phase 2.6 — tunnel-provider decision (PRD drafted; runs in 0.40.x cycle)
-⏳ Phase 3 — contract hardening + Mobile Companion + K2SO Connect (7 workstreams; 0.40.x cycle)
-🚀 0.40.0 release — ships at Phase 3 close
+⏳ Phase 2.6 — tunnel-provider decision (PRD drafted; runs in **0.39.X** cycle — re-seq 2026-05-30)
+⏳ Phase 3 — contract hardening + Mobile Companion + K2 Connect (7 workstreams; **0.39.X** cycle)
+🚀 0.39.X releases — Phase 2.6 + Phase 3 ship incrementally (BYO tier + K2 Connect on pluggable seam)
+⏳ 0.40.X — SEPARATE feature set: K2SO → K2 rename, Brain/Documentation, TTS + Kessel v2 (NOT tunnel/Connect)
 ⏳ Phase 4 — K2SO Hosted middle tier infrastructure (no PRD yet; post-0.40.0)
 ```
 

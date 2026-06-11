@@ -679,10 +679,10 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
     cwd: string
   } | null>(null)
   const [ready, setReady] = useState(false)
-  // K2SO #682 — spawn-loop circuit breaker (see chat-spawn-breaker.ts).
+  // K2 #682 — spawn-loop circuit breaker (see chat-spawn-breaker.ts).
   const breakerRef = useRef<BreakerState>(initialBreakerState())
   const [breakerTripped, setBreakerTripped] = useState(false)
-  // K2SO #682 — self-retrigger guard memo.
+  // K2 #682 — self-retrigger guard memo.
   const lastResolvedRef = useRef<ResolveMemo | null>(null)
   const displayName = useDisplayName(projectPath, agentName)
 
@@ -728,7 +728,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
   const handleRefresh = useCallback(async (): Promise<void> => {
     if (refreshing) return
     setRefreshing(true)
-    // K2SO #682 — reset the breaker + self-retrigger memo for an explicit
+    // K2 #682 — reset the breaker + self-retrigger memo for an explicit
     // "try again".
     breakerRef.current = resetBreaker()
     setBreakerTripped(false)
@@ -809,7 +809,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
   }, [currentSessionId, projectPath, agentName, projectId, handleRefresh])
 
   useEffect(() => {
-    // K2SO #682 — self-retrigger guard.
+    // K2 #682 — self-retrigger guard.
     if (
       isSelfRetrigger(lastResolvedRef.current, {
         refreshNonce,
@@ -820,7 +820,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
       return
     }
 
-    // K2SO #682 — breaker gate.
+    // K2 #682 — breaker gate.
     if (breakerRef.current.tripped) {
       return
     }
@@ -967,7 +967,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
     return () => { cancelled = true }
   }, [agentName, projectId, projectPath, refreshNonce, restoredSessionId])
 
-  // K2SO #682 — record the spawn timestamp for the circuit breaker.
+  // K2 #682 — record the spawn timestamp for the circuit breaker.
   useEffect(() => {
     if (ready && launchConfig?.command) {
       breakerRef.current = recordSpawn(breakerRef.current, Date.now())
@@ -975,7 +975,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, refreshNonce])
 
-  // K2SO #682 — fold a child exit into the spawn-loop breaker.
+  // K2 #682 — fold a child exit into the spawn-loop breaker.
   const handleChildExit = useCallback((exitCode: number | null): void => {
     const decision = recordExit(breakerRef.current, {
       now: Date.now(),
@@ -998,7 +998,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
           Chat session failed to start
         </div>
         <div className="text-[11px] text-[var(--color-text-muted)] max-w-[40ch]">
-          The chat process exited repeatedly right after starting, so K2SO
+          The chat process exited repeatedly right after starting, so K2
           stopped retrying to avoid a spawn loop. Click Retry to try again.
         </div>
         <RetryButton onClick={() => void handleRefresh()} refreshing={refreshing} />
@@ -1113,7 +1113,7 @@ function AgentChatTerminalLegacy({ agentName, projectId, projectPath, restoredSe
           attachAgentName={projectId}
           seedLabel={displayName}
           lockLabel={true}
-          // K2SO #682 — feed child-exit into the spawn-loop circuit breaker.
+          // K2 #682 — feed child-exit into the spawn-loop circuit breaker.
           // ONLY the fallback path wires this: the daemon-owned path relies
           // on the daemon's SessionRemoved broadcast for exit.
           onChildExit={handleChildExit}

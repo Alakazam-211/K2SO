@@ -1,23 +1,23 @@
 [package]
-name = "k2so"
+name = "k2"
 version = "0.39.48"
 edition = "2021"
 description = "Developer workspace with terminals, git worktrees, and agent presets"
 license = "MIT"
 
 [lib]
-name = "k2so_lib"
+name = "k2_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 path = "src/lib.rs"
 
 [[bin]]
-name = "k2so"
+name = "k2"
 path = "src/main.rs"
 
 [dependencies]
 # Device-local core library — houses perf (and will host db, llm, terminal,
 # companion, scheduler, agent_hooks, push_adapter as modules migrate in).
-k2so-core = { path = "../crates/k2so-core" }
+k2-core = { path = "../crates/k2-core" }
 
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
@@ -130,7 +130,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 # Enables k2so-core::db::shared()'s in-memory fallback during src-tauri's
 # test binary run. Only active for cargo test / cargo bench.
-k2so-core = { path = "../crates/k2so-core", features = ["test-util"] }
+k2-core = { path = "../crates/k2-core", features = ["test-util"] }
 
 # Sandbox dirs for the worktree command's path-safety unit tests.
 tempfile = "3"

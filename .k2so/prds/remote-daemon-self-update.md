@@ -105,3 +105,31 @@ Owner/Admin only (connect-user roles, #629). Replacing a machine's binaries + re
 ## 10. Success criteria
 
 From the app, connected to a remote Mac running an older K2SO: see "update available" for **that host**, click through download → verify → install, watch it restart, and have it come back **on the new version** — with a verified failure path that **rolls back to the prior version and stays reachable** if the new build doesn't come up. Owner/Admin only. Local update behavior unchanged.
+
+## 11. Scope expansion (2026-06-05, Rosson): headless CLI install + standalone daemon distribution
+
+**New requirement:** the server will be installable via CLI on **headless servers** (no desktop, no Tauri app). So download / install / relaunch must work reliably for **two clients**: (a) the **`k2so` CLI tool** on a headless box, and (b) **people logged into a remote host over K2 Connect**. Both ultimately drive the same daemon primitives.
+
+**The core gap this exposes:** today the daemon ships ONLY inside the macOS Tauri bundle (`K2SO.app/Contents/MacOS/k2so-daemon`); §5/§6 assume a `.app` to swap and `launchctl`. A headless server has no `.app`, no `/Applications`, and no launchd — it runs a **standalone `k2so-daemon` binary under systemd**. So the prerequisite is **standalone, per-platform daemon artifacts** published every release, independent of the Tauri app:
+
+- `release.sh` must also build + publish `k2so-daemon-<os>-<arch>` (macos-aarch64, linux-x86_64, linux-aarch64) + a **minisign `.sig` per artifact** (same key as `tauri.conf.json` updater pubkey — Linux has no notarization, so minisign verification is the load-bearing control there too) + a `daemon-latest.json` manifest.
+
+**Two install/update shapes (one shared relaunch primitive):**
+- **Shape A — macOS desktop (Tauri app present):** the §6 flow (download `K2SO.app.tar.gz`, verify, atomic-swap `/Applications/K2SO.app`, relaunch). Unchanged.
+- **Shape B — headless server (no app):** standalone binary under systemd. `k2so daemon install` = curl|sh installer (ties into #614: curl|sh + brew tap) that drops the verified `k2so-daemon` binary + writes a systemd unit (`Restart=always`) + first-run pairing to K2 Connect. `k2so daemon update` = download `daemon-latest.json` → fetch the matching `k2so-daemon-<os>-<arch>` + `.sig` → **verify minisign** → atomic-rename the binary in place → trigger restart. Backup the prior binary for rollback; health-check `/boot-status` for `version === target`, else roll back.
+
+**Supervisor-agnostic relaunch primitive (#659, building now):** the restart route triggers **graceful shutdown → process exits → the supervisor respawns** (launchd `KeepAlive=true` on macOS, systemd `Restart=always` on Linux). It deliberately does NOT shell out to `launchctl`, so it serves BOTH shapes and is the shared foundation under "install/update → relaunch". This is Phase 0 of the whole effort.
+
+**Authz / auth over Connect:** owner-only for restart (§6.4 owner/admin for update). A headless box paired to K2 Connect needs a way for the owner to authorize update/restart over the tunnel (owner token, or an owner-scoped connect session) — resolve alongside #629 roles.
+
+**Revised phasing (supersedes §8 ordering):**
+- **P0 — restart primitive** (`POST /cli/daemon/restart`, supervisor-agnostic) + `k2so daemon restart --host`. *(#659, in progress.)*
+- **P1 — standalone daemon artifacts** in `release.sh` (per-OS binary + minisign `.sig` + `daemon-latest.json`). Nothing consumes them yet; just publish.
+- **P2 — headless CLI install** (`k2so daemon install`, curl|sh + brew tap, systemd unit, pairing) — overlaps #614.
+- **P3 — update path** (`update/check|start|status|apply`) shared by CLI (Shape B binary-swap) and the Connect-remote renderer (Shape A app-swap), reusing the P0 relaunch primitive.
+- **P4 — Connect-remote "update this machine" UX** (the original §6.3 renderer flow) + batch/fleet (§8 Phase 3).
+
+**New open questions:**
+- Standalone Linux daemon: which feature set ships headless (no GPU terminal renderer / no local-LLM Metal path on Linux)? Likely a `--headless`/server build profile of `k2so-daemon` without the macOS-only crates.
+- First-run pairing of a headless box to a K2 Connect account from the CLI (token bootstrap) — needs design.
+- Brew tap + curl|sh hosting (k2.dev/install?) and how it verifies the download (minisign in the installer script).
