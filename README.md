@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> **This project has moved.** K2SO is now **K2 by Alakazam Labs** — development continues at
+> **[github.com/Alakazam-211/K2](https://github.com/Alakazam-211/K2)** under the Functional Source
+> License (versions here through 0.39.48 remain MIT). This repository is archived; its releases stay
+> available so existing installs keep updating (they migrate to K2 automatically).
+
 <p align="center">
   <img src="resources/icon.png" width="128" height="128" alt="K2">
 </p>
