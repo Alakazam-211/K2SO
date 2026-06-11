@@ -3,14 +3,17 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
-## 0.40.1 — `k2so` alias fixed for installed CLIs
+## 0.40.1 — CLI upgrade heals itself
 
+- **If you had the CLI installed, K2 now finishes the upgrade for you.**
+  On first launch, K2 detects a pre-0.40 CLI install and offers to set up
+  the new `k2` command (one admin prompt) — keeping `k2so` working as an
+  alias. No trip to Settings needed.
 - **The `k2so` compatibility alias works again from `/usr/local/bin`.**
   On machines that had the CLI installed, the 0.40.0 alias resolved its
   new `k2` sibling next to the symlink instead of next to the real
   script, and failed. It now finds the bundled CLI no matter how it's
-  invoked. (Tip: open Settings → Install CLI once to also get the `k2`
-  command itself on your PATH.)
+  invoked.
 - **`k2 daemon status` stops saying "Running: no" while the daemon is
   running** — a long-standing parse bug on macOS, now fixed (it shows
   the PID and port again).
