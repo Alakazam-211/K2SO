@@ -1551,12 +1551,14 @@ fn migrate_orphaned_agent_heartbeats() {
         if !std::path::Path::new(&project.path).exists() {
             continue;
         }
-        let project_root = std::path::Path::new(&project.path);
-        let orphan_root = project_root.join(".k2so/agent/heartbeats");
+        // Resolver-anchored so a post-cutover `.k2/` workspace is inspected at
+        // `.k2/agent/heartbeats` (and never has a stray `.k2so/` rebuilt here).
+        let dot_dir = k2_core::workspace_dot_dir(&project.path);
+        let orphan_root = dot_dir.join("agent/heartbeats");
         if !orphan_root.exists() {
             continue;
         }
-        let workspace_hb_root = project_root.join(".k2so/heartbeats");
+        let workspace_hb_root = dot_dir.join("heartbeats");
         if let Err(e) = fs::create_dir_all(&workspace_hb_root) {
             log_debug!(
                 "[daemon/unification] WARN: create {workspace_hb_root:?}: {e}"
