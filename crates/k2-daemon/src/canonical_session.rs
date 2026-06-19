@@ -148,8 +148,13 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
     //    encoded the agent's name into the address.
     let canonical_key = canonical_key_for(&project_id);
     if let Some(live) = session_lookup::lookup_any(&canonical_key) {
+        let session_id = live.session_id().to_string();
+        // Keep workspace_sessions.active_terminal_id pointed at the live
+        // canonical PTY so the companion's isMainChat (and a later attach)
+        // resolve to it — parity with the fresh-spawn path below.
+        stamp_active_terminal_id(&project_id, &session_id);
         return Ok(EnsureOutcome {
-            session_id: live.session_id().to_string(),
+            session_id,
             agent_name,
             project_id,
             reused: true,
@@ -173,10 +178,16 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
     //     selected session only came back on a manual reload (force_respawn).
     //     Resolve the resume args HERE, the SAME way the interactive
     //     pinned-chat path does, so the boot/restart respawn restores the
-    //     selected session (or pins a stable `--session-id` for a genuinely
-    //     cold workspace). Claude chats only; custom launch commands keep
-    //     their profile args. Best-effort: on resolve failure we fall back to
-    //     the profile args rather than block the spawn.
+    //     selected session. We pass explicit_selection=TRUE to make this
+    //     NON-DESTRUCTIVE: a valid saved session is resumed, but a
+    //     saved-but-unresolvable one returns Err (we fall back to the bare
+    //     profile and spawn fresh) WITHOUT overwriting
+    //     workspace_sessions.session_id — so a proactive boot spawn can never
+    //     clobber the user's pinned-chat pick with a throwaway mint. (The
+    //     interactive reload force-respawns with explicit=false to converge to
+    //     the newest conversation for continuity when the user asks.) Cold
+    //     workspaces with no saved session still get a stable pinned id.
+    //     Claude chats only; custom launch commands keep their profile args.
     let is_claude_chat = profile
         .command
         .as_deref()
@@ -184,7 +195,7 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
         .map(|name| name == "claude")
         .unwrap_or(false);
     if is_claude_chat {
-        match k2_core::workspace::resume_chat::resolve_resume_chat_args(project_path) {
+        match k2_core::workspace::resume_chat::resolve_resume_chat_args_ex(project_path, true) {
             Ok(resolved) => {
                 log_debug!(
                     "[daemon/canonical] resume-aware spawn for {project_path}: \
@@ -215,6 +226,12 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
         Some(outcome.session_id.to_string()),
         Some("system".to_string()),
     );
+
+    // Point active_terminal_id at the freshly-spawned canonical PTY so the
+    // companion's isMainChat (and a later attach) resolve to THIS live PTY
+    // after a restart — the boot-sweep path previously skipped this, leaving a
+    // stale pointer to the dead pre-restart PTY (pinned chat lost its identity).
+    stamp_active_terminal_id(&project_id, &outcome.session_id.to_string());
 
     log_debug!(
         "[daemon/canonical] ensured session={} agent={} workspace={} \
@@ -285,6 +302,23 @@ pub fn lookup_project_id(project_path: &str) -> Option<String> {
         |row| row.get::<_, String>(0),
     )
     .ok()
+}
+
+/// Stamp `workspace_sessions.active_terminal_id` to the live canonical PTY.
+/// The companion derives `isMainChat` by matching a session's PTY uuid
+/// against this column; the boot-sweep spawn path historically skipped it
+/// (only `pinned_chat.rs` set it), so after a restart it pointed at the dead
+/// pre-restart PTY and the pinned chat lost its "main chat" identity.
+/// Best-effort: a missing row no-ops (the fresh-spawn path's
+/// `k2so_agents_lock` creates the row first).
+fn stamp_active_terminal_id(project_id: &str, terminal_id: &str) {
+    let db = k2_core::db::shared();
+    let conn = db.lock();
+    let _ = k2_core::db::schema::WorkspaceSession::save_active_terminal_id(
+        &conn,
+        project_id,
+        terminal_id,
+    );
 }
 
 /// Boot-time sweep: walk every workspace whose `agent_mode` is set
