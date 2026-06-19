@@ -3,6 +3,36 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.40.4 — The `.k2/` workspace rename + access fixes
+
+- **Your workspace's `.k2so/` folder is now `.k2/`.** The K2 rebrand
+  finally reaches the per-workspace directory. The first time the updated
+  daemon starts, K2 renames each registered workspace's `.k2so/` to
+  `.k2/` automatically, re-points the harness symlinks (`CLAUDE.md`,
+  `GEMINI.md`, and the `.claude/`/`.opencode/`/`.pi/` files), and updates
+  `.gitignore` so the previously-ignored `inbox`/`sessions`/`logs` stay
+  ignored. Nothing is lost — git sees it as a clean set of renames, so
+  your history follows; just commit the rename in each repo when it's
+  convenient. Workspaces still on `.k2so/` keep working — K2 reads either
+  name. This is the last structural rename; everything from here is
+  additive.
+
+- **Disabling or removing a K2 Connect user now ends their live session
+  immediately.** Previously a revoked user's already-open terminal stream
+  kept flowing until they happened to disconnect. Now disabling,
+  removing, or changing a user's role drops their token and tears down
+  any live terminal/events socket within seconds.
+
+- **CLI version no longer shows "v?" after the rename.** If you updated
+  in place, the `k2` command-line tool could still point at the old
+  `K2SO.app` path and report its version as `v?`. K2 now self-heals the
+  `/usr/local/bin/k2` link on startup — whether your app is named
+  `K2.app` or the older `K2SO.app`.
+
+- **The "Canonical Agent" harness fan-out toggle stays checked.** Turning
+  it on no longer silently reverts — a leftover "skip harness management"
+  flag was overriding it, and that's now cleared when you enable fan-out.
+
 ## 0.40.3 — Honest message-delivery status
 
 - **`k2 msg` stops crying wolf.** Live messages between agents sometimes
