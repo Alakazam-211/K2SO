@@ -201,6 +201,33 @@ fn find_tabs_array(layout: &serde_json::Value) -> Option<&Vec<serde_json::Value>
 /// `(projectId, tabId)`).
 type TabIndex = HashMap<String, HashMap<String, (String, String)>>;
 
+/// `project_id -> tab_id -> canonical title` from the authoritative
+/// `tab_titles` table (what `set-tab-title` writes). Overlaid on the layout
+/// tab.title so a rename shows up immediately: the layout blob lags until the
+/// renderer re-saves it, and a mobile-only rename never touches the blob.
+fn build_tab_titles_index() -> HashMap<String, HashMap<String, String>> {
+    let db = k2_core::db::shared();
+    let conn = db.lock();
+    let Ok(mut stmt) = conn.prepare("SELECT project_id, tab_id, title FROM tab_titles") else {
+        return HashMap::new();
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .ok();
+    let Some(rows) = rows else { return HashMap::new() };
+    let mut idx: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (pid, tid, title) in rows.filter_map(Result::ok) {
+        idx.entry(pid).or_default().insert(tid, title);
+    }
+    idx
+}
+
 fn build_tab_index() -> TabIndex {
     let mut index: TabIndex = HashMap::new();
     let Ok(layouts) = k2_core::db_ops::workspace_layout_load_all() else {
@@ -254,6 +281,7 @@ fn build_tab_index() -> TabIndex {
 pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliResponse {
     let projects = list_projects();
     let tab_index = build_tab_index();
+    let tab_titles_index = build_tab_titles_index();
     let live = session_lookup::snapshot_all();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(live.len());
     for (agent_name, session) in live {
@@ -276,7 +304,17 @@ pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliRespon
                 tab_index.get(&ws.id).and_then(|m| m.get(pgid))
             {
                 tab_id = Some(resolved_tab_id.clone());
-                if !resolved_title.is_empty() {
+                // Canonical title = the authoritative `tab_titles` row (what
+                // set-tab-title writes — fresh after a rename from EITHER
+                // client) overlaid on the layout's tab.title (which lags and
+                // never updates from a mobile-only rename).
+                let canonical = tab_titles_index
+                    .get(&ws.id)
+                    .and_then(|m| m.get(resolved_tab_id))
+                    .filter(|t| !t.is_empty());
+                if let Some(t) = canonical {
+                    label = t.clone();
+                } else if !resolved_title.is_empty() {
                     label = resolved_title.clone();
                 }
             }
