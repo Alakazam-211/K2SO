@@ -176,6 +176,16 @@ pub fn handle_set_harness_fanout_enabled(body: &[u8]) -> CliResponse {
     if b.project_path.is_empty() {
         return CliResponse::bad_request("missing project_path");
     }
+    // Enabling fan-out must also clear the legacy `.skip-harness-management`
+    // flag. That flag is the HARDER "never touch my files" override, and
+    // `harness_fanout_enabled()` returns false whenever it's present — so
+    // without this, checking the box writes the marker but the immediate
+    // read-back still reports false and the checkbox snaps back unchecked.
+    if b.enabled {
+        if let Err(e) = k2_core::workspace::onboarding::unskip_harness_management(&b.project_path) {
+            return CliResponse::bad_request(format!("clear skip-harness flag: {e}"));
+        }
+    }
     match k2_core::workspace::onboarding::set_harness_fanout_enabled(&b.project_path, b.enabled) {
         Ok(()) => CliResponse::ok_json(r#"{"success":true}"#.to_string()),
         Err(e) => CliResponse::bad_request(e),
