@@ -674,7 +674,12 @@ async fn handle_one_request(
                 return DispatchOutcome::Done;
             }
             let params = super::http::parse_params(&path, &query);
-            crate::sessions_grid_ws::serve_session_grid_connection(stream, params).await;
+            crate::sessions_grid_ws::serve_session_grid_connection(
+                stream,
+                params,
+                state.token.to_string(),
+            )
+            .await;
             return DispatchOutcome::Done;
         }
         // 0.38.0 Commit 4: daemon-authoritative session lifecycle
@@ -695,7 +700,12 @@ async fn handle_one_request(
                 return DispatchOutcome::Done;
             }
             let params = super::http::parse_params(&path, &query);
-            crate::session_events_ws::serve_session_events_connection(stream, params).await;
+            crate::session_events_ws::serve_session_events_connection(
+                stream,
+                params,
+                state.token.to_string(),
+            )
+            .await;
             return DispatchOutcome::Done;
         }
         // Awareness Bus endpoints (0.34.0 Phase 3).
