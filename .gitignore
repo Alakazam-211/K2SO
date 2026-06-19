@@ -34,29 +34,29 @@ AGENTS.md
 *.key
 *.key.pub
 .worktrees/
-.k2so/migration/
-.k2so/logs/
-.k2so/.last-skill-regen
+.k2/migration/
+.k2/logs/
+.k2/.last-skill-regen
 
 # 0.37.12 — runtime workspace state K2SO writes at runtime; not source.
 # Heartbeats / sessions / agent-templates / scratch state regenerate
 # from DB + filesystem on launch.
-.k2so/heartbeats/
-.k2so/sessions/
-.k2so/agent/
-.k2so/agent-templates/
-.k2so/.archive/
-.k2so/.harvest-*-done
-.k2so/.unification-*-done
-.k2so/agents/.archive/
+.k2/heartbeats/
+.k2/sessions/
+.k2/agent/
+.k2/agent-templates/
+.k2/.archive/
+.k2/.harvest-*-done
+.k2/.unification-*-done
+.k2/agents/.archive/
 
 # 0.39.0 — work→inbox + skills consolidation migrations. The inbox/
 # directory holds runtime work items the daemon manages (replacing the
 # old .k2so/work/ tree); the *-v1-done sentinels mark migrations the
 # daemon has applied to this workspace.
-.k2so/inbox/
-.k2so/.work-to-inbox-migration-v1-done
-.k2so/.skills-consolidation-v1-done
+.k2/inbox/
+.k2/.work-to-inbox-migration-v1-done
+.k2/.skills-consolidation-v1-done
 
 # Stub workspace dirs auto-created by some bridge experiments;
 # contain AGENT.md / CLAUDE.md / etc which are themselves gitignored.
