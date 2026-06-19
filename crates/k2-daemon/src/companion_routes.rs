@@ -460,7 +460,7 @@ mod tests {
         // `.k2so/agents/<n>/work/done/` tree), so the seed file lands
         // here. Frontmatter carries the `branch:` field that
         // `review_queue` parses to group items by agent.
-        let inbox_done = p.join(".k2so/inbox/done");
+        let inbox_done = k2_core::workspace_dot_dir(&p).join("inbox/done");
         std::fs::create_dir_all(&inbox_done).unwrap();
         std::fs::write(
             inbox_done.join("oauth.md"),

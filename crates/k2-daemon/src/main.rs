@@ -504,6 +504,14 @@ async fn async_main() {
     // hook in `src-tauri/src/lib.rs`; relocating to the daemon means
     // they fire on `launchctl bootstrap` boots even when Tauri is
     // closed, and on remote daemons that have no Tauri at all.
+
+    // 0.40.4 cutover — rename every registered workspace's legacy `.k2so/`
+    // dot-dir to `.k2/` and re-point its harness fan-out symlinks. Runs
+    // FIRST so every subsequent boot sweep (unification, slug repair, skill
+    // regen) sees the `.k2/` layout. Idempotent; skips workspaces that
+    // already have `.k2/`.
+    run_migrate_k2so_dot_dirs();
+
     run_workspace_legacy_migrations_sweep();
 
     // GH#25 (0.39.44) self-heal — migrate session dirs an EARLIER K2SO
@@ -1142,6 +1150,60 @@ fn run_enable_fanout_for_enabled_agents_migration() {
 /// legacy slug, only for paths whose two encodings diverge). Runs every
 /// boot, immediately BEFORE the #23 embedded-cwd repair so migrated files
 /// are also cwd-rewritten in the same boot.
+/// 0.40.4 cutover — rename every registered workspace's legacy `.k2so/`
+/// dot-dir to `.k2/` and re-point the harness fan-out symlinks that
+/// targeted it (see [`k2_core::workspace::dot_dir_migration`]). Idempotent:
+/// a workspace that already has `.k2/` is skipped untouched, so this is
+/// safe to run every boot and also converts any `.k2so/` workspace a user
+/// clones/adds after this release.
+fn run_migrate_k2so_dot_dirs() {
+    let project_paths: Vec<String> = {
+        let db = k2_core::db::shared();
+        let conn = db.lock();
+        match k2_core::db::schema::Project::list(&conn) {
+            Ok(rows) => rows.into_iter().map(|p| p.path).collect(),
+            Err(e) => {
+                log_debug!(
+                    "[daemon/dotdir] WARN: list projects: {e}; skipping .k2so->.k2 cutover"
+                );
+                return;
+            }
+        }
+    };
+
+    let mut renamed = 0usize;
+    let mut symlinks = 0usize;
+    for path in &project_paths {
+        let root = std::path::Path::new(path);
+        if !root.exists() {
+            continue;
+        }
+        let outcome =
+            k2_core::workspace::dot_dir_migration::migrate_workspace_dot_dir(root);
+        if outcome.renamed {
+            renamed += 1;
+            symlinks += outcome.symlinks_repointed;
+            log_debug!(
+                "[daemon/dotdir] {} : .k2so -> .k2 ({} symlink(s) re-pointed)",
+                path,
+                outcome.symlinks_repointed,
+            );
+        } else if let Some(reason) = outcome.skipped {
+            // Only the conflict case is worth a warning; "no legacy" is the
+            // common already-migrated path and stays quiet.
+            if reason.starts_with("both") {
+                log_debug!("[daemon/dotdir] WARN: {} : {}", path, reason);
+            }
+        }
+    }
+    if renamed > 0 {
+        log_debug!(
+            "[daemon/dotdir] 0.40.4 cutover: renamed {renamed} workspace(s) \
+             .k2so -> .k2 ({symlinks} symlink(s) re-pointed)"
+        );
+    }
+}
+
 fn run_migrate_legacy_slug_dirs() {
     let home = match dirs::home_dir() {
         Some(h) => h,

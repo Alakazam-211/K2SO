@@ -166,7 +166,13 @@ pub fn write_skill_to_all_harnesses(
     // edits below the managed region or the closing marker survive
     // future regenerations, and version bumps auto-upgrade unmodified
     // files.
-    let canonical_dir = root.join(".k2so/skills").join(skill_name);
+    //
+    // Anchor on the workspace dot-dir resolver (NOT a literal `.k2so/`) so
+    // new 0.40.x+ workspaces write `.k2/skills/...` while existing `.k2so/`
+    // workspaces keep theirs — same SSOT as the inbox/prds dirs.
+    let canonical_dir = crate::workspace_dot_dir(&root)
+        .join("skills")
+        .join(skill_name);
     let canonical_path = canonical_dir.join("SKILL.md");
     let extras = format!("name: {}\ndescription: {}", skill_name, description);
     ensure_skill_up_to_date(

@@ -287,7 +287,7 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
     // user-visible fan-out below is gated. Legacy
     // `.skip-harness-management` still forces this off (inside
     // `harness_fanout_enabled`).
-    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let canonical = crate::workspace_dot_dir(project_path).join("skills/k2so/SKILL.md");
     if harness_fanout_enabled(project_path) {
         if let Ok(full) = fs::read_to_string(&canonical) {
             let injection_body = strip_frontmatter(&full).trim().to_string();
@@ -333,7 +333,7 @@ pub fn write_workspace_skill_file_with_body(project_path: &str, base_body: Optio
 /// back into its canonical source file (PROJECT.md or the primary agent's
 /// AGENT.md).
 fn adopt_workspace_skill_drift(project_path: &str) {
-    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let canonical = crate::workspace_dot_dir(project_path).join("skills/k2so/SKILL.md");
     let Ok(skill_content) = fs::read_to_string(&canonical) else {
         return;
     };
@@ -466,7 +466,7 @@ fn adopt_workspace_skill_drift(project_path: &str) {
 /// `<!-- K2SO:USER_NOTES -->` sentinel so it can be re-appended after
 /// regeneration.
 pub fn strip_workspace_skill_tail(project_path: &str) -> Option<String> {
-    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let canonical = crate::workspace_dot_dir(project_path).join("skills/k2so/SKILL.md");
     let Ok(content) = fs::read_to_string(&canonical) else { return None };
     let end_idx = content.find(SKILL_END_MARKER)?;
     let after_end_start = end_idx + SKILL_END_MARKER.len();
@@ -498,7 +498,7 @@ pub fn strip_workspace_skill_tail(project_path: &str) -> Option<String> {
 /// After the managed region has been re-written, append fresh SOURCE
 /// sub-regions below the END marker in the canonical file.
 pub fn append_workspace_source_regions(project_path: &str, preserved_freeform: Option<&str>) {
-    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let canonical = crate::workspace_dot_dir(project_path).join("skills/k2so/SKILL.md");
     let Ok(mut content) = fs::read_to_string(&canonical) else { return };
     if !content.ends_with('\n') {
         content.push('\n');
@@ -631,7 +631,7 @@ pub(crate) fn import_claude_md_into_user_notes(
     source_label: &str,
     archive_display: &str,
 ) {
-    let canonical = PathBuf::from(project_path).join(".k2so/skills/k2so/SKILL.md");
+    let canonical = crate::workspace_dot_dir(project_path).join("skills/k2so/SKILL.md");
     if !canonical.exists() {
         return;
     }

@@ -293,7 +293,7 @@ pub fn boot_sweep_ensure_canonical_sessions() {
         // Skip workspaces without an AGENT.md (mode set but agent
         // not yet authored). The boot sweep should not implicitly
         // synthesize an agent.
-        let agent_md = std::path::Path::new(path).join(".k2so/agent/AGENT.md");
+        let agent_md = k2_core::workspace_dot_dir(path).join("agent/AGENT.md");
         if !agent_md.exists() {
             continue;
         }
