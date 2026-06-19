@@ -158,11 +158,48 @@ pub fn ensure_canonical_session(project_path: &str) -> Result<EnsureOutcome, Str
     }
 
     // 3. Load launch profile (or default).
-    let profile = match load_launch_profile(project_path, &agent_name) {
+    let mut profile = match load_launch_profile(project_path, &agent_name) {
         Ok(Some(p)) => p,
         Ok(None) => default_launch_profile(),
         Err(e) => return Err(format!("launch profile parse failed: {e}")),
     };
+
+    // 3b. Resume-aware canonical claude chat. A bare
+    //     `claude --dangerously-skip-permissions` spawned here on a daemon
+    //     restart / boot-sweep starts a FRESH conversation; because this PTY
+    //     registers under the canonical key FIRST, a later
+    //     `ensure-pinned-chat` finds it live and reuses it (`reused=true`),
+    //     never reaching its own `--resume` resolver — so the workspace's
+    //     selected session only came back on a manual reload (force_respawn).
+    //     Resolve the resume args HERE, the SAME way the interactive
+    //     pinned-chat path does, so the boot/restart respawn restores the
+    //     selected session (or pins a stable `--session-id` for a genuinely
+    //     cold workspace). Claude chats only; custom launch commands keep
+    //     their profile args. Best-effort: on resolve failure we fall back to
+    //     the profile args rather than block the spawn.
+    let is_claude_chat = profile
+        .command
+        .as_deref()
+        .and_then(|c| c.rsplit('/').next())
+        .map(|name| name == "claude")
+        .unwrap_or(false);
+    if is_claude_chat {
+        match k2_core::workspace::resume_chat::resolve_resume_chat_args(project_path) {
+            Ok(resolved) => {
+                log_debug!(
+                    "[daemon/canonical] resume-aware spawn for {project_path}: \
+                     session={} resumed_existing={}",
+                    resolved.resume_session,
+                    resolved.resumed_existing,
+                );
+                profile.args = Some(resolved.args);
+            }
+            Err(e) => log_debug!(
+                "[daemon/canonical] resume resolve failed for {project_path}, \
+                 using profile args as-is: {e}"
+            ),
+        }
+    }
 
     // 4. Spawn via the canonical-keyed v2 helper.
     let req = launch_request_for(&agent_name, &project_id, project_path, &profile);
