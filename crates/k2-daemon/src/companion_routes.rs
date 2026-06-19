@@ -172,25 +172,70 @@ fn derive_agent_and_label(
     ("shell".to_string(), folder)
 }
 
-/// The set of live daemon-PTY UUIDs that are some workspace's pinned
-/// "main chat" session (`workspace_sessions.active_terminal_id`). Lets
-/// the companion session list flag the chat tab so the UI can show
-/// "main chat tab" instead of a derived shell label. One cheap query;
-/// the set is small (≤ one per workspace).
-fn active_chat_terminal_ids() -> std::collections::HashSet<String> {
-    let db = k2_core::db::shared();
-    let conn = db.lock();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT active_terminal_id FROM workspace_sessions \
-         WHERE active_terminal_id IS NOT NULL",
-    ) else {
-        return std::collections::HashSet::new();
+/// Find the first object key named `tabs` whose value is an array,
+/// searching the top-level object and one level of nesting
+/// (`extraGroups[*].tabs`). Layout JSON shape varies across versions —
+/// walk it defensively rather than deserializing into a fixed struct.
+fn find_tabs_array(layout: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    if let Some(tabs) = layout.get("tabs").and_then(|v| v.as_array()) {
+        return Some(tabs);
+    }
+    // Nested form: { extraGroups: [ { tabs: [...] }, ... ] }.
+    if let Some(groups) = layout.get("extraGroups").and_then(|v| v.as_array()) {
+        for g in groups {
+            if let Some(tabs) = g.get("tabs").and_then(|v| v.as_array()) {
+                return Some(tabs);
+            }
+        }
+    }
+    None
+}
+
+/// Canonical resolution for a tab-driven session's display title.
+/// Built once per request from `workspace_layouts.layout_json`:
+/// `project_id -> (pane_group_id -> (tab_id, tab_title))`.
+///
+/// A tab-driven session's `agent_name` is `tab-<pane_group_id>`, so
+/// the mobile companion can map its live session back to the SAME
+/// canonical tab the desktop renders (and rename it via
+/// `(projectId, tabId)`).
+type TabIndex = HashMap<String, HashMap<String, (String, String)>>;
+
+fn build_tab_index() -> TabIndex {
+    let mut index: TabIndex = HashMap::new();
+    let Ok(layouts) = k2_core::db_ops::workspace_layout_load_all() else {
+        return index;
     };
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok();
-    let Some(rows) = rows else {
-        return std::collections::HashSet::new();
-    };
-    rows.filter_map(Result::ok).collect()
+    for layout in layouts {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&layout.layout_json) else {
+            continue;
+        };
+        let Some(tabs) = find_tabs_array(&parsed) else {
+            continue;
+        };
+        let per_project = index.entry(layout.project_id.clone()).or_default();
+        for tab in tabs {
+            let tab_id = tab.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            if tab_id.is_empty() {
+                continue;
+            }
+            let tab_title = tab
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let Some(pane_groups) = tab.get("paneGroups").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for pane_group_id in pane_groups.keys() {
+                per_project.insert(
+                    pane_group_id.clone(),
+                    (tab_id.to_string(), tab_title.clone()),
+                );
+            }
+        }
+    }
+    index
 }
 
 /// Handler for `GET /cli/companion/sessions`.
@@ -199,9 +244,16 @@ fn active_chat_terminal_ids() -> std::collections::HashSet<String> {
 /// daemon, joined against `projects` by longest cwd-prefix.
 /// Sessions whose cwd doesn't match any registered project are
 /// dropped (same behavior as the legacy Tauri endpoint).
+///
+/// Tab-driven sessions (`agent_name == "tab-<paneGroupId>"`) resolve
+/// their `label` to the CANONICAL tab title from
+/// `workspace_layouts` — the same value the desktop shows — and carry
+/// `tabId` + `projectId` so the mobile companion can rename the same
+/// canonical tab. Non-tab sessions (e.g. pinned chat) keep the
+/// derived label and omit `tabId`.
 pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliResponse {
     let projects = list_projects();
-    let chat_terminals = active_chat_terminal_ids();
+    let tab_index = build_tab_index();
     let live = session_lookup::snapshot_all();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(live.len());
     for (agent_name, session) in live {
@@ -211,17 +263,25 @@ pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliRespon
         };
         let (agent, derived_label) =
             derive_agent_and_label(&agent_name, &cwd, &ws.path, &ws.name);
-        // Prefer the live PTY tab-name (what the desktop renders on the
-        // tab); fall back to the legacy cwd/agent-derived label only when
-        // the session hasn't set one yet.
-        let live_label = session.label();
-        let label = if live_label.trim().is_empty() {
-            derived_label
-        } else {
-            live_label
-        };
-        let terminal_id = session.session_id().to_string();
-        let is_main_chat = chat_terminals.contains(&terminal_id);
+
+        // The pinned/main chat session is keyed by `agent_name ==
+        // project_id` (v2_spawn `is_pinned`). `ws.id` is that project_id.
+        let is_main_chat = agent_name == ws.id;
+
+        // Canonical tab-title resolution for tab-driven sessions.
+        let mut label = derived_label;
+        let mut tab_id: Option<String> = None;
+        if let Some(pgid) = agent_name.strip_prefix("tab-") {
+            if let Some((resolved_tab_id, resolved_title)) =
+                tab_index.get(&ws.id).and_then(|m| m.get(pgid))
+            {
+                tab_id = Some(resolved_tab_id.clone());
+                if !resolved_title.is_empty() {
+                    label = resolved_title.clone();
+                }
+            }
+        }
+
         out.push(serde_json::json!({
             "workspaceName": ws.name,
             "workspaceId": ws.id,
@@ -229,7 +289,9 @@ pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliRespon
             "agentName": agent,
             "label": label,
             "isMainChat": is_main_chat,
-            "terminalId": terminal_id,
+            "tabId": tab_id,
+            "projectId": ws.id,
+            "terminalId": session.session_id().to_string(),
             "command": session.command(),
             "cwd": cwd,
         }));
@@ -494,7 +556,7 @@ mod tests {
         // `.k2so/agents/<n>/work/done/` tree), so the seed file lands
         // here. Frontmatter carries the `branch:` field that
         // `review_queue` parses to group items by agent.
-        let inbox_done = k2_core::workspace_dot_dir(&p).join("inbox/done");
+        let inbox_done = p.join(".k2so/inbox/done");
         std::fs::create_dir_all(&inbox_done).unwrap();
         std::fs::write(
             inbox_done.join("oauth.md"),

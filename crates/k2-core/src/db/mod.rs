@@ -395,6 +395,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
         // 0052 (added in 0.39.39): #676 daemon-canonical tab_titles table +
         // #677.3 workspace_layouts.revision (monotonic LWW tab-order).
         ("0052_tab_titles_and_layout_revision", include_str!("../../drizzle_sql/0052_tab_titles_and_layout_revision.sql")),
+        // 0053 (added in 0.39.46): #676 follow-up — a `locked` flag on
+        // tab_titles so a user's explicit rename is STICKY and never
+        // overwritten by a program-generated PTY title.
+        ("0053_tab_title_locked", include_str!("../../drizzle_sql/0053_tab_title_locked.sql")),
     ];
 
     for (name, sql) in migrations {
