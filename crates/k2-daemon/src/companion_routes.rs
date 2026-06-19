@@ -172,6 +172,27 @@ fn derive_agent_and_label(
     ("shell".to_string(), folder)
 }
 
+/// The set of live daemon-PTY UUIDs that are some workspace's pinned
+/// "main chat" session (`workspace_sessions.active_terminal_id`). Lets
+/// the companion session list flag the chat tab so the UI can show
+/// "main chat tab" instead of a derived shell label. One cheap query;
+/// the set is small (≤ one per workspace).
+fn active_chat_terminal_ids() -> std::collections::HashSet<String> {
+    let db = k2_core::db::shared();
+    let conn = db.lock();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT active_terminal_id FROM workspace_sessions \
+         WHERE active_terminal_id IS NOT NULL",
+    ) else {
+        return std::collections::HashSet::new();
+    };
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok();
+    let Some(rows) = rows else {
+        return std::collections::HashSet::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
 /// Handler for `GET /cli/companion/sessions`.
 ///
 /// Global session enumeration — every live session in the
@@ -180,6 +201,7 @@ fn derive_agent_and_label(
 /// dropped (same behavior as the legacy Tauri endpoint).
 pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliResponse {
     let projects = list_projects();
+    let chat_terminals = active_chat_terminal_ids();
     let live = session_lookup::snapshot_all();
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(live.len());
     for (agent_name, session) in live {
@@ -187,15 +209,27 @@ pub fn handle_companion_sessions(_params: &HashMap<String, String>) -> CliRespon
         let Some(ws) = match_workspace(&cwd, &projects) else {
             continue;
         };
-        let (agent, label) =
+        let (agent, derived_label) =
             derive_agent_and_label(&agent_name, &cwd, &ws.path, &ws.name);
+        // Prefer the live PTY tab-name (what the desktop renders on the
+        // tab); fall back to the legacy cwd/agent-derived label only when
+        // the session hasn't set one yet.
+        let live_label = session.label();
+        let label = if live_label.trim().is_empty() {
+            derived_label
+        } else {
+            live_label
+        };
+        let terminal_id = session.session_id().to_string();
+        let is_main_chat = chat_terminals.contains(&terminal_id);
         out.push(serde_json::json!({
             "workspaceName": ws.name,
             "workspaceId": ws.id,
             "workspaceColor": ws.color,
             "agentName": agent,
             "label": label,
-            "terminalId": session.session_id().to_string(),
+            "isMainChat": is_main_chat,
+            "terminalId": terminal_id,
             "command": session.command(),
             "cwd": cwd,
         }));
