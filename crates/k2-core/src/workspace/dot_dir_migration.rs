@@ -92,29 +92,41 @@ pub fn migrate_workspace_dot_dir(root: &Path) -> DotDirMigration {
     }
 }
 
-/// Rewrite the repo-root `.gitignore` so `.k2so/` ignore rules follow the
-/// rename to `.k2/`. SURGICAL: only entries whose path is the workspace
-/// dot-dir (`.k2so`, `.k2so/`, `.k2so/<sub>`, optionally `/`-anchored) are
-/// touched. Skill-name references that merely contain `k2so` —
-/// `.cursor/rules/k2so.mdc`, `.opencode/agent/k2so*.md`, `.pi/skills/k2so/`,
-/// `crates/k2so-core/...` — are LEFT ALONE (the skill is still named k2so;
-/// only the dot-dir moved). Returns true if anything changed.
+/// Make the repo-root `.gitignore` cover `.k2/` for every `.k2so/` ignore
+/// rule. ADDITIVE (belt-and-suspenders): the original `.k2so/` rule is KEPT
+/// and a `.k2/` twin is added right after it, so BOTH dot-dir names stay
+/// ignored through any transition — matching the resolver, which tolerates
+/// either `.k2/` or `.k2so/` indefinitely. Without this, the
+/// previously-ignored `.k2/inbox`/`sessions`/`logs` would flood `git
+/// status` the instant the dir is renamed.
+///
+/// SURGICAL: only entries whose path is the workspace dot-dir (`.k2so`,
+/// `.k2so/`, `.k2so/<sub>`, optionally `/`-anchored) get a twin. Refs that
+/// merely contain `k2so` — `.cursor/rules/k2so.mdc`,
+/// `.opencode/agent/k2so*.md`, `crates/k2so-core/...` — are LEFT ALONE (the
+/// skill/crate is still named k2so; only the dot-dir moved). Twins that the
+/// file already has are not duplicated. Returns true if anything was added.
 fn rewrite_gitignore_dot_dir(root: &Path) -> bool {
     let gi = root.join(".gitignore");
     let Ok(content) = fs::read_to_string(&gi) else {
         return false;
     };
-    let mut changed = false;
-    let mut out: Vec<String> = Vec::with_capacity(content.lines().count());
+    // Lines already in the file (trimmed) — so we never add a duplicate twin.
+    let existing: std::collections::HashSet<String> =
+        content.lines().map(|l| l.trim().to_string()).collect();
+    let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
     for line in content.lines() {
+        out.push(line.to_string());
         if line_is_dot_dir_rule(line) {
-            changed = true;
-            out.push(line.replacen(".k2so", ".k2", 1));
-        } else {
-            out.push(line.to_string());
+            let twin = line.replacen(".k2so", ".k2", 1);
+            let key = twin.trim().to_string();
+            if !existing.contains(&key) && added.insert(key) {
+                out.push(twin);
+            }
         }
     }
-    if !changed {
+    if added.is_empty() {
         return false;
     }
     let mut joined = out.join("\n");
@@ -317,25 +329,29 @@ node_modules/
         assert!(r.gitignore_rewritten, "gitignore should be rewritten");
 
         let after = fs::read_to_string(root.join(".gitignore")).unwrap();
-        // Dot-dir rules retargeted.
-        assert!(after.contains(".k2/inbox/"), "inbox rule retargeted");
-        assert!(after.contains(".k2/sessions/"));
-        assert!(after.contains("/.k2/logs/"), "anchored rule retargeted");
-        assert!(after.contains(".k2/.archive/"));
-        // The bare `.k2so` line becomes `.k2` (exact, on its own line).
-        assert!(after.lines().any(|l| l == ".k2"), "bare .k2so -> .k2");
-        // Skill-name / crate refs LEFT ALONE.
+        // ADDITIVE: a `.k2/` twin is added for every `.k2so/` dot-dir rule,
+        // and the original `.k2so/` rule is KEPT.
+        assert!(after.contains(".k2/inbox/"), "k2 inbox twin added");
+        assert!(after.contains(".k2so/inbox/"), "k2so inbox rule kept");
+        assert!(after.contains(".k2/sessions/") && after.contains(".k2so/sessions/"));
+        assert!(after.contains("/.k2/logs/") && after.contains("/.k2so/logs/"));
+        assert!(after.contains(".k2/.archive/") && after.contains(".k2so/.archive/"));
+        // The bare `.k2so` line is kept and a bare `.k2` twin added.
+        assert!(after.lines().any(|l| l == ".k2so"), "bare .k2so kept");
+        assert!(after.lines().any(|l| l == ".k2"), "bare .k2 twin added");
+        // Skill-name / crate refs LEFT ALONE (no twins, no edits).
         assert!(after.contains(".cursor/rules/k2so.mdc"), "skill mdc untouched");
         assert!(after.contains(".opencode/agent/k2so*.md"), "opencode untouched");
         assert!(after.contains(".pi/skills/k2so/"), "pi skill untouched");
+        assert!(!after.contains(".pi/skills/k2/"), "no spurious twin for skill ref");
         assert!(
             after.contains("crates/k2so-core/drizzle_sql/meta/"),
             "crate path untouched"
         );
-        // No stray `.k2so/` dot-dir rules remain.
+        // Running again is a no-op (twins already present).
         assert!(
-            !after.lines().any(|l| line_is_dot_dir_rule(l)),
-            "no .k2so dot-dir rules should remain"
+            !rewrite_gitignore_dot_dir(&root),
+            "idempotent — no new twins on second pass"
         );
         fs::remove_dir_all(&root).ok();
     }
