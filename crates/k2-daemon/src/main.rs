@@ -1173,6 +1173,7 @@ fn run_migrate_k2so_dot_dirs() {
 
     let mut renamed = 0usize;
     let mut symlinks = 0usize;
+    let mut temps_swept = 0usize;
     for path in &project_paths {
         let root = std::path::Path::new(path);
         // Skip the daemon's RELATIVE pseudo-projects (`_broadcast`,
@@ -1198,11 +1199,23 @@ fn run_migrate_k2so_dot_dirs() {
                 log_debug!("[daemon/dotdir] WARN: {} : {}", path, reason);
             }
         }
+        // Tempfile hygiene runs for EVERY workspace every boot (idempotent),
+        // not just freshly-renamed ones: reap atomic-write tempfiles a prior
+        // hard-kill orphaned under `.k2/`. Git-ignore state is intentionally
+        // left to the behavior-preserving twin (`rewrite_gitignore_dot_dir`) —
+        // `.k2/` is ignored only where `.k2so/` already was.
+        temps_swept +=
+            k2_core::workspace::dot_dir_migration::ensure_dot_dir_hygiene(root);
     }
     if renamed > 0 {
         log_debug!(
             "[daemon/dotdir] 0.40.4 cutover: renamed {renamed} workspace(s) \
              .k2so -> .k2 ({symlinks} symlink(s) re-pointed)"
+        );
+    }
+    if temps_swept > 0 {
+        log_debug!(
+            "[daemon/dotdir] hygiene: swept {temps_swept} orphaned tempfile(s)"
         );
     }
 }

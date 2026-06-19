@@ -1116,7 +1116,7 @@ mod tests {
         let tmp = TempDir::new("downloads");
         let dir = ensure_downloads_dir(&tmp.s()).expect("ensure downloads");
         assert!(dir.exists() && dir.is_dir());
-        assert!(dir.ends_with(".k2so/downloads"), "got: {}", dir.display());
+        assert!(dir.ends_with(".k2/downloads"), "got: {}", dir.display());
         // Idempotent — second call must not error.
         let dir2 = ensure_downloads_dir(&tmp.s()).expect("ensure downloads idempotent");
         assert_eq!(dir, dir2);

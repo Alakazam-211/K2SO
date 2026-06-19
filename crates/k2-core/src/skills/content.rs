@@ -1066,9 +1066,10 @@ pub fn compose_agent_wake_context(
             md.push_str("## Your Team\n\n");
             md.push_str("These are your agent templates. Read their `agent.md` profiles to understand their strengths before delegating:\n\n");
             for (name, their_role) in &other_agents {
+                let their_profile = agents_root.join(name).join("AGENT.md");
                 md.push_str(&format!(
-                    "- **{}** — {} (profile: `.k2so/agents/{}/agent.md`)\n",
-                    name, their_role, name
+                    "- **{}** — {} (profile: `{}`)\n",
+                    name, their_role, their_profile.to_string_lossy()
                 ));
             }
             md.push_str("\nYou can create new agents (`k2so agents create <name> --role \"...\"`) or update existing ones (`k2so agent update --name <name> --field role --value \"...\"`).\n\n");

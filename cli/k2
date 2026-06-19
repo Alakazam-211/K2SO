@@ -1743,7 +1743,7 @@ try:
         cwd = t.get('cwd', '')
         tid = t.get('terminalId', '')
         agent = agent_from_tid(tid)
-        if '.k2so/agents/manager' in cwd or '.k2so/agents/coordinator' in cwd or agent in ('manager', 'coordinator'):
+        if '.k2/agents/manager' in cwd or '.k2so/agents/manager' in cwd or '.k2/agents/coordinator' in cwd or '.k2so/agents/coordinator' in cwd or agent in ('manager', 'coordinator'):
             print(tid)
             break
 except: pass
@@ -1774,7 +1774,7 @@ try:
     for t in data:
         cwd = t.get('cwd', '')
         tid = t.get('terminalId', '')
-        if '.k2so/agents/manager' in cwd or '.k2so/agents/coordinator' in cwd or tid.startswith('agent-chat-manager') or tid.startswith('agent-chat-coordinator'):
+        if '.k2/agents/manager' in cwd or '.k2so/agents/manager' in cwd or '.k2/agents/coordinator' in cwd or '.k2so/agents/coordinator' in cwd or tid.startswith('agent-chat-manager') or tid.startswith('agent-chat-coordinator'):
             print(tid)
             break
 except: pass

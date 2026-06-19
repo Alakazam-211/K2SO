@@ -92,6 +92,55 @@ pub fn migrate_workspace_dot_dir(root: &Path) -> DotDirMigration {
     }
 }
 
+/// Per-workspace `.k2/` tempfile hygiene — run every boot for EVERY registered
+/// workspace (idempotent, no-op when clean). Reaps atomic-write tempfiles a
+/// prior hard-kill orphaned. Returns the count removed.
+///
+/// NOTE — deliberately does NOT touch git-ignore state. The cutover's ignore
+/// policy is behavior-preserving: `.k2/` is ignored ONLY where `.k2so/` was
+/// already ignored (twinned by [`rewrite_gitignore_dot_dir`]). A workspace that
+/// never ignored its dot-dir keeps showing it after the rename, exactly as
+/// before — we don't add ignores the user never had.
+pub fn ensure_dot_dir_hygiene(root: &Path) -> usize {
+    let dot = root.join(".k2");
+    if !dot.is_dir() {
+        return 0;
+    }
+    sweep_stale_tempfiles(&dot)
+}
+
+/// Reap atomic-write tempfiles orphaned under `dot_dir` by a daemon killed
+/// mid-write. The temp survives a hard kill by design (so the target is never
+/// left half-written), but nothing cleans it up afterward, so they pile up
+/// across crashes. Matches both the current `.k2-tmp.` infix and the legacy
+/// `.k2so-tmp.` one. Bounded walk — the dot-dir is small and never holds
+/// vendored trees. Returns the count removed.
+fn sweep_stale_tempfiles(dot_dir: &Path) -> usize {
+    fn is_orphan_temp(name: &str) -> bool {
+        name.contains(".k2-tmp.") || name.contains(".k2so-tmp.")
+    }
+    fn walk(dir: &Path, depth: u8, removed: &mut usize) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth > 0 {
+                    walk(&path, depth - 1, removed);
+                }
+            } else if entry.file_name().to_str().map_or(false, is_orphan_temp)
+                && fs::remove_file(&path).is_ok()
+            {
+                *removed += 1;
+            }
+        }
+    }
+    let mut removed = 0;
+    walk(dot_dir, 3, &mut removed);
+    removed
+}
+
 /// Make the repo-root `.gitignore` cover `.k2/` for every `.k2so/` ignore
 /// rule. ADDITIVE (belt-and-suspenders): the original `.k2so/` rule is KEPT
 /// and a `.k2/` twin is added right after it, so BOTH dot-dir names stay
@@ -405,6 +454,29 @@ node_modules/
             root.join("README.md")
         );
 
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn hygiene_sweeps_orphan_tempfiles_keeps_real_files() {
+        let root = tmp("sweep");
+        let dot = root.join(".k2");
+        fs::create_dir_all(dot.join("skills/qa")).unwrap();
+        // Orphaned atomic-write temps (current `.k2-tmp.` + legacy `.k2so-tmp.`).
+        fs::write(dot.join("..last-skill-regen.k2-tmp.1.2.3"), b"x").unwrap();
+        fs::write(dot.join("..regen-in-flight.k2so-tmp.4.5.6"), b"x").unwrap();
+        fs::write(dot.join("skills/qa/.SKILL.md.k2so-tmp.7.8.9"), b"x").unwrap();
+        // Real files that MUST survive the sweep.
+        fs::write(dot.join(".last-skill-regen"), b"marker").unwrap();
+        fs::write(dot.join("PROJECT.md"), b"ctx").unwrap();
+
+        let swept = ensure_dot_dir_hygiene(&root);
+        assert_eq!(swept, 3, "exactly the 3 orphan temps removed");
+        assert!(!dot.join("..last-skill-regen.k2-tmp.1.2.3").exists());
+        assert!(!dot.join("..regen-in-flight.k2so-tmp.4.5.6").exists());
+        assert!(!dot.join("skills/qa/.SKILL.md.k2so-tmp.7.8.9").exists());
+        assert!(dot.join(".last-skill-regen").exists(), "real marker kept");
+        assert!(dot.join("PROJECT.md").exists(), "real file kept");
         fs::remove_dir_all(&root).ok();
     }
 }

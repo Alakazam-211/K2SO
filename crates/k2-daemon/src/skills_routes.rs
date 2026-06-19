@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn create_and_write_opt_in_round_trip_on_tempdir() {
         // Real filesystem round-trip: create a skill, then write an
-        // opt-in skill, asserting both land on disk under .k2so/skills/.
+        // opt-in skill, asserting both land on disk under .k2/skills/.
         let tmp = std::env::temp_dir().join(format!(
             "k2so-skills-routes-{}-{}",
             std::process::id(),
@@ -260,13 +260,13 @@ mod tests {
         let body = serde_json::json!({ "project_path": pp, "name": "my-skill" }).to_string();
         let r = handle_create(body.as_bytes());
         assert_eq!(r.status, "200 OK", "create body={}", r.body);
-        assert!(tmp.join(".k2so/skills/my-skill/SKILL.md").exists());
+        assert!(tmp.join(".k2/skills/my-skill/SKILL.md").exists());
 
         let body =
             serde_json::json!({ "project_path": pp, "skill": "k2-agent" }).to_string();
         let r = handle_write_opt_in(body.as_bytes());
         assert_eq!(r.status, "200 OK", "write-opt-in body={}", r.body);
-        assert!(tmp.join(".k2so/skills/k2-agent/SKILL.md").exists());
+        assert!(tmp.join(".k2/skills/k2-agent/SKILL.md").exists());
 
         // NOTE: we deliberately do NOT exercise handle_remove here — it
         // trashes via the OS recycle bin, which triggers a macOS Finder
