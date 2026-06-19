@@ -1175,7 +1175,10 @@ fn run_migrate_k2so_dot_dirs() {
     let mut symlinks = 0usize;
     for path in &project_paths {
         let root = std::path::Path::new(path);
-        if !root.exists() {
+        // Skip the daemon's RELATIVE pseudo-projects (`_broadcast`,
+        // `_orphan`) — they're not real on-disk workspaces, and resolving a
+        // relative path against the daemon's cwd could touch an unrelated dir.
+        if !root.is_absolute() || !root.exists() {
             continue;
         }
         let outcome =

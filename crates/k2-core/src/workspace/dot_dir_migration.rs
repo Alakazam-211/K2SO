@@ -36,6 +36,11 @@ pub struct DotDirMigration {
     pub renamed: bool,
     /// How many dangling fan-out symlinks were re-pointed to `.k2/`.
     pub symlinks_repointed: usize,
+    /// `.gitignore` had `.k2so/` ignore rules rewritten to `.k2/` so git
+    /// treats the renamed tree the same way (previously-ignored subdirs
+    /// like inbox/sessions/logs stay ignored instead of flooding `git
+    /// status`, and the rename of tracked files reads as a clean diff).
+    pub gitignore_rewritten: bool,
     /// Set when nothing was done; explains why (already migrated, conflict).
     pub skipped: Option<&'static str>,
 }
@@ -78,11 +83,63 @@ pub fn migrate_workspace_dot_dir(root: &Path) -> DotDirMigration {
     }
 
     let symlinks_repointed = repoint_fanout_symlinks(root, &old, &new);
+    let gitignore_rewritten = rewrite_gitignore_dot_dir(root);
     DotDirMigration {
         renamed: true,
         symlinks_repointed,
+        gitignore_rewritten,
         skipped: None,
     }
+}
+
+/// Rewrite the repo-root `.gitignore` so `.k2so/` ignore rules follow the
+/// rename to `.k2/`. SURGICAL: only entries whose path is the workspace
+/// dot-dir (`.k2so`, `.k2so/`, `.k2so/<sub>`, optionally `/`-anchored) are
+/// touched. Skill-name references that merely contain `k2so` —
+/// `.cursor/rules/k2so.mdc`, `.opencode/agent/k2so*.md`, `.pi/skills/k2so/`,
+/// `crates/k2so-core/...` — are LEFT ALONE (the skill is still named k2so;
+/// only the dot-dir moved). Returns true if anything changed.
+fn rewrite_gitignore_dot_dir(root: &Path) -> bool {
+    let gi = root.join(".gitignore");
+    let Ok(content) = fs::read_to_string(&gi) else {
+        return false;
+    };
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::with_capacity(content.lines().count());
+    for line in content.lines() {
+        if line_is_dot_dir_rule(line) {
+            changed = true;
+            out.push(line.replacen(".k2so", ".k2", 1));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !changed {
+        return false;
+    }
+    let mut joined = out.join("\n");
+    if content.ends_with('\n') {
+        joined.push('\n');
+    }
+    if let Err(e) = crate::fs_atomic::atomic_write_str(&gi, &joined) {
+        crate::log_debug!("[dot-dir-migration] rewrite .gitignore failed: {e}");
+        return false;
+    }
+    true
+}
+
+/// True iff a `.gitignore` line's pattern is the `.k2so` workspace dot-dir
+/// (exact, or a path under it), so it should retarget to `.k2`. Tolerates a
+/// leading `/` anchor and a trailing `/`. Does NOT match `.k2so`-containing
+/// substrings that are really skill/crate names (`.../k2so.mdc`,
+/// `crates/k2so-core/...`).
+fn line_is_dot_dir_rule(line: &str) -> bool {
+    let pat = line.trim();
+    if pat.is_empty() || pat.starts_with('#') {
+        return false;
+    }
+    let pat = pat.strip_prefix('/').unwrap_or(pat);
+    pat == ".k2so" || pat == ".k2so/" || pat.starts_with(".k2so/")
 }
 
 /// Re-point every K2SO fan-out symlink whose target points into `old_dir`
@@ -230,6 +287,55 @@ mod tests {
             fs::read_to_string(root.join(".k2/keep")).unwrap(),
             "precious",
             ".k2/ untouched"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rewrites_only_dot_dir_gitignore_rules() {
+        let root = tmp("gitignore");
+        fs::create_dir_all(root.join(".k2so")).unwrap();
+        // A realistic .gitignore: dot-dir rules (must retarget) mixed with
+        // skill-name / crate refs (must be untouched).
+        let gi = "\
+# K2 workspace
+.k2so/inbox/
+.k2so/sessions/
+/.k2so/logs/
+.k2so/.archive/
+.k2so
+.cursor/rules/k2so.mdc
+.opencode/agent/k2so*.md
+.pi/skills/k2so/
+crates/k2so-core/drizzle_sql/meta/
+node_modules/
+";
+        fs::write(root.join(".gitignore"), gi).unwrap();
+
+        let r = migrate_workspace_dot_dir(&root);
+        assert!(r.renamed);
+        assert!(r.gitignore_rewritten, "gitignore should be rewritten");
+
+        let after = fs::read_to_string(root.join(".gitignore")).unwrap();
+        // Dot-dir rules retargeted.
+        assert!(after.contains(".k2/inbox/"), "inbox rule retargeted");
+        assert!(after.contains(".k2/sessions/"));
+        assert!(after.contains("/.k2/logs/"), "anchored rule retargeted");
+        assert!(after.contains(".k2/.archive/"));
+        // The bare `.k2so` line becomes `.k2` (exact, on its own line).
+        assert!(after.lines().any(|l| l == ".k2"), "bare .k2so -> .k2");
+        // Skill-name / crate refs LEFT ALONE.
+        assert!(after.contains(".cursor/rules/k2so.mdc"), "skill mdc untouched");
+        assert!(after.contains(".opencode/agent/k2so*.md"), "opencode untouched");
+        assert!(after.contains(".pi/skills/k2so/"), "pi skill untouched");
+        assert!(
+            after.contains("crates/k2so-core/drizzle_sql/meta/"),
+            "crate path untouched"
+        );
+        // No stray `.k2so/` dot-dir rules remain.
+        assert!(
+            !after.lines().any(|l| line_is_dot_dir_rule(l)),
+            "no .k2so dot-dir rules should remain"
         );
         fs::remove_dir_all(&root).ok();
     }
