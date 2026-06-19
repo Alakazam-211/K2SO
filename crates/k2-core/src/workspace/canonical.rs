@@ -286,7 +286,14 @@ pub fn run_canonical_setup(
     }
 
     let timestamp = iso_timestamp();
-    let backups_rel_dir = format!(".k2so/backups/{}", timestamp);
+    let backups_rel_dir = format!(
+        "{}/backups/{}",
+        crate::workspace_dot_dir(project_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".k2".to_string()),
+        timestamp
+    );
     let backups_dir = root.join(&backups_rel_dir);
 
     let mut entries: Vec<ManifestEntry> = Vec::new();
@@ -385,7 +392,14 @@ pub fn persist_agent_md(
     }
 
     let timestamp = iso_timestamp();
-    let backups_rel_dir = format!(".k2so/backups/{}", timestamp);
+    let backups_rel_dir = format!(
+        "{}/backups/{}",
+        crate::workspace_dot_dir(project_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".k2".to_string()),
+        timestamp
+    );
     let prior = read_prior(&agent_md);
 
     let (action, backup_rel, pre_hash) = match &prior {

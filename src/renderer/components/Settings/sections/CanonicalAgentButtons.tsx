@@ -31,7 +31,7 @@ export function RoleSkillButton({
   useEffect(() => {
     let cancelled = false
     daemonCliGet<{ content: string }>('fs/read-file', {
-      path: `${projectPath}/.k2so/skills/${role}/SKILL.md`,
+      path: `${projectPath}/.k2/skills/${role}/SKILL.md`,
     })
       .then(() => { if (!cancelled) setSkillPresent(true) })
       .catch(() => { if (!cancelled) setSkillPresent(false) })
@@ -44,7 +44,7 @@ export function RoleSkillButton({
         <span className="text-xs text-[var(--color-text-secondary)]">{label} skill</span>
         <p className="text-[9px] text-[var(--color-text-muted)] mt-0.5">
           Weaves the {label} role guidance into{' '}
-          <span className="font-mono">.k2so/agent/AGENT.md</span> organically — your existing
+          <span className="font-mono">.k2/agent/AGENT.md</span> organically — your existing
           context is preserved, never overwritten with a templated block.
         </p>
       </div>
@@ -115,7 +115,7 @@ export function CanonicalAgentButton({
         </button>
       </div>
       {/* Permission checkbox lives WITH the button (PRD §4). Reads/writes the
-          same `.k2so/.harness-fanout-enabled` marker the Canonical Agent Flow
+          same `.k2/.harness-fanout-enabled` marker the Canonical Agent Flow
           settings page does, so the two stay in sync. */}
       <label className="flex items-start gap-2 cursor-pointer no-drag select-none">
         <input
@@ -138,7 +138,7 @@ export function CanonicalAgentButton({
         <span className="text-[9px] text-[var(--color-text-muted)] leading-snug">
           Allow programmatic harness fan-out (symlinks). When on, K2 keeps the harness files
           (<span className="font-mono">CLAUDE.md</span>, <span className="font-mono">GEMINI.md</span>, …)
-          symlinked to <span className="font-mono">.k2so/agent/AGENT.md</span> automatically. Off by default — the
+          symlinked to <span className="font-mono">.k2/agent/AGENT.md</span> automatically. Off by default — the
           skill route (button above) is the safe, copy-based alternative.
         </span>
       </label>
