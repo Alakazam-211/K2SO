@@ -48,11 +48,11 @@ export function AgentContextDiagram(): React.JSX.Element {
               <div className="text-[12px] font-semibold text-sky-200">AGENT.md</div>
               <div className="text-[8px] uppercase tracking-wider px-1.5 py-0.5 bg-sky-400/20 text-sky-100 rounded-sm">canonical</div>
             </div>
-            <div className="text-[9px] font-mono text-sky-200/60 mt-1 truncate">.k2so/agent/AGENT.md</div>
+            <div className="text-[9px] font-mono text-sky-200/60 mt-1 truncate">.k2/agent/AGENT.md</div>
           </div>
           <div className="border border-sky-400/30 bg-sky-400/5 px-2 py-1.5">
             <div className="text-[11px] font-medium text-sky-200/90">PROJECT.md</div>
-            <div className="text-[9px] font-mono text-sky-200/50 mt-0.5 truncate">.k2so/PROJECT.md</div>
+            <div className="text-[9px] font-mono text-sky-200/50 mt-0.5 truncate">.k2/PROJECT.md</div>
           </div>
           <div className="text-[9px] text-[var(--color-text-muted)] italic mt-1 leading-snug">
             The source of truth. The harness files are derived FROM here — never the reverse.

@@ -3016,7 +3016,7 @@ try:
         sys.stderr.write('Error: %s\n' % d['error']); sys.exit(1)
     nm = d.get('name','?')
     print(f'Created skill: {nm}')
-    print(f'  Edit: .k2so/skills/{nm}/SKILL.md')
+    print(f'  Edit: .k2/skills/{nm}/SKILL.md')
 except Exception as e:
     sys.stderr.write('Error: %s\n' % e); sys.exit(1)
 " 2>/dev/null
@@ -3181,7 +3181,7 @@ cmd_workspace_preview() {
         fi
     done
     echo ""
-    echo "Nothing is destroyed — archives land in .k2so/migration/ and can be restored via"
+    echo "Nothing is destroyed — archives land in .k2/migration/ and can be restored via"
     echo "  k2 workspace remove $target_path --mode restore-original"
 }
 
@@ -3200,8 +3200,8 @@ cmd_workspace_remove() {
         echo "" >&2
         echo "  --mode keep-current      Freeze the current SKILL.md body into each harness file so" >&2
         echo "                           every CLI LLM keeps working after K2SO disconnects." >&2
-        echo "  --mode restore-original  Restore pre-K2SO files from .k2so/migration/; files K2SO" >&2
-        echo "                           created fresh are removed. .k2so/ stays intact for reconnect." >&2
+        echo "  --mode restore-original  Restore pre-K2SO files from .k2/migration/; files K2SO" >&2
+        echo "                           created fresh are removed. .k2/ stays intact for reconnect." >&2
         echo "  (no mode)                DB-only deregister; filesystem untouched (symlinks remain)." >&2
         exit 1
     fi
@@ -4186,7 +4186,7 @@ RECEIVING FROM OTHER WORKSPACES
 
 LEGACY ITEMS
   Pre-Phase-2.1 work items at .k2so/work/{inbox,active,done}/ have
-  been migrated to .k2so/inbox/{,active,done}/. If migration didn't
+  been migrated to .k2/inbox/{,active,done}/. If migration didn't
   run yet, trigger it manually: `k2 inbox` will reveal nothing
   until the daemon has converted the layout.
 EOF
@@ -4246,7 +4246,7 @@ SKILLS vs AGENT
   (Claude Code's sub-agent spawning, Cursor's worktree management).
   K2SO no longer provides a `delegate` verb — see `k2 help-deprecated`.
 
-  Skills live at `.k2so/skills/<name>/SKILL.md` (consolidated home as of
+  Skills live at `.k2/skills/<name>/SKILL.md` (consolidated home as of
   Phase 2.5b). The legacy `.k2so/agents/` and `.k2so/agent-templates/`
   folders are migrated into here on first daemon boot per upgraded
   workspace. Originals go to the macOS Recycle Bin (recoverable).
