@@ -3,6 +3,10 @@
 User-facing highlights of recent updates. See `release-notes-X.Y.Z.md`
 files in the repo root for the full developer-facing changelog.
 
+## 0.40.5 — Menu bar icon refresh
+
+- The macOS menu bar icon now shows **K2** — it previously still read **K2SO**.
+
 ## 0.40.4 — The `.k2/` workspace rename + access fixes
 
 - **Your workspace's `.k2so/` folder is now `.k2/`.** The K2 rebrand
